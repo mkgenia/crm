@@ -15,7 +15,7 @@ export async function getCaptacionByTelefono(telefono: string) {
     .eq("activo", true)
     .limit(1)
     .maybeSingle()
-  return data as ({ id: number; nombre: string | null; calle: string | null; barrio: string | null; precio: number | null; metros: number | null; habitaciones: number | null; imagen_url: string | null } | null)
+  return data as ({ id: number; nombre: string | null; telefono: string | null; calle: string | null; barrio: string | null; precio: number | null; metros: number | null; habitaciones: number | null; imagen_url: string | null; url: string | null } | null)
 }
 
 export async function getCaptaciones(filtro?: string, search?: string, soloAgenteId?: string, isAdmin = false) {
