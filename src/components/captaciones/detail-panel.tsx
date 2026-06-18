@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react"
 import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone } from "lucide-react"
 import { AgendaPanel } from "./agenda-panel"
-import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, generarMensajeIA, marcarRespondido } from "@/lib/actions/captaciones"
+import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, marcarRespondido } from "@/lib/actions/captaciones"
 import { getMensajesCaptacion, type Mensaje } from "@/lib/actions/mensajes"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ESTADO_COLORS, ESTADO_LABELS, AGENDA_COLORS, ESTADOS_CAPTACION, WA_CLASIFICACIONES, type EstadoAgenda } from "@/types/captaciones"
@@ -166,6 +166,10 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   const tienePhone = hasPhone(captacion.telefono)
   const estadoWA = captacion.estado_whatsapp as string | null
 
+  // Estado para captaciones sin teléfono
+  const [telefonoManual, setTelefonoManual] = useState("")
+  const [faseNoTel, setFaseNoTel] = useState<"input" | "mensaje">("input")
+
   async function cargarMensajes() {
     if (!tienePhone) return
     setCargando(true)
@@ -177,7 +181,6 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
     }, 50)
   }
 
-  // Siempre intentar cargar mensajes si hay teléfono — puede haber conversación del dashboard anterior
   useEffect(() => { if (tienePhone) cargarMensajes() }, [captacion.id])
 
   async function handleGenerar() {
@@ -185,6 +188,14 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
     const msg = await generarMensajeIA(captacion.id)
     setMensaje(msg)
     setExpandido(true)
+    setGenerando(false)
+  }
+
+  async function handleGenerarNoTel() {
+    setGenerando(true)
+    const msg = await generarMensajeIA(captacion.id)
+    setMensaje(msg)
+    setFaseNoTel("mensaje")
     setGenerando(false)
   }
 
@@ -197,6 +208,16 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
     toast.success("Mensaje enviado por WhatsApp")
     onUpdate()
     cargarMensajes()
+  }
+
+  async function handleEnviarNoTel() {
+    if (!mensaje.trim() || !telefonoManual.trim()) return
+    setEnviando(true)
+    const res = await contactarCaptacionConTelefono(captacion.id, telefonoManual, mensaje)
+    setEnviando(false)
+    if (res.error) { toast.error(res.error); return }
+    toast.success("Mensaje enviado por WhatsApp")
+    onUpdate()
   }
 
   const clasificacion = estadoWA ? WA_CLASIFICACIONES[estadoWA] : null
@@ -216,8 +237,8 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
       <div className="flex items-center gap-3 px-4 py-3 bg-muted/30">
         <MessageCircle className="h-4 w-4 text-emerald-500 shrink-0" />
         <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground flex-1">WhatsApp</span>
-        {!tienePhone && (
-          <span className="flex items-center gap-1 text-xs text-red-500 font-medium">
+        {!tienePhone && faseNoTel === "input" && (
+          <span className="flex items-center gap-1 text-xs text-amber-500 font-medium">
             <PhoneOff className="h-3 w-3" /> Sin teléfono
           </span>
         )}
@@ -243,6 +264,64 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
           </button>
         )}
       </div>
+
+      {!tienePhone && (
+        <div className="p-4 space-y-3">
+          {faseNoTel === "input" && (
+            <>
+              <p className="text-xs text-muted-foreground">Introduce el teléfono del propietario para enviarle un mensaje:</p>
+              <div className="flex gap-2">
+                <input
+                  type="tel"
+                  placeholder="6XX XXX XXX"
+                  value={telefonoManual}
+                  onChange={(e) => setTelefonoManual(e.target.value)}
+                  className="flex-1 h-8 px-3 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                <button
+                  onClick={handleGenerarNoTel}
+                  disabled={generando || telefonoManual.replace(/[^\d]/g, "").length < 9}
+                  className="flex items-center gap-1.5 h-8 px-3 rounded-md bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium disabled:opacity-40 transition-colors"
+                >
+                  {generando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  Generar mensaje
+                </button>
+              </div>
+            </>
+          )}
+          {faseNoTel === "mensaje" && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">Para: <span className="text-foreground font-medium">{telefonoManual}</span></p>
+                <button onClick={() => setFaseNoTel("input")} className="text-xs text-muted-foreground hover:text-foreground">Cambiar</button>
+              </div>
+              <textarea
+                rows={7}
+                value={mensaje}
+                onChange={(e) => setMensaje(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleGenerarNoTel}
+                  disabled={generando}
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded border border-border"
+                >
+                  <Sparkles className="h-3 w-3" /> Regenerar
+                </button>
+                <button
+                  onClick={handleEnviarNoTel}
+                  disabled={enviando || !mensaje.trim()}
+                  className="flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium disabled:opacity-40 transition-colors"
+                >
+                  {enviando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                  Enviar por WhatsApp
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {tienePhone && (
         <div className="space-y-0">

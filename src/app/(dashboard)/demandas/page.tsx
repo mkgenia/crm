@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react"
 import { createClient } from "@/lib/supabase/client"
-import { actualizarPropiedad, desactivarPropiedad, eliminarDemanda } from "@/lib/actions/demandas"
+import { actualizarPropiedad, desactivarPropiedad, eliminarDemanda, eliminarPropiedad } from "@/lib/actions/demandas"
 import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail } from "lucide-react"
 import { toast } from "sonner"
 import { ESTADOS_DEMANDA, ESTADO_DEMANDA_CFG, FUENTE_CFG } from "@/types/demandas"
@@ -197,6 +197,17 @@ export default function DemandasPage() {
     setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
     setSelected(null)
     toast.success("Propiedad desactivada")
+  }
+
+  async function handleEliminarPropiedad() {
+    if (!selected) return
+    if (!window.confirm(`¿Eliminar permanentemente la propiedad Ref. ${selected.ref} y todas sus demandas? Esta acción no se puede deshacer.`)) return
+    const res = await eliminarPropiedad(selected.id)
+    if (res.error) { toast.error(res.error); return }
+    setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
+    setSelected(null)
+    setDemandas([])
+    toast.success("Propiedad eliminada")
   }
 
   async function handleEliminarDemanda(demandaId: string) {
@@ -429,21 +440,25 @@ export default function DemandasPage() {
                 </div>
               )}
               {!editando && (
-                <button
-                  onClick={handleDesactivar}
-                  className="text-[10px] text-muted-foreground/50 hover:text-red-400 transition-colors mt-1"
-                >
-                  Desactivar propiedad
-                </button>
+                <div className="flex items-center gap-2 mt-2">
+                  <button
+                    onClick={handleDesactivar}
+                    className="flex-1 h-7 rounded border border-border text-xs text-muted-foreground hover:border-amber-400/50 hover:text-amber-400 transition-colors"
+                  >
+                    Desactivar
+                  </button>
+                  <button
+                    onClick={handleEliminarPropiedad}
+                    className="flex-1 h-7 rounded border border-red-500/30 text-xs text-red-400 hover:bg-red-500/10 hover:border-red-500/60 transition-colors"
+                  >
+                    Eliminar propiedad
+                  </button>
+                </div>
               )}
             </div>
 
             {/* Demands list */}
-            <div className="p-5 space-y-3">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Demandas ({demandas.length})
-              </p>
-
+            <div className="p-5 space-y-4">
               {loadingDemandas ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -451,7 +466,21 @@ export default function DemandasPage() {
               ) : demandas.length === 0 ? (
                 <p className="text-xs text-muted-foreground/60 italic">Sin demandas para esta propiedad</p>
               ) : (
-                demandas.map((d) => (
+                (() => {
+                  const aprobadas  = demandas.filter((d) => d.estado === "Cualificado")
+                  const descartadas = demandas.filter((d) => d.estado === "Descartado")
+                  const resto       = demandas.filter((d) => d.estado !== "Cualificado" && d.estado !== "Descartado")
+                  const grupos: { label: string; color: string; items: Demanda[] }[] = [
+                    { label: "Aprobadas",   color: "text-emerald-400", items: aprobadas },
+                    { label: "En proceso",  color: "text-muted-foreground", items: resto },
+                    { label: "Descartadas", color: "text-red-400",     items: descartadas },
+                  ].filter((g) => g.items.length > 0)
+                  return grupos.map((grupo) => (
+                    <div key={grupo.label} className="space-y-2">
+                      <p className={`text-[10px] font-semibold uppercase tracking-wider ${grupo.color}`}>
+                        {grupo.label} ({grupo.items.length})
+                      </p>
+                      {grupo.items.map((d) => (
                   <div key={d.id} className="rounded-lg border border-border bg-background p-3 space-y-2.5">
                     {/* Cabecera demanda */}
                     <div className="flex items-start justify-between gap-2">
@@ -572,7 +601,10 @@ export default function DemandasPage() {
                       ))}
                     </div>
                   </div>
-                ))
+                      ))}
+                    </div>
+                  ))
+                })()
               )}
             </div>
           </div>

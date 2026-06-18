@@ -166,20 +166,31 @@ export async function generarMensajeIA(captacionId: number): Promise<string> {
 
   if (!cap) return ""
 
-  const n8nUrl = process.env.NEXT_PUBLIC_N8N_WEBHOOK_IA_LEAD_GEN
-  if (n8nUrl && !n8nUrl.includes("tu-n8n")) {
-    try {
-      const res = await fetch(n8nUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "generate_message", captacion_id: captacionId }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        if (data.message) return data.message
-      }
-    } catch {}
+  // Obtener nombre del agente logueado
+  const { data: { user } } = await supabase.auth.getUser()
+  let agenteName = "Josep"
+  if (user) {
+    const { data: perfil } = await supabase.from("perfiles").select("nombre, rol").eq("id", user.id).single()
+    if (perfil?.rol === "Admin") agenteName = "Josep"
+    else if (perfil?.nombre) agenteName = perfil.nombre
   }
+
+  const n8nUrl = "https://test-n8n.pzkz6e.easypanel.host/webhook/ia-lead-gen"
+  try {
+    const res = await fetch(n8nUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ captacion_id: captacionId, agent: agenteName }),
+    })
+    if (res.ok) {
+      const raw = await res.text()
+      try {
+        const data = JSON.parse(raw)
+        const msg = data.message ?? data.data?.message ?? (typeof data.data === "string" ? JSON.parse(data.data)?.message : null)
+        if (msg) return msg
+      } catch {}
+    }
+  } catch {}
 
   return generateDefaultMessage(cap)
 }
@@ -260,6 +271,44 @@ export async function contactarCaptacion(captacionId: number, mensaje: string) {
 
   revalidatePath("/captaciones")
   return { success: true, jid }
+}
+
+export async function contactarCaptacionConTelefono(captacionId: number, telefono: string, mensaje: string) {
+  const supabase = await createAdminClient()
+
+  const raw = telefono.replace(/[^\d]/g, "")
+  const jid = raw.startsWith("34") ? raw : "34" + raw
+
+  const EVO_URL = "https://test-evolution-api.pzkz6e.easypanel.host"
+  const EVO_KEY = "CB475A12852B-4DF3-86BA-4B8B379C7064"
+  const EVO_INSTANCE = "demo"
+
+  const res = await fetch(`${EVO_URL}/message/sendText/${EVO_INSTANCE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: EVO_KEY },
+    body: JSON.stringify({ number: jid, text: mensaje }),
+  })
+
+  if (!res.ok) {
+    const err = await res.text()
+    return { error: `Evolution API: ${err}` }
+  }
+
+  // Guardar teléfono + actualizar estados
+  await supabase
+    .from("captaciones")
+    .update({ telefono, estado_whatsapp: "Enviado", estado_crm: "Contactado" })
+    .eq("id", captacionId)
+
+  await supabase.from("historial_cambios").insert({
+    captacion_id: captacionId,
+    campo: "estado_whatsapp",
+    valor_anterior: null,
+    valor_nuevo: "Enviado",
+  })
+
+  revalidatePath("/captaciones")
+  return { success: true }
 }
 
 export async function marcarRespondido(captacionId: number) {

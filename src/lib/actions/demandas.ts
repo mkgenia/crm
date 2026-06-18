@@ -57,3 +57,14 @@ export async function desactivarPropiedad(id: string) {
   revalidatePath("/demandas")
   return { success: true }
 }
+
+export async function eliminarPropiedad(id: string) {
+  const supabase = await createAdminClient()
+  // Elimina primero las demandas asociadas (FK constraint)
+  const { error: errDemandas } = await supabase.from("demandas").delete().eq("propiedad_id", id)
+  if (errDemandas) return { error: errDemandas.message }
+  const { error } = await supabase.from("propiedades_demanda").delete().eq("id", id)
+  if (error) return { error: error.message }
+  revalidatePath("/demandas")
+  return { success: true }
+}
