@@ -11,7 +11,7 @@ export async function getLeadByPhone(phone: string) {
   const { data } = await supabase
     .from("leads")
     .select("id, nombre, apellidos, telefono, email, estado, notas, fuente, fecha_creacion, captacion_id")
-    .or(`telefono.ilike.%${local}`)
+    .ilike("telefono", `%${local}`)
     .maybeSingle()
   return data ?? null
 }

@@ -1,7 +1,5 @@
 "use server"
 
-import { createAdminClient } from "@/lib/supabase/server"
-
 const EVO_URL = "https://test-evolution-api.pzkz6e.easypanel.host"
 
 const INSTANCE_CONFIG: Record<string, { key: string; label: string }> = {
@@ -69,19 +67,22 @@ export async function getConversaciones(instance: string = "demo", filtroTelefon
 
   const chats: Chat[] = raw
     .filter((c) => c.remoteJid?.endsWith("@s.whatsapp.net"))
-    .map((c) => ({
-      remoteJid: c.remoteJid,
-      name: c.name ?? c.pushName ?? null,
-      lastMessage: c.lastMessage?.message?.conversation ?? c.lastMessage?.message?.extendedTextMessage?.text ?? null,
-      lastMessageTime: c.lastMessage?.messageTimestamp ?? null,
-      unreadCount: c.unreadCount ?? 0,
-      profilePicUrl: c.profilePicUrl ?? null,
-    }))
+    .map((c) => {
+      const sentTs: number = c.lastMessage?.messageTimestamp ?? 0
+      const updatedTs: number = c.updatedAt ? Math.floor(new Date(c.updatedAt).getTime() / 1000) : 0
+      return {
+        remoteJid: c.remoteJid,
+        name: c.name ?? c.pushName ?? jidToPhone(c.remoteJid),
+        lastMessage: c.lastMessage?.message?.conversation ?? c.lastMessage?.message?.extendedTextMessage?.text ?? null,
+        lastMessageTime: Math.max(sentTs, updatedTs) || null,
+        unreadCount: c.unreadCount ?? 0,
+        profilePicUrl: c.profilePicUrl ?? null,
+      }
+    })
 
-  let filtered = chats
   if (filtroTelefonos?.length) {
     const normalized = filtroTelefonos.map(normalizePhone)
-    filtered = chats.filter((c) =>
+    return chats.filter((c) =>
       normalized.some((t) => {
         const p = jidToPhone(c.remoteJid)
         return p.endsWith(t) || t.endsWith(p) || phoneLocal(p) === phoneLocal(t)
@@ -89,45 +90,7 @@ export async function getConversaciones(instance: string = "demo", filtroTelefon
     )
   }
 
-  return enrichWithNames(filtered)
-}
-
-function looksLikePhone(s: string | null): boolean {
-  if (!s) return true
-  return /^[\d\s+\-().]+$/.test(s.trim())
-}
-
-async function enrichWithNames(chats: Chat[]): Promise<Chat[]> {
-  const needsName = chats.filter((c) => looksLikePhone(c.name))
-  if (!needsName.length) return chats
-
-  // Recogemos los últimos 9 dígitos de cada teléfono para hacer el matching
-  const locals = needsName.map((c) => phoneLocal(jidToPhone(c.remoteJid)))
-
-  const supabase = await createAdminClient()
-  const [leadsRes, captRes] = await Promise.all([
-    supabase.from("leads").select("telefono, nombre"),
-    supabase.from("captaciones").select("telefono, nombre"),
-  ])
-
-  // Mapa local9digits → nombre
-  const nameMap = new Map<string, string>()
-  for (const row of leadsRes.data ?? []) {
-    if (row.telefono && row.nombre) {
-      nameMap.set(phoneLocal(normalizePhone(row.telefono)), row.nombre)
-    }
-  }
-  for (const row of captRes.data ?? []) {
-    const local = phoneLocal(normalizePhone(row.telefono ?? ""))
-    if (local && row.nombre && !nameMap.has(local)) nameMap.set(local, row.nombre)
-  }
-
-  return chats.map((c) => {
-    if (!looksLikePhone(c.name)) return c
-    const local = phoneLocal(jidToPhone(c.remoteJid))
-    const name = nameMap.get(local) ?? c.name
-    return { ...c, name }
-  })
+  return chats
 }
 
 function parseMensajes(records: any[], fallbackJid: string): Mensaje[] {
