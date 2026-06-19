@@ -454,6 +454,16 @@ export async function eliminarDefinitivamente(ids: number[]) {
   return { success: true }
 }
 
+// Mapa estado_crm captación → estado lead
+const CRM_TO_LEAD: Record<string, string> = {
+  Contactado:  "Contactado",
+  Interesado:  "Interesado",
+  Propuesta:   "Interesado",
+  Negociacion: "Interesado",
+  Ganado:      "Ganado",
+  Perdido:     "Perdido",
+}
+
 export async function actualizarEstadoCaptacion(captacionId: number, estadoCrm: string) {
   const supabase = await createAdminClient()
 
@@ -468,9 +478,7 @@ export async function actualizarEstadoCaptacion(captacionId: number, estadoCrm: 
     .update({ estado_crm: estadoCrm })
     .eq("id", captacionId)
 
-  if (error) {
-    return { error: error.message }
-  }
+  if (error) return { error: error.message }
 
   if (actual?.estado_crm !== estadoCrm) {
     await supabase.from("historial_cambios").insert({
@@ -479,6 +487,15 @@ export async function actualizarEstadoCaptacion(captacionId: number, estadoCrm: 
       valor_anterior: actual?.estado_crm ?? null,
       valor_nuevo: estadoCrm,
     })
+
+    // Sincronizar lead vinculado
+    const leadEstado = CRM_TO_LEAD[estadoCrm]
+    if (leadEstado) {
+      await supabase
+        .from("leads")
+        .update({ estado: leadEstado })
+        .eq("captacion_id", captacionId)
+    }
   }
 
   revalidatePath("/captaciones")

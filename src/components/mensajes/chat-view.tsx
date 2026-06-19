@@ -2,9 +2,11 @@
 
 import { useState, useEffect, useRef, useTransition } from "react"
 import { getMensajes, enviarMensaje, type Chat, type Mensaje } from "@/lib/actions/mensajes"
+import { getLeadByPhone } from "@/lib/actions/leads"
 import { Send, Loader2, Phone, RefreshCw, ExternalLink, Copy } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { LeadPanel } from "./lead-panel"
 
 interface Captacion {
   id: number
@@ -89,19 +91,21 @@ interface Props {
   chat: Chat
   captacion?: Captacion | null
   onVerCaptacion?: () => void
+  instance?: string
 }
 
-export function ChatView({ chat, captacion, onVerCaptacion }: Props) {
+export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }: Props) {
   const [mensajes, setMensajes] = useState<Mensaje[]>([])
   const [loadingMsgs, setLoadingMsgs] = useState(false)
   const [texto, setTexto] = useState("")
   const [sending, startSending] = useTransition()
+  const [lead, setLead] = useState<Awaited<ReturnType<typeof getLeadByPhone>>>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   async function cargarMensajes() {
     setLoadingMsgs(true)
     try {
-      const data = await getMensajes(chat.remoteJid)
+      const data = await getMensajes(chat.remoteJid, instance)
       setMensajes(data)
     } catch {
       toast.error("Error al cargar mensajes")
@@ -112,6 +116,8 @@ export function ChatView({ chat, captacion, onVerCaptacion }: Props) {
 
   useEffect(() => {
     cargarMensajes()
+    const phone = chat.remoteJid.split("@")[0]
+    getLeadByPhone(phone).then(setLead).catch(() => setLead(null))
   }, [chat.remoteJid])
 
   useEffect(() => {
@@ -134,7 +140,7 @@ export function ChatView({ chat, captacion, onVerCaptacion }: Props) {
         mediaType: null,
       }
       setMensajes((prev) => [...prev, optimistic])
-      const res = await enviarMensaje(chat.remoteJid, msg)
+      const res = await enviarMensaje(chat.remoteJid, msg, instance)
       if (res.error) {
         toast.error("Error al enviar mensaje")
         setMensajes((prev) => prev.filter((m) => m.id !== optimistic.id))
@@ -208,6 +214,14 @@ export function ChatView({ chat, captacion, onVerCaptacion }: Props) {
           </div>
         </div>
       )}
+
+      {/* Lead panel */}
+      <LeadPanel
+        lead={lead as any}
+        chatName={chat.name}
+        phone={chat.remoteJid.split("@")[0]}
+        onLeadCreated={(l) => setLead(l as any)}
+      />
 
       {/* Mensajes */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">

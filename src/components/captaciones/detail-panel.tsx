@@ -1,9 +1,10 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone } from "lucide-react"
+import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone, UserPlus } from "lucide-react"
 import { AgendaPanel } from "./agenda-panel"
 import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, marcarRespondido } from "@/lib/actions/captaciones"
+import { crearLeadDesdeCaptacion } from "@/lib/actions/leads"
 import { getMensajesCaptacion, type Mensaje } from "@/lib/actions/mensajes"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ESTADO_COLORS, ESTADO_LABELS, AGENDA_COLORS, ESTADOS_CAPTACION, WA_CLASIFICACIONES, type EstadoAgenda } from "@/types/captaciones"
@@ -429,6 +430,8 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
   const [historial, setHistorial] = useState<Awaited<ReturnType<typeof getHistorial>>>([])
   const [agentes, setAgentes] = useState<Awaited<ReturnType<typeof getAgentes>>>([])
   const [loading, setLoading] = useState(false)
+  const [creandoLead, setCreandoLead] = useState(false)
+  const [leadCreado, setLeadCreado] = useState(false)
 
   async function load() {
     if (!captacionId) return
@@ -450,8 +453,18 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
   }
 
   useEffect(() => {
-    if (captacionId) { setTab("agenda"); load() }
+    if (captacionId) { setTab("agenda"); load(); setLeadCreado(false) }
   }, [captacionId])
+
+  async function handleCrearLead() {
+    if (!data) return
+    setCreandoLead(true)
+    const res = await crearLeadDesdeCaptacion(data.id)
+    setCreandoLead(false)
+    if (res.error) { toast.error(res.error); return }
+    toast.success("Lead creado correctamente")
+    setLeadCreado(true)
+  }
 
   const open = !!captacionId
 
@@ -658,11 +671,28 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                   {(data.nombre || data.telefono) && (
                     <div className="space-y-2">
                       <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Propietario</p>
-                      <div className="rounded-lg border border-border bg-card p-4 space-y-1">
+                      <div className="rounded-lg border border-border bg-card p-4 space-y-2">
                         {data.nombre && <p className="text-sm font-medium text-foreground">{data.nombre}</p>}
                         {data.telefono && (
                           <p className="text-sm text-muted-foreground">{data.telefono}</p>
                         )}
+                        <button
+                          onClick={handleCrearLead}
+                          disabled={creandoLead || leadCreado}
+                          className={cn(
+                            "mt-1 w-full flex items-center justify-center gap-2 h-8 rounded-md border text-xs font-medium transition-colors",
+                            leadCreado
+                              ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10 cursor-default"
+                              : "border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:border-violet-500/60 disabled:opacity-40"
+                          )}
+                        >
+                          {creandoLead
+                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Creando lead…</>
+                            : leadCreado
+                            ? <><Check className="h-3.5 w-3.5" /> Lead creado</>
+                            : <><UserPlus className="h-3.5 w-3.5" /> Crear lead</>
+                          }
+                        </button>
                       </div>
                     </div>
                   )}

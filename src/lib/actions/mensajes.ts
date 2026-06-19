@@ -2,16 +2,25 @@
 
 import { createAdminClient } from "@/lib/supabase/server"
 
-function evoConfig() {
-  const url = process.env.EVO_API_URL
-  const key = process.env.EVO_API_KEY
-  const instance = process.env.EVO_INSTANCE
-  if (!url || !key || !instance) throw new Error("Evolution API no configurada (EVO_API_URL, EVO_API_KEY, EVO_INSTANCE)")
-  return { url, key, instance }
+const EVO_URL = "https://test-evolution-api.pzkz6e.easypanel.host"
+
+const INSTANCE_CONFIG: Record<string, { key: string; label: string }> = {
+  demo: { key: "CB475A12852B-4DF3-86BA-4B8B379C7064", label: "Captaciones" },
+  Demandas: { key: "39E7987E01C4-4117-94EF-9FBE92EDECF1", label: "Demandas" },
 }
 
-function evoHeaders(key: string) {
+
+function evoHeaders(instance: string) {
+  const key = INSTANCE_CONFIG[instance]?.key ?? process.env.EVO_API_KEY ?? ""
   return { "Content-Type": "application/json", apikey: key }
+}
+
+// Para enviar mensajes y leer chats individuales sigue usando la instancia demo (captaciones)
+function evoConfig() {
+  const url = EVO_URL
+  const key = INSTANCE_CONFIG.demo.key
+  const instance = "demo"
+  return { url, key, instance }
 }
 
 export interface Chat {
@@ -42,15 +51,19 @@ function jidToPhone(jid: string) {
   return jid.split("@")[0]
 }
 
-export async function getConversaciones(filtroTelefonos?: string[]): Promise<Chat[]> {
-  const { url, key, instance } = evoConfig()
-  const res = await fetch(`${url}/chat/findChats/${instance}`, {
+// Extrae los últimos 9 dígitos (número local sin prefijo país)
+function phoneLocal(phone: string) {
+  return phone.slice(-9)
+}
+
+export async function getConversaciones(instance: string = "demo", filtroTelefonos?: string[]): Promise<Chat[]> {
+  const res = await fetch(`${EVO_URL}/chat/findChats/${instance}`, {
     method: "POST",
-    headers: evoHeaders(key),
+    headers: evoHeaders(instance),
     body: JSON.stringify({}),
     cache: "no-store",
   })
-  if (!res.ok) return []
+  if (!res.ok) throw new Error(`Evolution API error ${res.status}`)
 
   const raw: any[] = await res.json()
 
@@ -65,18 +78,61 @@ export async function getConversaciones(filtroTelefonos?: string[]): Promise<Cha
       profilePicUrl: c.profilePicUrl ?? null,
     }))
 
+  let filtered = chats
   if (filtroTelefonos?.length) {
     const normalized = filtroTelefonos.map(normalizePhone)
-    return chats.filter((c) => normalized.some((t) => jidToPhone(c.remoteJid).endsWith(t) || t.endsWith(jidToPhone(c.remoteJid))))
+    filtered = chats.filter((c) =>
+      normalized.some((t) => {
+        const p = jidToPhone(c.remoteJid)
+        return p.endsWith(t) || t.endsWith(p) || phoneLocal(p) === phoneLocal(t)
+      })
+    )
   }
 
-  return chats
+  return enrichWithNames(filtered)
+}
+
+function looksLikePhone(s: string | null): boolean {
+  if (!s) return true
+  return /^[\d\s+\-().]+$/.test(s.trim())
+}
+
+async function enrichWithNames(chats: Chat[]): Promise<Chat[]> {
+  const needsName = chats.filter((c) => looksLikePhone(c.name))
+  if (!needsName.length) return chats
+
+  // Recogemos los últimos 9 dígitos de cada teléfono para hacer el matching
+  const locals = needsName.map((c) => phoneLocal(jidToPhone(c.remoteJid)))
+
+  const supabase = await createAdminClient()
+  const [leadsRes, captRes] = await Promise.all([
+    supabase.from("leads").select("telefono, nombre"),
+    supabase.from("captaciones").select("telefono, nombre"),
+  ])
+
+  // Mapa local9digits → nombre
+  const nameMap = new Map<string, string>()
+  for (const row of leadsRes.data ?? []) {
+    if (row.telefono && row.nombre) {
+      nameMap.set(phoneLocal(normalizePhone(row.telefono)), row.nombre)
+    }
+  }
+  for (const row of captRes.data ?? []) {
+    const local = phoneLocal(normalizePhone(row.telefono ?? ""))
+    if (local && row.nombre && !nameMap.has(local)) nameMap.set(local, row.nombre)
+  }
+
+  return chats.map((c) => {
+    if (!looksLikePhone(c.name)) return c
+    const local = phoneLocal(jidToPhone(c.remoteJid))
+    const name = nameMap.get(local) ?? c.name
+    return { ...c, name }
+  })
 }
 
 function parseMensajes(records: any[], fallbackJid: string): Mensaje[] {
   return records
     .filter((m) => {
-      // Ignorar reacciones y tipos sin texto visible
       const tipo = m.messageType ?? ""
       return !["reactionMessage", "protocolMessage", "senderKeyDistributionMessage"].includes(tipo)
     })
@@ -103,11 +159,10 @@ function parseMensajes(records: any[], fallbackJid: string): Mensaje[] {
     })
 }
 
-async function fetchMessages(where: object, limit = 100): Promise<any[]> {
-  const { url, key, instance } = evoConfig()
-  const res = await fetch(`${url}/chat/findMessages/${instance}`, {
+async function fetchMessages(where: object, instance: string, limit = 100): Promise<any[]> {
+  const res = await fetch(`${EVO_URL}/chat/findMessages/${instance}`, {
     method: "POST",
-    headers: evoHeaders(key),
+    headers: evoHeaders(instance),
     body: JSON.stringify({ where, limit }),
     cache: "no-store",
   })
@@ -116,18 +171,16 @@ async function fetchMessages(where: object, limit = 100): Promise<any[]> {
   return Array.isArray(data) ? data : (data?.messages?.records ?? [])
 }
 
-export async function getMensajes(remoteJid: string): Promise<Mensaje[]> {
-  // WhatsApp nuevo usa @lid para mensajes recibidos — hay que consultar ambos formatos
+export async function getMensajes(remoteJid: string, instance: string = "demo"): Promise<Mensaje[]> {
   const phoneBase = remoteJid.replace("@s.whatsapp.net", "")
 
   const [enviados, recibidos] = await Promise.all([
-    fetchMessages({ key: { remoteJid } }),
-    fetchMessages({ key: { remoteJidAlt: `${phoneBase}@s.whatsapp.net` } }),
+    fetchMessages({ key: { remoteJid } }, instance),
+    fetchMessages({ key: { remoteJidAlt: `${phoneBase}@s.whatsapp.net` } }, instance),
   ])
 
   const todosRaw = [...enviados, ...recibidos]
 
-  // Deduplicar por key.id
   const vistos = new Set<string>()
   const unicos = todosRaw.filter((m) => {
     const id = m.key?.id ?? m.id
@@ -139,12 +192,11 @@ export async function getMensajes(remoteJid: string): Promise<Mensaje[]> {
   return parseMensajes(unicos, remoteJid).sort((a, b) => a.timestamp - b.timestamp)
 }
 
-export async function enviarMensaje(remoteJid: string, texto: string) {
-  const { url, key, instance } = evoConfig()
+export async function enviarMensaje(remoteJid: string, texto: string, instance: string = "demo") {
   const number = jidToPhone(remoteJid)
-  const res = await fetch(`${url}/message/sendText/${instance}`, {
+  const res = await fetch(`${EVO_URL}/message/sendText/${instance}`, {
     method: "POST",
-    headers: evoHeaders(key),
+    headers: evoHeaders(instance),
     body: JSON.stringify({ number, text: texto }),
   })
   if (!res.ok) {
@@ -154,10 +206,8 @@ export async function enviarMensaje(remoteJid: string, texto: string) {
   return { success: true }
 }
 
-// Convierte el teléfono de una captación al JID de WhatsApp
 function telefonoAJid(telefono: string): string {
   const digits = telefono.replace(/\D/g, "")
-  // Normalizar: asegurar prefijo 34 (España)
   let numero = digits
   if (numero.startsWith("0034")) numero = numero.slice(2)
   if (!numero.startsWith("34")) numero = "34" + numero
@@ -167,8 +217,9 @@ function telefonoAJid(telefono: string): string {
 export async function getMensajesCaptacion(telefono: string): Promise<Mensaje[]> {
   if (!telefono) return []
   const jid = telefonoAJid(telefono)
-  return getMensajes(jid)
+  return getMensajes(jid, "demo")
 }
+
 
 export async function getTelefonosAgente(agenteId: string): Promise<string[]> {
   const supabase = await createAdminClient()

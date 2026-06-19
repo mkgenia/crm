@@ -6,6 +6,7 @@ import { DetailPanel } from "@/components/captaciones/detail-panel"
 import { MessageSquare, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { Chat } from "@/lib/actions/mensajes"
+import type { INSTANCIAS } from "@/lib/instancias"
 import { getCaptacionByTelefono } from "@/lib/actions/captaciones"
 
 function fmtTime(ts: number | null) {
@@ -20,7 +21,8 @@ function fmtTime(ts: number | null) {
 
 function ChatItem({ chat, active, onClick }: { chat: Chat; active: boolean; onClick: () => void }) {
   const phone = chat.remoteJid.split("@")[0]
-  const init = (chat.name ?? phone).charAt(0).toUpperCase()
+  const displayName = chat.name && !/^[\d\s+\-().]+$/.test(chat.name.trim()) ? chat.name : `+${phone}`
+  const init = displayName.charAt(0).toUpperCase()
 
   return (
     <button
@@ -41,7 +43,7 @@ function ChatItem({ chat, active, onClick }: { chat: Chat; active: boolean; onCl
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className={cn("text-sm font-medium truncate", active ? "text-violet-500" : "text-foreground")}>
-            {chat.name ?? `+${phone}`}
+            {displayName}
           </p>
           <span className="text-[10px] text-muted-foreground shrink-0">{fmtTime(chat.lastMessageTime)}</span>
         </div>
@@ -59,14 +61,26 @@ function ChatItem({ chat, active, onClick }: { chat: Chat; active: boolean; onCl
 }
 
 interface Props {
-  chats: Chat[]
+  chatsPorInstancia: Record<string, Chat[]>
+  instancias: typeof INSTANCIAS[number][]
 }
 
-export function MensajesShell({ chats }: Props) {
-  const [selected, setSelected] = useState<Chat | null>(chats[0] ?? null)
+export function MensajesShell({ chatsPorInstancia, instancias }: Props) {
+  const [activeInstance, setActiveInstance] = useState(instancias[0]?.id ?? "demo")
+  const [localChats, setLocalChats] = useState(chatsPorInstancia)
+  const [selected, setSelected] = useState<Chat | null>(null)
   const [search, setSearch] = useState("")
   const [captacion, setCaptacion] = useState<Awaited<ReturnType<typeof getCaptacionByTelefono>>>(null)
   const [openCaptacionId, setOpenCaptacionId] = useState<number | null>(null)
+
+  const chats = localChats[activeInstance] ?? []
+
+  // Reset selected when switching instance
+  useEffect(() => {
+    setSelected(chats[0] ?? null)
+    setSearch("")
+  }, [activeInstance])
+
 
   useEffect(() => {
     setCaptacion(null)
@@ -87,6 +101,29 @@ export function MensajesShell({ chats }: Props) {
     <div className="flex flex-1 border border-border rounded-xl overflow-hidden min-h-0">
       {/* Sidebar de conversaciones */}
       <div className="w-80 shrink-0 border-r border-border flex flex-col bg-card">
+        {/* Selector de instancia */}
+        {instancias.length > 1 && (
+          <div className="p-3 border-b border-border flex gap-1">
+            {instancias.map((inst) => (
+              <button
+                key={inst.id}
+                onClick={() => setActiveInstance(inst.id)}
+                className={cn(
+                  "flex-1 py-1.5 rounded-md text-xs font-medium transition-colors",
+                  activeInstance === inst.id
+                    ? "bg-violet-500/20 text-violet-400 border border-violet-500/30"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                )}
+              >
+                {inst.label}
+                <span className="ml-1 opacity-60">
+                  ({chatsPorInstancia[inst.id]?.length ?? 0})
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="p-4 border-b border-border">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
@@ -122,6 +159,7 @@ export function MensajesShell({ chats }: Props) {
             chat={selected}
             captacion={captacion}
             onVerCaptacion={captacion ? () => setOpenCaptacionId(captacion.id) : undefined}
+            instance={activeInstance}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
