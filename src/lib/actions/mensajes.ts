@@ -182,15 +182,3 @@ export async function getMensajesCaptacion(telefono: string): Promise<Mensaje[]>
   const jid = telefonoAJid(telefono)
   return getMensajes(jid, "demo")
 }
-
-
-export async function getTelefonosAgente(agenteId: string): Promise<string[]> {
-  const supabase = await createAdminClient()
-  const { data } = await supabase
-    .from("captaciones")
-    .select("telefono")
-    .eq("agente_id", agenteId)
-    .eq("activo", true)
-    .not("telefono", "is", null)
-  return (data ?? []).map((r) => r.telefono as string)
-}
