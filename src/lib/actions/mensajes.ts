@@ -1,5 +1,7 @@
 "use server"
 
+import { createAdminClient } from "@/lib/supabase/server"
+
 const EVO_URL = "https://test-evolution-api.pzkz6e.easypanel.host"
 
 const INSTANCE_CONFIG: Record<string, { key: string; label: string }> = {
@@ -13,13 +15,6 @@ function evoHeaders(instance: string) {
   return { "Content-Type": "application/json", apikey: key }
 }
 
-// Para enviar mensajes y leer chats individuales sigue usando la instancia demo (captaciones)
-function evoConfig() {
-  const url = EVO_URL
-  const key = INSTANCE_CONFIG.demo.key
-  const instance = "demo"
-  return { url, key, instance }
-}
 
 export interface Chat {
   remoteJid: string
@@ -181,4 +176,15 @@ export async function getMensajesCaptacion(telefono: string): Promise<Mensaje[]>
   if (!telefono) return []
   const jid = telefonoAJid(telefono)
   return getMensajes(jid, "demo")
+}
+
+export async function getTelefonosAgente(agenteId: string): Promise<string[]> {
+  const supabase = await createAdminClient()
+  const { data } = await supabase
+    .from("captaciones")
+    .select("telefono")
+    .eq("agente_id", agenteId)
+    .eq("activo", true)
+    .not("telefono", "is", null)
+  return (data ?? []).map((r) => r.telefono as string)
 }
