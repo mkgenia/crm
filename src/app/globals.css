@@ -187,6 +187,22 @@
               0 0 80px -20px oklch(0.80 0.15 200 / 0.2);
 }
 
+/* ── Modal animations ───────────────────────────────────────────── */
+@keyframes modal-backdrop-in {
+  from { opacity: 0 }
+  to   { opacity: 1 }
+}
+@keyframes modal-card-in {
+  from { opacity: 0; transform: scale(0.95) translateY(8px) }
+  to   { opacity: 1; transform: scale(1) translateY(0) }
+}
+.modal-backdrop-in {
+  animation: modal-backdrop-in 0.2s ease-out forwards;
+}
+.modal-card-in {
+  animation: modal-card-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
 .scrollbar-thin {
   scrollbar-width: thin;
   scrollbar-color: oklch(1 0 0 / 10%) transparent;

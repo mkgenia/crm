@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react"
 import { createClient } from "@/lib/supabase/client"
 import { crearLead, actualizarLead } from "@/lib/actions/leads"
-import { Search, ChevronDown, X, Plus, UserCircle, Pencil, Check, Loader2 } from "lucide-react"
+import { Search, X, Plus, UserCircle, Pencil, Check, Loader2 } from "lucide-react"
 import type { EstadoLead } from "@/types/captaciones"
 
 const ESTADOS: EstadoLead[] = ["Nuevo", "Contactado", "Interesado", "Propuesta", "Negociacion", "Ganado", "Perdido"]
@@ -189,82 +189,69 @@ export default function LeadsPage() {
   }, {} as Record<EstadoLead, number>)
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex h-full overflow-hidden p-7 gap-5">
 
       {/* ── Left: main list ── */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 gap-5 overflow-hidden">
 
         {/* Header */}
-        <div className="p-8 pb-0 shrink-0">
-          <div className="flex items-start justify-between mb-6">
-            <div>
-              <h1 className="text-2xl font-semibold">
-                {isAdmin ? "Leads" : "Mis leads"}
-              </h1>
-              <p className="text-sm text-muted-foreground mt-1">
-                {loading ? "Cargando..." : `${leads.length} leads${leads.length === 500 ? " (límite alcanzado)" : ""}`}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                <input
-                  type="text"
-                  placeholder="Buscar..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="pl-8 pr-3 h-9 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-48"
-                />
-              </div>
-              <div className="relative">
-                <select
-                  value={estadoFilter}
-                  onChange={(e) => setEstadoFilter(e.target.value as EstadoLead | "")}
-                  className="h-9 pl-3 pr-8 text-sm rounded-md border border-border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-ring appearance-none"
-                >
-                  <option value="">Todos los estados</option>
-                  {ESTADOS.map((e) => <option key={e} value={e}>{ESTADO_CFG[e].label}</option>)}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-              </div>
-              <button
-                onClick={() => { setShowModal(true); setSaveError(null) }}
-                className="h-9 flex items-center gap-1.5 px-3 text-sm rounded-md bg-foreground text-background font-medium hover:opacity-90 transition-opacity"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Nuevo lead
-              </button>
-            </div>
+        <div className="flex items-start justify-between shrink-0">
+          <div>
+            <h1 className="text-xl font-semibold">
+              {isAdmin ? "Leads" : "Mis leads"}
+            </h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              {loading ? "Cargando..." : `${leads.length} leads${leads.length === 500 ? " (límite alcanzado)" : ""}`}
+            </p>
           </div>
-
-          {/* Pipeline strip */}
-          <div className="flex items-center gap-2 overflow-x-auto pb-4 border-b border-border">
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Buscar..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-8 pr-3 h-9 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-48"
+              />
+            </div>
             <button
-              onClick={() => setEstadoFilter("")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
-                estadoFilter === "" ? "bg-foreground text-background border-foreground" : "border-border text-muted-foreground hover:border-muted-foreground/40"
-              }`}
+              onClick={() => { setShowModal(true); setSaveError(null) }}
+              className="h-9 flex items-center gap-1.5 px-3 text-sm rounded-md bg-foreground text-background font-medium hover:opacity-90 transition-opacity"
             >
-              Todos <span className="opacity-70 tabular-nums">{leads.length}</span>
+              <Plus className="h-3.5 w-3.5" />
+              Nuevo lead
             </button>
-            {ESTADOS.map((e) => (
-              <button
-                key={e}
-                onClick={() => setEstadoFilter(estadoFilter === e ? "" : e)}
-                className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
-                  estadoFilter === e ? ESTADO_CFG[e].badge : "border-border text-muted-foreground hover:border-muted-foreground/40"
-                }`}
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${ESTADO_CFG[e].dot}`} />
-                {ESTADO_CFG[e].label}
-                <span className="tabular-nums opacity-70">{counts[e]}</span>
-              </button>
-            ))}
           </div>
         </div>
 
-        {/* List */}
-        <div className="flex-1 overflow-y-auto">
+        {/* Pills filtro estado */}
+        <div className="flex items-center gap-2 overflow-x-auto shrink-0">
+          <button
+            onClick={() => setEstadoFilter("")}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
+              estadoFilter === "" ? "bg-foreground text-background border-foreground" : "border-border text-muted-foreground hover:border-muted-foreground/40"
+            }`}
+          >
+            Todos <span className="opacity-70 tabular-nums">{leads.length}</span>
+          </button>
+          {ESTADOS.map((e) => (
+            <button
+              key={e}
+              onClick={() => setEstadoFilter(estadoFilter === e ? "" : e)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
+                estadoFilter === e ? ESTADO_CFG[e].badge : "border-border text-muted-foreground hover:border-muted-foreground/40"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${ESTADO_CFG[e].dot}`} />
+              {ESTADO_CFG[e].label}
+              <span className="tabular-nums opacity-70">{counts[e]}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* List card */}
+        <div className="flex-1 rounded-xl border border-border bg-card overflow-y-auto scrollbar-thin">
           {loading ? (
             <div className="p-10 text-center text-sm text-muted-foreground">Cargando leads...</div>
           ) : leads.length === 0 ? (
@@ -298,7 +285,7 @@ export default function LeadsPage() {
                 <button
                   key={lead.id}
                   onClick={() => { setSelected(selected?.id === lead.id ? null : lead); setEditando(false) }}
-                  className={`w-full flex items-center gap-4 px-8 py-3.5 text-left transition-colors hover:bg-muted/40 ${selected?.id === lead.id ? "bg-muted/60" : ""}`}
+                  className={`w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-muted/40 ${selected?.id === lead.id ? "bg-muted/60" : ""}`}
                 >
                   <div className="h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 bg-gradient-to-br from-[oklch(0.65_0.22_295)] via-[oklch(0.80_0.15_200)] to-[oklch(0.80_0.18_145)] text-white">
                     {lead.nombre.charAt(0).toUpperCase()}
@@ -330,7 +317,7 @@ export default function LeadsPage() {
 
       {/* ── Right: detail panel ── */}
       {selected && (
-        <div className="w-80 shrink-0 border-l border-border bg-card flex flex-col overflow-hidden">
+        <div className="w-80 shrink-0 rounded-xl border border-border bg-card flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
             <h2 className="text-sm font-semibold text-foreground">Detalle</h2>
             <div className="flex items-center gap-2">
@@ -474,9 +461,9 @@ export default function LeadsPage() {
 
       {/* ── Modal: nuevo lead ── */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop-in">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowModal(false)} />
-          <div className="relative z-10 w-full max-w-md bg-card border border-border rounded-xl shadow-2xl">
+          <div className="relative z-10 w-full max-w-md bg-card border border-border rounded-xl shadow-2xl modal-card-in">
             <div className="flex items-center justify-between px-6 py-4 border-b border-border">
               <h2 className="text-sm font-semibold">Nuevo lead</h2>
               <button onClick={() => setShowModal(false)} className="text-muted-foreground hover:text-foreground transition-colors">
