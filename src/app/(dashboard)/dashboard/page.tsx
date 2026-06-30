@@ -11,18 +11,39 @@ async function getAdminData(): Promise<AdminData> {
   const supabase = await createAdminClient()
   const inicioMes = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()
 
-  const [leadsRes, capsRes, usuariosRes, recientesRes] = await Promise.all([
+  const hace30dias = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
+  const [leadsRes, capsRes, usuariosRes, recientesRes, capsHistRes, leadsHistRes] = await Promise.all([
     supabase.from("leads").select("id, estado, fecha_creacion, captado_por", { count: "exact" }),
     supabase.from("captaciones").select("id, activo, agente_id, estado_whatsapp", { count: "exact" }),
     supabase.from("perfiles").select("id, nombre, apellidos, rol"),
     supabase.from("leads").select("id, nombre, apellidos, fuente, estado, fecha_creacion")
       .order("fecha_creacion", { ascending: false }).limit(6),
+    supabase.from("captaciones").select("created_at").gte("created_at", hace30dias),
+    supabase.from("leads").select("fecha_creacion").gte("fecha_creacion", hace30dias),
   ])
 
   const allLeads = leadsRes.data ?? []
   const allCaps = capsRes.data ?? []
   const todosPerfiles = usuariosRes.data ?? []
   const agentes = todosPerfiles.filter((u) => u.rol !== "Admin")
+
+  // Build last-30-days arrays (one entry per day)
+  function buildHistorial(rows: Array<{ [k: string]: string | null }>, field: string) {
+    const counts: Record<string, number> = {}
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000)
+      counts[d.toISOString().slice(0, 10)] = 0
+    }
+    for (const row of rows) {
+      const val = row[field]
+      if (val) {
+        const day = val.slice(0, 10)
+        if (day in counts) counts[day]++
+      }
+    }
+    return Object.entries(counts).map(([date, count]) => ({ date, count }))
+  }
 
   const interesadosTotal = allCaps.filter((c) => ["Interesado", "Quiere_Llamada"].includes(c.estado_whatsapp ?? "")).length
 
@@ -50,6 +71,8 @@ async function getAdminData(): Promise<AdminData> {
       }
     }).sort((a, b) => b.leads - a.leads),
     leadsRecientes: recientesRes.data ?? [],
+    historialCaptaciones: buildHistorial(capsHistRes.data ?? [], "created_at"),
+    historialLeads: buildHistorial(leadsHistRes.data ?? [], "fecha_creacion"),
   }
 }
 
