@@ -275,7 +275,7 @@ function HistorialChart({
   const totalCaps  = captaciones.reduce((s, d) => s + d.count, 0)
   const totalLeads = leads.reduce((s, d) => s + d.count, 0)
 
-  const fmt = (iso: string) => { const [, m, d] = iso.split("-"); return `${d}/${m}` }
+  const fmt = (iso: unknown) => { if (typeof iso !== "string") return ""; const [, m, d] = iso.split("-"); return `${d}/${m}` }
 
   const BTNS: { id: Serie; label: string; color: string }[] = [
     { id: "captaciones", label: "Captaciones", color: "#7F77DD" },
