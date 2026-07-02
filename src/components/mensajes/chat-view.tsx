@@ -19,6 +19,7 @@ interface Captacion {
   habitaciones: number | null
   imagen_url: string | null
   url: string | null
+  raw_data: Record<string, unknown> | null
 }
 
 function Avatar({ name, url, size = "md" }: { name: string | null; url: string | null; size?: "sm" | "md" }) {
@@ -192,9 +193,8 @@ export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }:
           <div className="flex items-center gap-1 shrink-0">
             <button
               onClick={() => {
-                const tipoOp = captacion.url?.includes("/alquiler/") ? "Alquiler"
-                  : captacion.url?.includes("/venta/") ? "Venta"
-                  : null
+                const op = captacion.raw_data?.operation
+                const tipoOp = op === "sale" ? "Venta" : op === "rent" ? "Alquiler" : null
                 const partes = [
                   captacion.nombre ? `Propietario: ${captacion.nombre}` : null,
                   captacion.telefono ? `Tel: ${captacion.telefono}` : null,

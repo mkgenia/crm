@@ -10,12 +10,12 @@ export async function getCaptacionByTelefono(telefono: string) {
   const sufijo = digits.slice(-9)
   const { data } = await supabase
     .from("captaciones")
-    .select("id, nombre, telefono, calle, barrio, precio, metros, habitaciones, imagen_url, url")
+    .select("id, nombre, telefono, calle, barrio, precio, metros, habitaciones, imagen_url, url, raw_data")
     .ilike("telefono", `%${sufijo}`)
     .eq("activo", true)
     .limit(1)
     .maybeSingle()
-  return data as ({ id: number; nombre: string | null; telefono: string | null; calle: string | null; barrio: string | null; precio: number | null; metros: number | null; habitaciones: number | null; imagen_url: string | null; url: string | null } | null)
+  return data as ({ id: number; nombre: string | null; telefono: string | null; calle: string | null; barrio: string | null; precio: number | null; metros: number | null; habitaciones: number | null; imagen_url: string | null; url: string | null; raw_data: Record<string, unknown> | null } | null)
 }
 
 export async function getCaptaciones(filtro?: string, search?: string, soloAgenteId?: string, isAdmin = false) {
