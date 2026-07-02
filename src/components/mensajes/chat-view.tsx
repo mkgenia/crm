@@ -192,10 +192,14 @@ export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }:
           <div className="flex items-center gap-1 shrink-0">
             <button
               onClick={() => {
+                const tipoOp = captacion.url?.includes("/alquiler/") ? "Alquiler"
+                  : captacion.url?.includes("/venta/") ? "Venta"
+                  : null
                 const partes = [
                   captacion.nombre ? `Propietario: ${captacion.nombre}` : null,
                   captacion.telefono ? `Tel: ${captacion.telefono}` : null,
                   (captacion.calle || captacion.barrio) ? `Dirección: ${[captacion.calle, captacion.barrio].filter(Boolean).join(", ")}` : null,
+                  tipoOp ? `Operación: ${tipoOp}` : null,
                   captacion.url ? `Idealista: ${captacion.url}` : null,
                 ].filter(Boolean).join("\n")
                 navigator.clipboard.writeText(partes)
