@@ -370,7 +370,7 @@ function HistorialChart({
                   padding: "6px 10px",
                 }}
                 labelFormatter={fmt}
-                formatter={(value: unknown, name: unknown) => [
+                formatter={(value: any, name: any) => [
                   value,
                   name === "captaciones" ? "Captaciones" : "Leads",
                 ]}
