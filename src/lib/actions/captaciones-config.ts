@@ -13,7 +13,7 @@ export async function getAutoContactoConfig() {
       .in("key", ["auto_contact_enabled"]),
     supabase
       .from("scraper_zonas")
-      .select("id, url, nombre, activa")
+      .select("id, url, nombre, activa, tipo, search_name, coords")
       .order("id"),
   ])
 
@@ -34,12 +34,22 @@ export async function toggleAutoContacto(enabled: boolean) {
   return { success: true }
 }
 
-export async function agregarZona(url: string, nombre: string) {
+export async function agregarZona(
+  url: string,
+  nombre: string,
+  tipo: "nombre" | "zona" = "zona",
+  search_name?: string | null,
+  coords?: [number, number][] | null,
+) {
   const supabase = await createAdminClient()
-  // tipo es NOT NULL en el esquema — enviamos "zona" como valor por defecto
-  const { error } = await supabase
-    .from("scraper_zonas")
-    .insert({ url: url.trim(), nombre: nombre.trim(), activa: false, tipo: "zona" })
+  const { error } = await supabase.from("scraper_zonas").insert({
+    url: url.trim(),
+    nombre: nombre.trim(),
+    activa: false,
+    tipo,
+    search_name: search_name ?? null,
+    coords: coords ?? null,
+  })
   if (error) return { error: error.message }
   revalidatePath("/captaciones")
   return { success: true }
