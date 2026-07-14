@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { DetailPanel } from "./detail-panel"
 import { PapeleraList } from "./papelera-list"
-import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, PhoneOff, MessageCircle, Trash2, Loader2, CheckSquare, Square, Trash } from "lucide-react"
+import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, MessageCircle, Trash2, Loader2, CheckSquare, Square, Trash, ChevronLeft, ChevronRight } from "lucide-react"
+import { CaptacionesPipeline } from "./captaciones-pipeline"
 import { ESTADO_COLORS, AGENDA_COLORS, WA_CLASIFICACIONES, type EstadoAgenda } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -12,6 +13,9 @@ import type { getCaptaciones } from "@/lib/actions/captaciones"
 
 type Captacion = Awaited<ReturnType<typeof getCaptaciones>>[number]
 type AgenteInfo = { id: string; nombre: string; apellidos: string | null; avatar_url: string | null }
+
+// Captaciones renderizadas por página en vistas grid/lista (evita volcar cientos de nodos)
+const PAGE_SIZE = 48
 
 const FILTROS = [
   { key: "todas",       label: "Todas" },
@@ -310,7 +314,8 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
   const [selected, setSelected] = useState<number | null>(null)
   const [search, setSearch] = useState("")
   const [filtro, setFiltro] = useState("todas")
-  const [vista, setVista] = useState<"grid" | "list">("grid")
+  const [vista, setVista] = useState<"grid" | "list" | "pipeline">("grid")
+  const [page, setPage] = useState(1)
   const [tab, setTab] = useState<"activas" | "papelera">("activas" as "activas" | "papelera")
   const [seleccionados, setSeleccionados] = useState<Set<number>>(new Set())
   const [bajaLoading, setBajaLoading] = useState(false)
@@ -336,6 +341,18 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
       if (filtro === "completadas") return c.estado_agenda === "completado"
       return true
     })
+
+  // Reset a la primera página cuando cambian los filtros o la búsqueda
+  useEffect(() => { setPage(1) }, [search, filtro])
+
+  // Solo paginamos grid/lista; el pipeline gestiona su propia paginación por columna
+  const paginado = vista === "pipeline"
+  const totalPages = paginado ? 1 : Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const pageSafe = Math.min(page, totalPages)
+  const visibles = useMemo(
+    () => (paginado ? filtered : filtered.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE)),
+    [filtered, paginado, pageSafe]
+  )
 
   const counts: Record<string, number> = {
     todas:       total,
@@ -542,6 +559,13 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
               >
                 <List className="h-4 w-4" />
               </button>
+              <button
+                onClick={() => setVista("pipeline")}
+                title="Vista pipeline"
+                className={cn("p-2 transition-colors", vista === "pipeline" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
+              >
+                <KanbanSquare className="h-4 w-4" />
+              </button>
             </div>
           </div>
         </div>
@@ -571,7 +595,7 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
 
       {vista === "grid" ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-          {filtered.map((c) => (
+          {visibles.map((c) => (
             <CaptacionCard
               key={c.id}
               cap={c}
@@ -581,10 +605,10 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
             />
           ))}
         </div>
-      ) : (
+      ) : vista === "list" ? (
         <div className="rounded-xl border border-border bg-card overflow-hidden">
           <ListHeader />
-          {filtered.map((c) => (
+          {visibles.map((c) => (
             <CaptacionRow
               key={c.id}
               cap={c}
@@ -593,6 +617,33 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
               onClick={() => setSelected(c.id)}
             />
           ))}
+        </div>
+      ) : (
+        <CaptacionesPipeline captaciones={filtered} onSelect={(id) => setSelected(id)} />
+      )}
+
+      {/* Paginador (solo grid/lista) */}
+      {!paginado && filtered.length > PAGE_SIZE && (
+        <div className="flex items-center justify-center gap-3 mt-6">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={pageSafe <= 1}
+            className="flex items-center gap-1 h-9 px-3 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all disabled:opacity-40 disabled:pointer-events-none"
+          >
+            <ChevronLeft className="h-4 w-4" /> Anterior
+          </button>
+          <span className="text-sm text-muted-foreground tabular-nums">
+            Página {pageSafe} de {totalPages}
+            <span className="mx-2 opacity-40">·</span>
+            {(pageSafe - 1) * PAGE_SIZE + 1}–{Math.min(pageSafe * PAGE_SIZE, filtered.length)} de {filtered.length}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={pageSafe >= totalPages}
+            className="flex items-center gap-1 h-9 px-3 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all disabled:opacity-40 disabled:pointer-events-none"
+          >
+            Siguiente <ChevronRight className="h-4 w-4" />
+          </button>
         </div>
       )}
 

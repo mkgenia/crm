@@ -261,7 +261,7 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
           >
             {cargando
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              : <Send className="h-3 w-3 rotate-180" />}
+              : <Send className="h-3 w-3" />}
           </button>
         )}
       </div>

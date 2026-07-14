@@ -9,7 +9,7 @@ import {
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { toggleAutoContacto, agregarZona, toggleZona, eliminarZona } from "@/lib/actions/captaciones-config"
-import { encodePolyline } from "./zona-map"
+import { encodePolyline } from "./polyline"
 
 // Leaflet requires no SSR
 const ZonaViewMap = dynamic(() => import("./zona-map").then(m => m.ZonaViewMap), { ssr: false, loading: () => <MapPlaceholder text="Cargando mapa..." /> })
