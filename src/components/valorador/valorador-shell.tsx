@@ -1,14 +1,17 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
 import dynamic from "next/dynamic"
 import type { FeatureCollection, Geometry } from "geojson"
-import { History, Plus, X, MapPin, Loader2, Check, Home, Building2, Trash2 } from "lucide-react"
+import {
+  History, Plus, X, MapPin, Loader2, Check, Home, Building2,
+  Trash2, ExternalLink, BarChart2, ChevronRight, Eye, EyeOff,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  crearValoracion, eliminarValoracion,
-  type ZonaStat, type Valoracion, type Operacion,
+  crearValoracion, eliminarValoracion, getComparablesBarrio,
+  type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
 
@@ -28,6 +31,30 @@ function eur(n: number | null | undefined) {
   return `${Math.round(n).toLocaleString("es-ES")} €`
 }
 
+// ─── Cálculo de estadísticas en cliente a partir de una lista filtrada ────────
+function calcStats(comparables: ComparableInmueble[], excludedIds: Set<number>) {
+  const valores = comparables
+    .filter((c) => !excludedIds.has(c.id))
+    .map((c) => c.precio_m2)
+    .sort((a, b) => a - b)
+
+  if (valores.length === 0) return null
+
+  const pct = (p: number) => {
+    const idx = (p / 100) * (valores.length - 1)
+    const lo = Math.floor(idx), hi = Math.ceil(idx)
+    return valores[lo] + (valores[hi] - valores[lo]) * (idx - lo)
+  }
+
+  return {
+    muestra: valores.length,
+    precio_m2_mediana: Math.round(pct(50)),
+    precio_m2_p25: Math.round(pct(25)),
+    precio_m2_p75: Math.round(pct(75)),
+    precio_m2_medio: Math.round(valores.reduce((s, v) => s + v, 0) / valores.length),
+  }
+}
+
 interface Props {
   statsVenta: ZonaStat[]
   statsAlquiler: ZonaStat[]
@@ -38,8 +65,14 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   const [operacion, setOperacion] = useState<Operacion>("venta")
   const [geojson, setGeojson] = useState<GeoBarrios | null>(null)
   const [selected, setSelected] = useState<{ codbarrio: string; nombre: string } | null>(null)
-  const [panel, setPanel] = useState<"nueva" | "historial" | null>(null)
+  const [panel, setPanel] = useState<"nueva" | "historial" | "comparables" | null>(null)
   const [valoraciones, setValoraciones] = useState<Valoracion[]>(valoracionesIniciales)
+
+  // Comparables cargados por barrio
+  const [comparables, setComparables] = useState<ComparableInmueble[]>([])
+  const [loadingComparables, startLoadComparables] = useTransition()
+  // IDs excluidos por el usuario (no se usan en la valoración)
+  const [excludedIds, setExcludedIds] = useState<Set<number>>(new Set())
 
   // Carga del GeoJSON de barrios (asset estático)
   useEffect(() => {
@@ -55,11 +88,47 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   }, [operacion, statsVenta, statsAlquiler])
 
   const zonasConDatos = Object.keys(statsByBarrio).length
-  const statSel = selected ? statsByBarrio[selected.codbarrio] : undefined
+
+  // Stats en vivo recalculadas al excluir comparables
+  const liveStats = useMemo(
+    () => calcStats(comparables, excludedIds),
+    [comparables, excludedIds]
+  )
+
+  // Stat que se muestra en la tarjeta del mapa y en el panel de valoración:
+  // si hay comparables cargados del mismo barrio → usar liveStats; si no → usar BD
+  const statSel = useMemo(() => {
+    if (!selected) return undefined
+    if (comparables.length > 0 && liveStats) return { ...statsByBarrio[selected.codbarrio], ...liveStats }
+    return statsByBarrio[selected.codbarrio]
+  }, [selected, statsByBarrio, comparables, liveStats])
 
   function handleSelectZona(codbarrio: string, nombre: string) {
     setSelected({ codbarrio, nombre })
+    setComparables([])
+    setExcludedIds(new Set())
   }
+
+  const handleOpenComparables = useCallback(() => {
+    if (!selected) return
+    setPanel("comparables")
+    startLoadComparables(async () => {
+      const data = await getComparablesBarrio(selected.codbarrio, operacion)
+      setComparables(data)
+      setExcludedIds(new Set())
+    })
+  }, [selected, operacion])
+
+  function toggleExcluded(id: number) {
+    setExcludedIds((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function selectAll() { setExcludedIds(new Set()) }
+  function deselectAll() { setExcludedIds(new Set(comparables.map((c) => c.id))) }
 
   return (
     <div className="flex flex-col h-full">
@@ -77,13 +146,13 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           {/* Toggle operación */}
           <div className="flex rounded-lg border border-border overflow-hidden">
             <button
-              onClick={() => setOperacion("venta")}
+              onClick={() => { setOperacion("venta"); setComparables([]); setExcludedIds(new Set()) }}
               className={cn("flex items-center gap-1.5 px-3 h-9 text-sm transition-colors", operacion === "venta" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
             >
               <Home className="h-3.5 w-3.5" /> Venta
             </button>
             <button
-              onClick={() => setOperacion("alquiler")}
+              onClick={() => { setOperacion("alquiler"); setComparables([]); setExcludedIds(new Set()) }}
               className={cn("flex items-center gap-1.5 px-3 h-9 text-sm transition-colors", operacion === "alquiler" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
             >
               <Building2 className="h-3.5 w-3.5" /> Alquiler
@@ -123,13 +192,13 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
 
           {/* Tarjeta de zona seleccionada */}
           {selected && (
-            <div className="absolute top-3 right-3 z-[1000] w-64 rounded-xl border border-border bg-card/95 backdrop-blur-sm shadow-lg p-4">
+            <div className="absolute top-3 right-3 z-[1000] w-72 rounded-xl border border-border bg-card/95 backdrop-blur-sm shadow-lg p-4">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <MapPin className="h-4 w-4 text-violet-500 shrink-0" />
                   <p className="text-sm font-semibold truncate">{selected.nombre}</p>
                 </div>
-                <button onClick={() => setSelected(null)} className="text-muted-foreground hover:text-foreground">
+                <button onClick={() => { setSelected(null); setComparables([]); setExcludedIds(new Set()) }} className="text-muted-foreground hover:text-foreground">
                   <X className="h-4 w-4" />
                 </button>
               </div>
@@ -145,22 +214,62 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
                   </div>
                   <div className="flex items-baseline justify-between">
                     <span className="text-muted-foreground text-xs">Comparables</span>
-                    <span className="text-xs tabular-nums">{statSel.muestra}</span>
+                    <span className="text-xs tabular-nums">
+                      {liveStats && comparables.length > 0 && excludedIds.size > 0
+                        ? <><span className="text-violet-500">{liveStats.muestra}</span>/{comparables.length}</>
+                        : statSel.muestra}
+                    </span>
                   </div>
-                  <button
-                    onClick={() => setPanel("nueva")}
-                    className="mt-1 w-full h-8 rounded-md bg-violet-500/10 text-violet-500 text-xs font-medium hover:bg-violet-500/20 transition-colors"
-                  >
-                    Valorar en esta zona
-                  </button>
+                  <div className="flex gap-2 mt-2">
+                    <button
+                      onClick={handleOpenComparables}
+                      className="flex-1 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <BarChart2 className="h-3.5 w-3.5" />
+                      Ver comparables
+                      {comparables.length > 0 && <span className="font-medium text-violet-500">({comparables.length})</span>}
+                    </button>
+                    <button
+                      onClick={() => setPanel("nueva")}
+                      className="flex-1 h-8 rounded-md bg-violet-500/10 text-violet-500 text-xs font-medium hover:bg-violet-500/20 transition-colors flex items-center justify-center gap-1"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                      Valorar aquí
+                    </button>
+                  </div>
                 </div>
               ) : (
-                <p className="mt-3 text-xs text-muted-foreground/70">Sin datos de mercado en esta zona todavía.</p>
+                <div className="mt-3 space-y-2">
+                  <p className="text-xs text-muted-foreground/70">Sin datos de mercado en esta zona todavía.</p>
+                  <button
+                    onClick={handleOpenComparables}
+                    className="w-full h-8 rounded-md border border-border text-muted-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
+                  >
+                    <BarChart2 className="h-3.5 w-3.5" />
+                    Ver comparables
+                  </button>
+                </div>
               )}
             </div>
           )}
         </div>
       </div>
+
+      {/* Panel Comparables */}
+      {panel === "comparables" && selected && (
+        <ComparablesPanel
+          barrio={selected.nombre}
+          comparables={comparables}
+          loading={loadingComparables}
+          excludedIds={excludedIds}
+          liveStats={liveStats}
+          onToggle={toggleExcluded}
+          onSelectAll={selectAll}
+          onDeselectAll={deselectAll}
+          onClose={() => setPanel(null)}
+          onValorar={() => setPanel("nueva")}
+        />
+      )}
 
       {/* Panel Nueva valoración */}
       {panel === "nueva" && geojson && (
@@ -169,6 +278,10 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           statsByBarrio={statsByBarrio}
           operacion={operacion}
           preselect={selected}
+          comparables={comparables}
+          excludedIds={excludedIds}
+          liveStats={liveStats}
+          onOpenComparables={handleOpenComparables}
           onClose={() => setPanel(null)}
           onCreada={(v) => { setValoraciones((prev) => [v, ...prev]); setPanel("historial") }}
         />
@@ -190,14 +303,181 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   )
 }
 
+// ─── Panel: Comparables del barrio ───────────────────────────────────────────
+function ComparablesPanel({
+  barrio, comparables, loading, excludedIds, liveStats,
+  onToggle, onSelectAll, onDeselectAll, onClose, onValorar,
+}: {
+  barrio: string
+  comparables: ComparableInmueble[]
+  loading: boolean
+  excludedIds: Set<number>
+  liveStats: ReturnType<typeof calcStats>
+  onToggle: (id: number) => void
+  onSelectAll: () => void
+  onDeselectAll: () => void
+  onClose: () => void
+  onValorar: () => void
+}) {
+  const activeCount = comparables.length - excludedIds.size
+
+  return (
+    <Drawer
+      title={`Comparables · ${barrio}`}
+      onClose={onClose}
+      wide
+    >
+      <div className="space-y-4">
+        {/* Estadísticas en vivo */}
+        {liveStats && !loading && (
+          <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-3 grid grid-cols-4 gap-2 text-center">
+            <Stat label="Mediana" value={`${liveStats.precio_m2_mediana.toLocaleString("es-ES")} €/m²`} highlight />
+            <Stat label="P25" value={`${liveStats.precio_m2_p25.toLocaleString("es-ES")}`} />
+            <Stat label="P75" value={`${liveStats.precio_m2_p75.toLocaleString("es-ES")}`} />
+            <Stat label="Muestra" value={`${activeCount}/${comparables.length}`} />
+          </div>
+        )}
+
+        {/* Controles de selección */}
+        {comparables.length > 0 && (
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">
+              {excludedIds.size > 0
+                ? <span className="text-amber-400">{excludedIds.size} excluido{excludedIds.size !== 1 ? "s" : ""} de la valoración</span>
+                : "Todos incluidos en la valoración"}
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={onSelectAll}
+                disabled={excludedIds.size === 0}
+                className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-40 flex items-center gap-1"
+              >
+                <Eye className="h-3 w-3" /> Todos
+              </button>
+              <button
+                onClick={onDeselectAll}
+                disabled={activeCount === 0}
+                className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-40 flex items-center gap-1"
+              >
+                <EyeOff className="h-3 w-3" /> Ninguno
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Lista de comparables */}
+        {loading ? (
+          <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground">
+            <Loader2 className="h-6 w-6 animate-spin" />
+            <p className="text-sm">Cargando comparables…</p>
+          </div>
+        ) : comparables.length === 0 ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">
+            No hay comparables activos en esta zona.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {comparables.map((c) => {
+              const excluded = excludedIds.has(c.id)
+              return (
+                <div
+                  key={c.id}
+                  className={cn(
+                    "rounded-lg border p-3 transition-all cursor-pointer select-none",
+                    excluded
+                      ? "border-border bg-muted/20 opacity-50"
+                      : "border-border bg-background hover:border-violet-500/40"
+                  )}
+                  onClick={() => onToggle(c.id)}
+                >
+                  <div className="flex items-start gap-3">
+                    {/* Checkbox */}
+                    <div className={cn(
+                      "mt-0.5 h-4 w-4 shrink-0 rounded border-2 flex items-center justify-center transition-colors",
+                      excluded ? "border-border bg-background" : "border-violet-500 bg-violet-500"
+                    )}>
+                      {!excluded && <Check className="h-2.5 w-2.5 text-white" />}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-sm font-semibold text-foreground">
+                          {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²
+                        </span>
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                          {c.precio.toLocaleString("es-ES")} €
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
+                        <span>{c.metros} m²</span>
+                        {c.habitaciones != null && <span>{c.habitaciones} hab.</span>}
+                        {c.banos != null && <span>{c.banos} baños</span>}
+                        {c.planta && <span>Pl. {c.planta}</span>}
+                        {c.ascensor != null && (
+                          <span className={c.ascensor ? "text-emerald-500" : "text-muted-foreground/50"}>
+                            {c.ascensor ? "Ascensor" : "Sin ascensor"}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between mt-1.5 gap-2">
+                        <span className="text-[11px] text-muted-foreground/60 truncate">
+                          {c.anunciante === "agencia" && c.agencia_nombre ? c.agencia_nombre : "Particular"}
+                        </span>
+                        <a
+                          href={`https://www.idealista.com/inmueble/${c.idealista_id}/`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-[11px] text-violet-500 hover:text-violet-400 flex items-center gap-0.5 shrink-0"
+                        >
+                          Idealista <ExternalLink className="h-2.5 w-2.5" />
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {/* CTA valorar */}
+        {!loading && liveStats && (
+          <button
+            onClick={onValorar}
+            className="w-full h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+          >
+            <ChevronRight className="h-4 w-4" />
+            Valorar en esta zona{excludedIds.size > 0 ? ` (${activeCount} comp.)` : ""}
+          </button>
+        )}
+      </div>
+    </Drawer>
+  )
+}
+
+function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div>
+      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</p>
+      <p className={cn("text-sm font-semibold mt-0.5", highlight ? "text-violet-500" : "text-foreground")}>{value}</p>
+    </div>
+  )
+}
+
 // ─── Panel: Nueva valoración ──────────────────────────────────────────────────
 function NuevaValoracionPanel({
-  geojson, statsByBarrio, operacion, preselect, onClose, onCreada,
+  geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats,
+  onOpenComparables, onClose, onCreada,
 }: {
   geojson: GeoBarrios
   statsByBarrio: Record<string, ZonaStat>
   operacion: Operacion
   preselect: { codbarrio: string; nombre: string } | null
+  comparables: ComparableInmueble[]
+  excludedIds: Set<number>
+  liveStats: ReturnType<typeof calcStats>
+  onOpenComparables: () => void
   onClose: () => void
   onCreada: (v: Valoracion) => void
 }) {
@@ -215,7 +495,15 @@ function NuevaValoracionPanel({
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
 
-  const stat = statsByBarrio[codbarrio]
+  // Si hay comparables cargados y filtrados → usar esas stats; si no → usar BD
+  const stat = useMemo(() => {
+    if (comparables.length > 0 && liveStats && preselect?.codbarrio === codbarrio) {
+      const base = statsByBarrio[codbarrio]
+      return base ? { ...base, ...liveStats } : null
+    }
+    return statsByBarrio[codbarrio] ?? null
+  }, [codbarrio, statsByBarrio, comparables, liveStats, preselect])
+
   const m2 = parseFloat(metros.replace(",", "."))
   const nombreBarrio = barrios.find((b) => b.codbarrio === codbarrio)?.nombre ?? null
 
@@ -228,6 +516,10 @@ function NuevaValoracionPanel({
       max: stat.precio_m2_p75 ? Math.round(m2 * stat.precio_m2_p75) : Math.round(m2 * stat.precio_m2_mediana * 1.1),
     }
   }, [stat, m2])
+
+  const activeCount = comparables.length > 0
+    ? comparables.length - excludedIds.size
+    : stat?.muestra ?? 0
 
   async function guardar() {
     if (!estimacion || !stat) return
@@ -243,7 +535,7 @@ function NuevaValoracionPanel({
       valor_estimado: estimacion.valor,
       valor_min: estimacion.min,
       valor_max: estimacion.max,
-      muestra: stat.muestra,
+      muestra: activeCount,
       notas: notas.trim() || null,
     })
     setSaving(false)
@@ -270,6 +562,21 @@ function NuevaValoracionPanel({
           </select>
         </Field>
 
+        {/* Botón ver/filtrar comparables */}
+        {codbarrio && preselect?.codbarrio === codbarrio && (
+          <button
+            onClick={onOpenComparables}
+            className="w-full h-9 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 flex items-center justify-center gap-2 transition-colors"
+          >
+            <BarChart2 className="h-4 w-4" />
+            {comparables.length > 0
+              ? excludedIds.size > 0
+                ? <><span className="text-amber-400">{excludedIds.size} excluidos</span> · {activeCount} activos usados</>
+                : `${comparables.length} comparables · Todos activos`
+              : "Ver y filtrar comparables"}
+          </button>
+        )}
+
         <Field label="Dirección (opcional)">
           <input value={direccion} onChange={(e) => setDireccion(e.target.value)} placeholder="Ej: Carrer de Cuenca 12"
             className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
@@ -294,11 +601,18 @@ function NuevaValoracionPanel({
         )}
         {estimacion && stat && (
           <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 space-y-2">
-            <p className="text-xs text-muted-foreground uppercase tracking-wider">Valor estimado ({operacion})</p>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground uppercase tracking-wider">Valor estimado ({operacion})</p>
+              {excludedIds.size > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-400/10 text-amber-400">
+                  {excludedIds.size} excluidos
+                </span>
+              )}
+            </div>
             <p className="text-2xl font-semibold text-foreground">{eur(estimacion.valor)}</p>
             <p className="text-sm text-muted-foreground">Rango {eur(estimacion.min)} – {eur(estimacion.max)}</p>
             <p className="text-xs text-muted-foreground/70">
-              Basado en {stat.precio_m2_mediana} €/m² (mediana) de {stat.muestra} comparables en {nombreBarrio}.
+              Basado en {stat.precio_m2_mediana} €/m² (mediana) de {activeCount} comparables en {nombreBarrio}.
             </p>
           </div>
         )}
@@ -375,11 +689,11 @@ function HistorialPanel({
 }
 
 // ─── Primitivas UI ────────────────────────────────────────────────────────────
-function Drawer({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Drawer({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-md bg-card border-l border-border h-full flex flex-col shadow-2xl">
+      <div className={cn("relative z-10 bg-card border-l border-border h-full flex flex-col shadow-2xl", wide ? "w-full max-w-lg" : "w-full max-w-md")}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <h2 className="text-sm font-semibold">{title}</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">

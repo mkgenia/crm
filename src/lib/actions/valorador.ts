@@ -16,6 +16,27 @@ export interface ZonaStat {
   actualizado: string | null
 }
 
+export interface ComparableInmueble {
+  id: number
+  idealista_id: string
+  operacion: string
+  tipo: string | null
+  codbarrio: string | null
+  barrio: string | null
+  lat: number | null
+  lng: number | null
+  precio: number
+  metros: number
+  precio_m2: number
+  habitaciones: number | null
+  banos: number | null
+  planta: string | null
+  ascensor: boolean | null
+  anunciante: string | null
+  agencia_nombre: string | null
+  fecha_ultima_vista: string | null
+}
+
 export interface Valoracion {
   id: number
   creada_en: string
@@ -46,6 +67,24 @@ export async function getZonasStats(operacion: Operacion = "venta"): Promise<Zon
     .eq("operacion", operacion)
   if (error) return []
   return (data ?? []) as ZonaStat[]
+}
+
+// Comparables individuales de un barrio para ver y filtrar en el Valorador
+export async function getComparablesBarrio(
+  codbarrio: string,
+  operacion: Operacion = "venta"
+): Promise<ComparableInmueble[]> {
+  const supabase = await createAdminClient()
+  const { data, error } = await supabase
+    .from("mercado_inmuebles")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista")
+    .eq("codbarrio", codbarrio)
+    .eq("operacion", operacion)
+    .eq("activo", true)
+    .not("precio_m2", "is", null)
+    .order("precio_m2", { ascending: true })
+  if (error) return []
+  return (data ?? []) as ComparableInmueble[]
 }
 
 export async function getValoraciones(): Promise<Valoracion[]> {
