@@ -7,14 +7,21 @@ import type { Feature, FeatureCollection, Geometry } from "geojson"
 import type { Layer, PathOptions } from "leaflet"
 import type { ZonaStat } from "@/lib/actions/valorador"
 
-// Fuerza el recálculo de tamaño cuando el contenedor flex resuelve su altura
+// Fuerza el recálculo de tamaño cuando el contenedor cambia (montaje, resize de
+// ventana, o al abrir/cerrar el panel lateral que encoge el mapa)
 function InvalidateOnMount() {
   const map = useMap()
   useEffect(() => {
     const t = setTimeout(() => map.invalidateSize(), 0)
     const onResize = () => map.invalidateSize()
     window.addEventListener("resize", onResize)
-    return () => { clearTimeout(t); window.removeEventListener("resize", onResize) }
+    const ro = new ResizeObserver(() => map.invalidateSize())
+    ro.observe(map.getContainer())
+    return () => {
+      clearTimeout(t)
+      window.removeEventListener("resize", onResize)
+      ro.disconnect()
+    }
   }, [map])
   return null
 }

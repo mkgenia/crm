@@ -112,12 +112,18 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   const handleOpenComparables = useCallback(() => {
     if (!selected) return
     setPanel("comparables")
+  }, [selected])
+
+  // Cargar comparables cuando el panel está abierto y cambia la zona u operación
+  useEffect(() => {
+    if (panel !== "comparables" || !selected) return
+    let cancelled = false
     startLoadComparables(async () => {
       const data = await getComparablesBarrio(selected.codbarrio, operacion)
-      setComparables(data)
-      setExcludedIds(new Set())
+      if (!cancelled) { setComparables(data); setExcludedIds(new Set()) }
     })
-  }, [selected, operacion])
+    return () => { cancelled = true }
+  }, [panel, selected, operacion])
 
   function toggleExcluded(id: number) {
     setExcludedIds((prev) => {
@@ -176,9 +182,10 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
         </div>
       </div>
 
-      {/* Mapa */}
-      <div className="flex-1 min-h-0 px-6 pb-6">
-        <div className="relative h-full rounded-xl border border-border overflow-hidden bg-card">
+      {/* Contenido: mapa + panel lateral (estilo Leads) */}
+      <div className="flex-1 min-h-0 flex gap-4 px-6 pb-6">
+        {/* Mapa */}
+        <div className="flex-1 min-w-0 relative rounded-xl border border-border overflow-hidden bg-card">
           {geojson ? (
             <ValoradorMapa
               geojson={geojson}
@@ -221,14 +228,16 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
                     </span>
                   </div>
                   <div className="flex gap-2 mt-2">
-                    <button
-                      onClick={handleOpenComparables}
-                      className="flex-1 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
-                    >
-                      <BarChart2 className="h-3.5 w-3.5" />
-                      Ver comparables
-                      {comparables.length > 0 && <span className="font-medium text-violet-500">({comparables.length})</span>}
-                    </button>
+                    {panel !== "comparables" && (
+                      <button
+                        onClick={handleOpenComparables}
+                        className="flex-1 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
+                      >
+                        <BarChart2 className="h-3.5 w-3.5" />
+                        Ver comparables
+                        {comparables.length > 0 && <span className="font-medium text-violet-500">({comparables.length})</span>}
+                      </button>
+                    )}
                     <button
                       onClick={() => setPanel("nueva")}
                       className="flex-1 h-8 rounded-md bg-violet-500/10 text-violet-500 text-xs font-medium hover:bg-violet-500/20 transition-colors flex items-center justify-center gap-1"
@@ -241,22 +250,23 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
               ) : (
                 <div className="mt-3 space-y-2">
                   <p className="text-xs text-muted-foreground/70">Sin datos de mercado en esta zona todavía.</p>
-                  <button
-                    onClick={handleOpenComparables}
-                    className="w-full h-8 rounded-md border border-border text-muted-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
-                  >
-                    <BarChart2 className="h-3.5 w-3.5" />
-                    Ver comparables
-                  </button>
+                  {panel !== "comparables" && (
+                    <button
+                      onClick={handleOpenComparables}
+                      className="w-full h-8 rounded-md border border-border text-muted-foreground hover:bg-muted/40 text-xs flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <BarChart2 className="h-3.5 w-3.5" />
+                      Ver comparables
+                    </button>
+                  )}
                 </div>
               )}
             </div>
           )}
         </div>
-      </div>
 
-      {/* Panel Comparables */}
-      {panel === "comparables" && selected && (
+        {/* Panel Comparables */}
+        {panel === "comparables" && selected && (
         <ComparablesPanel
           barrio={selected.nombre}
           comparables={comparables}
@@ -287,18 +297,19 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
         />
       )}
 
-      {/* Panel Historial */}
-      {panel === "historial" && (
-        <HistorialPanel
-          valoraciones={valoraciones}
-          onClose={() => setPanel(null)}
-          onDelete={async (id) => {
-            const res = await eliminarValoracion(id)
-            if (res.error) { toast.error(res.error); return }
-            setValoraciones((prev) => prev.filter((v) => v.id !== id))
-          }}
-        />
-      )}
+        {/* Panel Historial */}
+        {panel === "historial" && (
+          <HistorialPanel
+            valoraciones={valoraciones}
+            onClose={() => setPanel(null)}
+            onDelete={async (id) => {
+              const res = await eliminarValoracion(id)
+              if (res.error) { toast.error(res.error); return }
+              setValoraciones((prev) => prev.filter((v) => v.id !== id))
+            }}
+          />
+        )}
+      </div>
     </div>
   )
 }
@@ -691,18 +702,15 @@ function HistorialPanel({
 // ─── Primitivas UI ────────────────────────────────────────────────────────────
 function Drawer({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className={cn("relative z-10 bg-card border-l border-border h-full flex flex-col shadow-2xl", wide ? "w-full max-w-lg" : "w-full max-w-md")}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
-          <h2 className="text-sm font-semibold">{title}</h2>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-5 scrollbar-thin">{children}</div>
+    <aside className={cn("shrink-0 rounded-xl border border-border bg-card h-full flex flex-col overflow-hidden", wide ? "w-[30rem]" : "w-96")}>
+      <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors">
+          <X className="h-4 w-4" />
+        </button>
       </div>
-    </div>
+      <div className="flex-1 overflow-y-auto p-5 scrollbar-thin">{children}</div>
+    </aside>
   )
 }
 
