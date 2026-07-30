@@ -124,6 +124,35 @@ export async function getComparablesBarrio(
   return (data ?? []) as ComparableInmueble[]
 }
 
+export interface GeoResultado {
+  lat: number
+  lng: number
+  direccion: string
+  refCatastral: string | null
+}
+
+// Geocodificación de una dirección con CartoCiudad (IGN, gratis, sin key).
+export async function geocodificar(direccion: string): Promise<GeoResultado | null> {
+  const q = encodeURIComponent(`${direccion.trim()}, Valencia`)
+  try {
+    const res = await fetch(`https://www.cartociudad.es/geocoder/api/geocoder/find?q=${q}`, {
+      headers: { Accept: "application/json" },
+    })
+    if (!res.ok) return null
+    const d = await res.json()
+    if (d == null || d.lat == null || d.lng == null) return null
+    const dir = [d.tip_via, d.address, d.portalNumber].filter(Boolean).join(" ")
+    return {
+      lat: Number(d.lat),
+      lng: Number(d.lng),
+      direccion: dir || direccion.trim(),
+      refCatastral: d.refCatastral ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function getValoraciones(): Promise<Valoracion[]> {
   const supabase = await createAdminClient()
   const { data, error } = await supabase

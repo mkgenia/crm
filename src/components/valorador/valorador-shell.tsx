@@ -5,12 +5,12 @@ import dynamic from "next/dynamic"
 import type { FeatureCollection, Geometry } from "geojson"
 import {
   History, Plus, X, MapPin, Loader2, Check, Home, Building2,
-  Trash2, ExternalLink, BarChart2, ChevronRight, Eye, EyeOff,
+  Trash2, ExternalLink, BarChart2, ChevronRight, Eye, EyeOff, Search,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  crearValoracion, eliminarValoracion, getComparablesBarrio,
+  crearValoracion, eliminarValoracion, getComparablesBarrio, geocodificar,
   type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
@@ -53,6 +53,32 @@ function calcStats(comparables: ComparableInmueble[], excludedIds: Set<number>) 
     precio_m2_p75: Math.round(pct(75)),
     precio_m2_medio: Math.round(valores.reduce((s, v) => s + v, 0) / valores.length),
   }
+}
+
+// Punto-en-polígono (ray casting) para resolver el barrio desde unas coordenadas
+function ringContains(ring: number[][], lng: number, lat: number) {
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1]
+    if (((yi > lat) !== (yj > lat)) && (lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi)) inside = !inside
+  }
+  return inside
+}
+function polyContains(coords: number[][][], lng: number, lat: number) {
+  if (!coords.length || !ringContains(coords[0], lng, lat)) return false
+  for (let k = 1; k < coords.length; k++) if (ringContains(coords[k], lng, lat)) return false
+  return true
+}
+function barrioEnCoords(geojson: GeoBarrios, lng: number, lat: number): BarrioProps | null {
+  for (const f of geojson.features) {
+    const g = f.geometry
+    if (!g) continue
+    if (g.type === "Polygon" && polyContains((g.coordinates as number[][][]), lng, lat)) return f.properties
+    if (g.type === "MultiPolygon") {
+      for (const poly of (g.coordinates as number[][][][])) if (polyContains(poly, lng, lat)) return f.properties
+    }
+  }
+  return null
 }
 
 interface Props {
@@ -294,6 +320,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           liveStats={liveStats}
           factores={factores}
           onOpenComparables={handleOpenComparables}
+          onZonaResuelta={handleSelectZona}
           onClose={() => setPanel(null)}
           onCreada={(v) => { setValoraciones((prev) => [v, ...prev]); setPanel("historial") }}
         />
@@ -501,7 +528,7 @@ const EXTRA_OPTS = [
 // ─── Panel: Nueva valoración ──────────────────────────────────────────────────
 function NuevaValoracionPanel({
   geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats, factores,
-  onOpenComparables, onClose, onCreada,
+  onOpenComparables, onZonaResuelta, onClose, onCreada,
 }: {
   geojson: GeoBarrios
   statsByBarrio: Record<string, ZonaStat>
@@ -512,6 +539,7 @@ function NuevaValoracionPanel({
   liveStats: ReturnType<typeof calcStats>
   factores: FactoresMercado
   onOpenComparables: () => void
+  onZonaResuelta: (codbarrio: string, nombre: string) => void
   onClose: () => void
   onCreada: (v: Valoracion) => void
 }) {
@@ -533,6 +561,26 @@ function NuevaValoracionPanel({
   const [extras, setExtras] = useState<Set<string>>(new Set())
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
+
+  // Búsqueda por dirección (geocodificación → zona)
+  const [geoLoading, setGeoLoading] = useState(false)
+  const [geoMsg, setGeoMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  async function buscarDireccion() {
+    const q = direccion.trim()
+    if (!q) return
+    setGeoLoading(true)
+    setGeoMsg(null)
+    const g = await geocodificar(q)
+    setGeoLoading(false)
+    if (!g) { setGeoMsg({ ok: false, text: "No se encontró la dirección" }); return }
+    setDireccion(g.direccion)
+    const barrio = barrioEnCoords(geojson, g.lng, g.lat)
+    if (!barrio) { setGeoMsg({ ok: false, text: "La dirección cae fuera de los barrios de Valencia" }); return }
+    setCodbarrio(barrio.codbarrio)
+    onZonaResuelta(barrio.codbarrio, barrio.nombre)
+    setGeoMsg({ ok: true, text: `Zona detectada: ${barrio.nombre}` })
+  }
 
   // Si hay comparables cargados y filtrados → usar esas stats; si no → usar BD
   const stat = useMemo(() => {
@@ -640,9 +688,29 @@ function NuevaValoracionPanel({
           </button>
         )}
 
-        <Field label="Dirección (opcional)">
-          <input value={direccion} onChange={(e) => setDireccion(e.target.value)} placeholder="Ej: Carrer de Cuenca 12"
-            className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+        <Field label="Dirección (detecta la zona)">
+          <div className="flex gap-2">
+            <input
+              value={direccion}
+              onChange={(e) => setDireccion(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); buscarDireccion() } }}
+              placeholder="Ej: Carrer de Sueca 10"
+              className="flex-1 h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              onClick={buscarDireccion}
+              disabled={geoLoading || !direccion.trim()}
+              className="h-9 px-3 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+            >
+              {geoLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+              Buscar
+            </button>
+          </div>
+          {geoMsg && (
+            <p className={cn("text-xs mt-1.5 flex items-center gap-1", geoMsg.ok ? "text-emerald-500" : "text-amber-400")}>
+              {geoMsg.ok && <MapPin className="h-3 w-3" />}{geoMsg.text}
+            </p>
+          )}
         </Field>
 
         <div className="grid grid-cols-3 gap-3">
