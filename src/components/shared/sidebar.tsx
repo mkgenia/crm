@@ -13,6 +13,7 @@ import {
   LogOut,
   UsersRound,
   Inbox,
+  Calculator,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { useRouter } from "next/navigation"
@@ -23,6 +24,7 @@ import type { Permisos } from "@/types/database"
 const NAV_ITEMS = [
   { href: "/dashboard",   icon: Home,          label: "Inicio",      permiso: "all" },
   { href: "/captaciones", icon: Building2,     label: "Captaciones", permiso: "captaciones" as keyof Permisos },
+  { href: "/valorador",   icon: Calculator,    label: "Valorador",   permiso: "all" },
   { href: "/leads",       icon: UserCircle,    label: "Leads",       permiso: "leads" as keyof Permisos },
   { href: "/mensajes",    icon: MessageSquare, label: "Mensajes",    permiso: "mensajes" as keyof Permisos },
   { href: "/demandas",    icon: Inbox,         label: "Demandas",    permiso: "all" },

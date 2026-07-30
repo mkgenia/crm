@@ -1,0 +1,221 @@
+{
+  "name": "Valorador — Idealista → Supabase (Valencia)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "sched",
+      "name": "Cada semana",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -40,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "apifyToken",
+              "value": "APIFY_TOKEN_AQUI",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "supabaseUrl",
+              "value": "https://TU-PROYECTO.supabase.co",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "supabaseServiceKey",
+              "value": "SERVICE_ROLE_KEY_AQUI",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "crmGeojsonUrl",
+              "value": "https://TU-CRM/valencia-barrios.geojson",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "idealistaUrl",
+              "value": "https://www.idealista.com/venta-viviendas/valencia-valencia/",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "cfg",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').item.json.crmGeojsonUrl }}",
+        "options": {}
+      },
+      "id": "geo",
+      "name": "Fetch Barrios",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/OTe82JNUGa93aVcRc/run-sync-get-dataset-items?token={{ $('Config').item.json.apifyToken }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"startUrls\": [{ \"url\": \"{{ $('Config').item.json.idealistaUrl }}\" }],\n  \"monitoringMode\": true,\n  \"detectRemovedListings\": true,\n  \"detectPriceChanges\": true,\n  \"maxItems\": 10000\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "apify",
+      "name": "Apify Run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enriquecer listings de Apify con su barrio (punto-en-polígono) y mapear a la tabla\nconst geo = $('Fetch Barrios').first().json;\nconst feats = (geo && geo.features) || [];\n\nfunction ringContains(ring, lng, lat) {\n  let inside = false;\n  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {\n    const xi = ring[i][0], yi = ring[i][1];\n    const xj = ring[j][0], yj = ring[j][1];\n    const intersect = ((yi > lat) !== (yj > lat)) &&\n      (lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi);\n    if (intersect) inside = !inside;\n  }\n  return inside;\n}\nfunction polyContains(coords, lng, lat) {\n  if (!coords.length) return false;\n  if (!ringContains(coords[0], lng, lat)) return false;      // fuera del anillo exterior\n  for (let k = 1; k < coords.length; k++) {                   // dentro de un hueco\n    if (ringContains(coords[k], lng, lat)) return false;\n  }\n  return true;\n}\nfunction findBarrio(lng, lat) {\n  for (const f of feats) {\n    const g = f.geometry;\n    if (!g) continue;\n    if (g.type === 'Polygon' && polyContains(g.coordinates, lng, lat)) return f.properties;\n    if (g.type === 'MultiPolygon') {\n      for (const poly of g.coordinates) if (polyContains(poly, lng, lat)) return f.properties;\n    }\n  }\n  return null;\n}\n\n// Aplanar la salida de Apify (puede venir como items o como un array anidado)\nconst raw = $input.all().map(i => i.json);\nconst listings = [];\nfor (const x of raw) { if (Array.isArray(x)) listings.push(...x); else listings.push(x); }\n\nconst now = new Date().toISOString();\nconst records = listings\n  .filter(l => l && (l.adid || l.propertyCode))\n  .map(l => {\n    const mc = l.moreCharacteristics || {};\n    const ci = l.contactInfo || {};\n    const ub = l.ubication || {};\n    const lat = Number(ub.latitude);\n    const lng = Number(ub.longitude);\n    const barrio = (isFinite(lat) && isFinite(lng)) ? findBarrio(lng, lat) : null;\n    const userType = (ci.userType || '').toLowerCase();\n    return {\n      idealista_id: String(l.adid || l.propertyCode),\n      operacion: (l.operation === 'rent' || l.operation === 'alquiler') ? 'alquiler' : 'venta',\n      tipo: l.propertyType || (l.detailedType && l.detailedType.typology) || null,\n      codbarrio: barrio ? barrio.codbarrio : null,\n      barrio: barrio ? barrio.nombre : null,\n      lat: isFinite(lat) ? lat : null,\n      lng: isFinite(lng) ? lng : null,\n      precio: l.price != null ? Number(l.price) : null,\n      metros: (l.size != null ? Number(l.size) : (mc.constructedArea != null ? Number(mc.constructedArea) : null)),\n      habitaciones: l.rooms != null ? Number(l.rooms) : (mc.roomNumber != null ? Number(mc.roomNumber) : null),\n      banos: l.bathrooms != null ? Number(l.bathrooms) : (mc.bathNumber != null ? Number(mc.bathNumber) : null),\n      planta: l.floor || mc.floor || null,\n      ascensor: (mc.lift != null) ? Boolean(mc.lift) : null,\n      estado_conservacion: mc.status || null,\n      anunciante: userType.includes('profess') ? 'agencia' : (userType ? 'particular' : null),\n      agencia_nombre: ci.commercialName || null,\n      activo: true,\n      fecha_ultima_vista: now\n    };\n  })\n  .filter(r => r.precio && r.metros);\n\nreturn [{ json: { count: records.length, records } }];"
+      },
+      "id": "code",
+      "name": "Barrio + Mapeo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').item.json.supabaseUrl }}/rest/v1/mercado_inmuebles?on_conflict=idealista_id",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $('Config').item.json.supabaseServiceKey }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Config').item.json.supabaseServiceKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.records) }}",
+        "options": {}
+      },
+      "id": "supa",
+      "name": "Supabase Upsert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1060,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Cada semana": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Barrios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Barrios": {
+      "main": [
+        [
+          {
+            "node": "Apify Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Run": {
+      "main": [
+        [
+          {
+            "node": "Barrio + Mapeo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Barrio + Mapeo": {
+      "main": [
+        [
+          {
+            "node": "Supabase Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
