@@ -5,6 +5,43 @@ import { revalidatePath } from "next/cache"
 
 export type Operacion = "venta" | "alquiler"
 
+export interface FactoresMercado {
+  // Multiplicador a aplicar al €/m² si el piso NO tiene ascensor (< 1). Calculado de los datos.
+  ascensorFactor: number
+  muestraAscensor: number
+}
+
+function mediana(nums: number[]): number | null {
+  if (!nums.length) return null
+  const s = [...nums].sort((a, b) => a - b)
+  const mid = Math.floor(s.length / 2)
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+}
+
+// Coeficientes calculados a partir del mercado real (data-backed).
+export async function getFactoresMercado(operacion: Operacion = "venta"): Promise<FactoresMercado> {
+  const supabase = await createAdminClient()
+  const { data } = await supabase
+    .from("mercado_inmuebles")
+    .select("ascensor, precio_m2")
+    .eq("operacion", operacion)
+    .eq("activo", true)
+    .not("precio_m2", "is", null)
+
+  const rows = (data ?? []) as { ascensor: boolean | null; precio_m2: number }[]
+  const con = rows.filter((r) => r.ascensor === true).map((r) => r.precio_m2)
+  const sin = rows.filter((r) => r.ascensor === false).map((r) => r.precio_m2)
+  const mCon = mediana(con)
+  const mSin = mediana(sin)
+
+  // Ratio sin/con, acotado a un rango sensato para evitar distorsiones por muestras pequeñas
+  let factor = 0.9
+  if (mCon && mSin && mCon > 0) {
+    factor = Math.min(1, Math.max(0.8, mSin / mCon))
+  }
+  return { ascensorFactor: Math.round(factor * 100) / 100, muestraAscensor: con.length + sin.length }
+}
+
 export interface ZonaStat {
   codbarrio: string
   operacion: string

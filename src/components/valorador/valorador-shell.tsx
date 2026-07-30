@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
   crearValoracion, eliminarValoracion, getComparablesBarrio,
-  type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble,
+  type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
 
@@ -59,9 +59,10 @@ interface Props {
   statsVenta: ZonaStat[]
   statsAlquiler: ZonaStat[]
   valoracionesIniciales: Valoracion[]
+  factores: FactoresMercado
 }
 
-export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciales }: Props) {
+export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciales, factores }: Props) {
   const [operacion, setOperacion] = useState<Operacion>("venta")
   const [geojson, setGeojson] = useState<GeoBarrios | null>(null)
   const [selected, setSelected] = useState<{ codbarrio: string; nombre: string } | null>(null)
@@ -291,6 +292,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           comparables={comparables}
           excludedIds={excludedIds}
           liveStats={liveStats}
+          factores={factores}
           onOpenComparables={handleOpenComparables}
           onClose={() => setPanel(null)}
           onCreada={(v) => { setValoraciones((prev) => [v, ...prev]); setPanel("historial") }}
@@ -476,9 +478,29 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
   )
 }
 
+// ─── Motor de ajuste ──────────────────────────────────────────────────────────
+const COND_OPTS = [
+  { key: "obra_nueva",  label: "Obra nueva",  factor: 1.08 },
+  { key: "buen_estado", label: "Buen estado", factor: 1.0 },
+  { key: "a_reformar",  label: "A reformar",  factor: 0.85 },
+] as const
+const PLANTA_OPTS = [
+  { key: "bajo",       label: "Bajo",       factor: 0.96 },
+  { key: "intermedia", label: "Intermedia", factor: 1.0 },
+  { key: "alta",       label: "Alta",       factor: 1.03 },
+  { key: "atico",      label: "Ático",      factor: 1.06 },
+] as const
+const EXTRA_OPTS = [
+  { key: "aire",     label: "Aire acond.", pct: 0.02 },
+  { key: "parking",  label: "Parking",     pct: 0.04 },
+  { key: "trastero", label: "Trastero",    pct: 0.02 },
+  { key: "terraza",  label: "Terraza",     pct: 0.03 },
+  { key: "piscina",  label: "Piscina/comunes", pct: 0.05 },
+] as const
+
 // ─── Panel: Nueva valoración ──────────────────────────────────────────────────
 function NuevaValoracionPanel({
-  geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats,
+  geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats, factores,
   onOpenComparables, onClose, onCreada,
 }: {
   geojson: GeoBarrios
@@ -488,6 +510,7 @@ function NuevaValoracionPanel({
   comparables: ComparableInmueble[]
   excludedIds: Set<number>
   liveStats: ReturnType<typeof calcStats>
+  factores: FactoresMercado
   onOpenComparables: () => void
   onClose: () => void
   onCreada: (v: Valoracion) => void
@@ -503,6 +526,11 @@ function NuevaValoracionPanel({
   const [direccion, setDireccion] = useState("")
   const [metros, setMetros] = useState("")
   const [habitaciones, setHabitaciones] = useState("")
+  const [banos, setBanos] = useState("")
+  const [condicion, setCondicion] = useState<string>("buen_estado")
+  const [planta, setPlanta] = useState<string>("intermedia")
+  const [ascensor, setAscensor] = useState(true)
+  const [extras, setExtras] = useState<Set<string>>(new Set())
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
 
@@ -518,23 +546,47 @@ function NuevaValoracionPanel({
   const m2 = parseFloat(metros.replace(",", "."))
   const nombreBarrio = barrios.find((b) => b.codbarrio === codbarrio)?.nombre ?? null
 
-  // Estimación en vivo
-  const estimacion = useMemo(() => {
+  // Factor de ajuste por características
+  const factor = useMemo(() => {
+    const fCond = COND_OPTS.find((o) => o.key === condicion)?.factor ?? 1
+    const fPlanta = PLANTA_OPTS.find((o) => o.key === planta)?.factor ?? 1
+    const fAsc = ascensor ? 1 : factores.ascensorFactor
+    const fBanos = banos && parseInt(banos) >= 2 ? 1.02 : 1
+    const fExtras = 1 + EXTRA_OPTS.filter((o) => extras.has(o.key)).reduce((s, o) => s + o.pct, 0)
+    return fCond * fPlanta * fAsc * fBanos * fExtras
+  }, [condicion, planta, ascensor, banos, extras, factores])
+
+  // Tres bandas
+  const bandas = useMemo(() => {
     if (!stat || !stat.precio_m2_mediana || !m2 || m2 <= 0) return null
+    const med = stat.precio_m2_mediana
+    const p25 = stat.precio_m2_p25 ?? Math.round(med * 0.9)
+    const p75 = stat.precio_m2_p75 ?? Math.round(med * 1.1)
     return {
-      valor: Math.round(m2 * stat.precio_m2_mediana),
-      min: stat.precio_m2_p25 ? Math.round(m2 * stat.precio_m2_p25) : Math.round(m2 * stat.precio_m2_mediana * 0.9),
-      max: stat.precio_m2_p75 ? Math.round(m2 * stat.precio_m2_p75) : Math.round(m2 * stat.precio_m2_mediana * 1.1),
+      verde:    Math.round(m2 * p25 * factor),
+      amarillo: Math.round(m2 * med * factor),
+      rojo:     Math.round(m2 * p75 * factor),
     }
-  }, [stat, m2])
+  }, [stat, m2, factor])
 
   const activeCount = comparables.length > 0
     ? comparables.length - excludedIds.size
     : stat?.muestra ?? 0
 
+  function toggleExtra(k: string) {
+    setExtras((prev) => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n })
+  }
+
   async function guardar() {
-    if (!estimacion || !stat) return
+    if (!bandas || !stat) return
     setSaving(true)
+    const resumen = [
+      COND_OPTS.find((o) => o.key === condicion)?.label,
+      PLANTA_OPTS.find((o) => o.key === planta)?.label,
+      ascensor ? "con ascensor" : "sin ascensor",
+      banos ? `${banos} baños` : null,
+      ...EXTRA_OPTS.filter((o) => extras.has(o.key)).map((o) => o.label),
+    ].filter(Boolean).join(", ")
     const res = await crearValoracion({
       direccion: direccion.trim() || null,
       codbarrio,
@@ -543,11 +595,11 @@ function NuevaValoracionPanel({
       habitaciones: habitaciones ? parseInt(habitaciones) : null,
       operacion,
       precio_m2_zona: stat.precio_m2_mediana!,
-      valor_estimado: estimacion.valor,
-      valor_min: estimacion.min,
-      valor_max: estimacion.max,
+      valor_estimado: bandas.amarillo,
+      valor_min: bandas.verde,
+      valor_max: bandas.rojo,
       muestra: activeCount,
-      notas: notas.trim() || null,
+      notas: [resumen, notas.trim()].filter(Boolean).join(" — ") || null,
     })
     setSaving(false)
     if (res.error) { toast.error(res.error); return }
@@ -556,7 +608,7 @@ function NuevaValoracionPanel({
   }
 
   return (
-    <Drawer title="Nueva valoración" onClose={onClose}>
+    <Drawer title="Nueva valoración" onClose={onClose} wide>
       <div className="space-y-4">
         <Field label="Zona / barrio">
           <select
@@ -583,8 +635,8 @@ function NuevaValoracionPanel({
             {comparables.length > 0
               ? excludedIds.size > 0
                 ? <><span className="text-amber-400">{excludedIds.size} excluidos</span> · {activeCount} activos usados</>
-                : `${comparables.length} comparables · Todos activos`
-              : "Ver y filtrar comparables"}
+                : `${comparables.length} comparables · editar`
+              : "Ver y editar comparables"}
           </button>
         )}
 
@@ -593,7 +645,7 @@ function NuevaValoracionPanel({
             className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
         </Field>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           <Field label="Metros (m²)">
             <input value={metros} onChange={(e) => setMetros(e.target.value)} inputMode="decimal" placeholder="90"
               className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
@@ -602,40 +654,84 @@ function NuevaValoracionPanel({
             <input value={habitaciones} onChange={(e) => setHabitaciones(e.target.value)} inputMode="numeric" placeholder="3"
               className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
           </Field>
+          <Field label="Baños">
+            <input value={banos} onChange={(e) => setBanos(e.target.value)} inputMode="numeric" placeholder="2"
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+          </Field>
         </div>
 
-        {/* Resultado */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Condición">
+            <select value={condicion} onChange={(e) => setCondicion(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring">
+              {COND_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Planta">
+            <select value={planta} onChange={(e) => setPlanta(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring">
+              {PLANTA_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        {/* Ascensor */}
+        <button
+          onClick={() => setAscensor((v) => !v)}
+          className={cn("w-full h-9 rounded-md border text-sm flex items-center justify-between px-3 transition-colors",
+            ascensor ? "border-violet-500/40 bg-violet-500/5 text-foreground" : "border-border text-muted-foreground")}
+        >
+          <span>Ascensor</span>
+          <span className={cn("text-xs font-medium", ascensor ? "text-violet-500" : "text-muted-foreground")}>
+            {ascensor ? "Sí" : `No (×${factores.ascensorFactor})`}
+          </span>
+        </button>
+
+        {/* Extras */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Extras</label>
+          <div className="flex flex-wrap gap-1.5">
+            {EXTRA_OPTS.map((o) => {
+              const on = extras.has(o.key)
+              return (
+                <button key={o.key} onClick={() => toggleExtra(o.key)}
+                  className={cn("px-2.5 h-8 rounded-md border text-xs transition-colors",
+                    on ? "border-violet-500/40 bg-violet-500/10 text-violet-400" : "border-border text-muted-foreground hover:text-foreground")}>
+                  {o.label} <span className="opacity-60">+{Math.round(o.pct * 100)}%</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Resultado: tres bandas */}
         {codbarrio && !stat && (
           <p className="text-xs text-orange-400 bg-orange-400/10 rounded-md px-3 py-2">
             Este barrio aún no tiene datos de mercado. Elige otro o ejecuta el scraper.
           </p>
         )}
-        {estimacion && stat && (
-          <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-muted-foreground uppercase tracking-wider">Valor estimado ({operacion})</p>
-              {excludedIds.size > 0 && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-400/10 text-amber-400">
-                  {excludedIds.size} excluidos
-                </span>
-              )}
-            </div>
-            <p className="text-2xl font-semibold text-foreground">{eur(estimacion.valor)}</p>
-            <p className="text-sm text-muted-foreground">Rango {eur(estimacion.min)} – {eur(estimacion.max)}</p>
-            <p className="text-xs text-muted-foreground/70">
-              Basado en {stat.precio_m2_mediana} €/m² (mediana) de {activeCount} comparables en {nombreBarrio}.
+        {bandas && stat && (
+          <div className="space-y-2 pt-1">
+            <Banda color="green"  label="Venta rápida"    valor={bandas.verde}    />
+            <Banda color="amber"  label="Valor estimado"  valor={bandas.amarillo} destacado />
+            <Banda color="red"    label="Ambicioso"       valor={bandas.rojo}     />
+            <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
+              Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables en {nombreBarrio}) ·
+              ajuste características ×{factor.toFixed(2)}
+              {!ascensor && <> · <span className="text-emerald-500/80">ascensor con datos reales</span></>}.
+              El resto de ajustes son estimaciones.
             </p>
           </div>
         )}
 
         <Field label="Notas (opcional)">
-          <textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} placeholder="Estado, reforma, observaciones…"
+          <textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} placeholder="Observaciones…"
             className="w-full px-2.5 py-2 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
         </Field>
 
         <button
           onClick={guardar}
-          disabled={!estimacion || saving}
+          disabled={!bandas || saving}
           className="w-full h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center justify-center gap-2"
         >
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
@@ -643,6 +739,24 @@ function NuevaValoracionPanel({
         </button>
       </div>
     </Drawer>
+  )
+}
+
+function Banda({ color, label, valor, destacado }: { color: "green" | "amber" | "red"; label: string; valor: number; destacado?: boolean }) {
+  const cls = {
+    green: "border-emerald-500/30 bg-emerald-500/5 text-emerald-500",
+    amber: "border-amber-500/40 bg-amber-500/10 text-amber-400",
+    red:   "border-red-500/30 bg-red-500/5 text-red-500",
+  }[color]
+  const dot = { green: "bg-emerald-500", amber: "bg-amber-400", red: "bg-red-500" }[color]
+  return (
+    <div className={cn("flex items-center justify-between rounded-lg border px-4 py-3", cls, destacado && "ring-1 ring-amber-500/30")}>
+      <span className="flex items-center gap-2 text-sm">
+        <span className={cn("h-2 w-2 rounded-full", dot)} />
+        {label}
+      </span>
+      <span className={cn("font-semibold tabular-nums", destacado ? "text-lg" : "text-base")}>{eur(valor)}</span>
+    </div>
   )
 }
 
