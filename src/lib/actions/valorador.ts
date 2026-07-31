@@ -124,6 +124,42 @@ export async function getComparablesBarrio(
   return (data ?? []) as ComparableInmueble[]
 }
 
+function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000 // metros
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
+}
+
+// Comparables dentro de un radio (metros) alrededor de un punto. Estilo "BetterPlace".
+export async function getComparablesRadio(
+  lat: number,
+  lng: number,
+  radioMetros: number,
+  operacion: Operacion = "venta"
+): Promise<ComparableInmueble[]> {
+  const supabase = await createAdminClient()
+  // Bounding box para reducir la consulta; luego se afina con haversine.
+  const dLat = radioMetros / 111320
+  const dLng = radioMetros / (111320 * Math.cos((lat * Math.PI) / 180) || 1)
+  const { data, error } = await supabase
+    .from("mercado_inmuebles")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista")
+    .eq("operacion", operacion)
+    .eq("activo", true)
+    .not("precio_m2", "is", null)
+    .not("lat", "is", null)
+    .gte("lat", lat - dLat).lte("lat", lat + dLat)
+    .gte("lng", lng - dLng).lte("lng", lng + dLng)
+  if (error) return []
+  const rows = (data ?? []) as ComparableInmueble[]
+  return rows
+    .filter((r) => r.lat != null && r.lng != null && haversine(lat, lng, r.lat, r.lng) <= radioMetros)
+    .sort((a, b) => a.precio_m2 - b.precio_m2)
+}
+
 export interface GeoResultado {
   lat: number
   lng: number

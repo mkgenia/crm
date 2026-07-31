@@ -141,6 +141,20 @@ banda = m² × (€/m² de la zona) × (factor de características)
 **Comparables editables**: al excluir pisos, cambian P25/mediana/P75 → cambian
 las 3 bandas. La muestra usada se guarda con la valoración.
 
+### Comparación por RADIO (estilo BetterPlace) — modo preferido
+Al buscar una **dirección**, en vez de comparar por barrio se fija un **centro**
+(pin en el mapa) y un **radio ajustable** (slider, 200 m–2,5 km). Los comparables
+son los pisos **dentro de ese círculo** (`getComparablesRadio`, filtro por
+haversine). El mapa de zonas se mantiene: el círculo se dibuja **encima**.
+- Server action `getComparablesRadio(lat, lng, radio, operacion)`.
+- Cambiar el radio recalcula comparables y bandas en vivo.
+- Si no buscas dirección, sigue disponible la comparación por zona (click en barrio).
+
+### Descuento de venta real (−15%)
+Toggle (por defecto **activado**): los pisos suelen venderse ~15% por debajo del
+precio de anuncio de Idealista. Aplica ×0.85 a las **tres bandas**. El usuario
+puede desactivarlo. Se registra en las notas de la valoración.
+
 ---
 
 ## 8. Detalles que costó depurar (para no repetirlos)

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo } from "react"
-import { MapContainer, TileLayer, GeoJSON, useMap } from "react-leaflet"
+import { MapContainer, TileLayer, GeoJSON, Circle, CircleMarker, useMap } from "react-leaflet"
 import "leaflet/dist/leaflet.css"
 import type { Feature, FeatureCollection, Geometry } from "geojson"
 import type { Layer, PathOptions } from "leaflet"
@@ -41,14 +41,25 @@ function colorFor(value: number | null, min: number, max: number): string {
   return `hsl(${hue} 65% 48%)`
 }
 
+// Recentra el mapa cuando cambia el punto de valoración
+function RecenterOn({ centro }: { centro: [number, number] | null }) {
+  const map = useMap()
+  useEffect(() => {
+    if (centro) map.setView(centro, 15, { animate: true })
+  }, [centro, map])
+  return null
+}
+
 interface Props {
   geojson: FeatureCollection<Geometry, BarrioProps>
   statsByBarrio: Record<string, ZonaStat>
   selected: string | null
   onSelectZona: (codbarrio: string, nombre: string) => void
+  centro?: [number, number] | null
+  radio?: number
 }
 
-export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona }: Props) {
+export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona, centro = null, radio = 0 }: Props) {
   // Rango de medianas para la escala de color
   const [min, max] = useMemo(() => {
     const vals = Object.values(statsByBarrio)
@@ -100,6 +111,21 @@ export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona }
           style={styleFor as never}
           onEachFeature={onEachFeature as never}
         />
+        <RecenterOn centro={centro} />
+        {centro && radio > 0 && (
+          <>
+            <Circle
+              center={centro}
+              radius={radio}
+              pathOptions={{ color: "#8b5cf6", fillColor: "#8b5cf6", fillOpacity: 0.12, weight: 2 }}
+            />
+            <CircleMarker
+              center={centro}
+              radius={6}
+              pathOptions={{ color: "#ffffff", weight: 2, fillColor: "#8b5cf6", fillOpacity: 1 }}
+            />
+          </>
+        )}
       </MapContainer>
 
       {/* Leyenda */}

@@ -10,7 +10,7 @@ import {
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  crearValoracion, eliminarValoracion, getComparablesBarrio, geocodificar,
+  crearValoracion, eliminarValoracion, getComparablesBarrio, getComparablesRadio, geocodificar,
   type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
@@ -95,11 +95,15 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   const [panel, setPanel] = useState<"nueva" | "historial" | "comparables" | null>(null)
   const [valoraciones, setValoraciones] = useState<Valoracion[]>(valoracionesIniciales)
 
-  // Comparables cargados por barrio
+  // Comparables cargados (por barrio o por radio)
   const [comparables, setComparables] = useState<ComparableInmueble[]>([])
   const [loadingComparables, startLoadComparables] = useTransition()
   // IDs excluidos por el usuario (no se usan en la valoración)
   const [excludedIds, setExcludedIds] = useState<Set<number>>(new Set())
+
+  // Modo radio (estilo BetterPlace): centro + radio en metros
+  const [centro, setCentro] = useState<{ lat: number; lng: number; label: string } | null>(null)
+  const [radio, setRadio] = useState(600)
 
   // Carga del GeoJSON de barrios (asset estático)
   useEffect(() => {
@@ -132,25 +136,42 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
 
   function handleSelectZona(codbarrio: string, nombre: string) {
     setSelected({ codbarrio, nombre })
+    setCentro(null)
     setComparables([])
     setExcludedIds(new Set())
   }
 
   const handleOpenComparables = useCallback(() => {
-    if (!selected) return
+    if (!selected && !centro) return
     setPanel("comparables")
-  }, [selected])
+  }, [selected, centro])
 
-  // Cargar comparables cuando el panel está abierto y cambia la zona u operación
+  // Modo RADIO: recargar comparables al cambiar centro, radio u operación
   useEffect(() => {
-    if (panel !== "comparables" || !selected) return
+    if (!centro) return
+    let cancelled = false
+    startLoadComparables(async () => {
+      const data = await getComparablesRadio(centro.lat, centro.lng, radio, operacion)
+      if (!cancelled) { setComparables(data); setExcludedIds(new Set()) }
+    })
+    return () => { cancelled = true }
+  }, [centro, radio, operacion])
+
+  // Modo ZONA: comparables del barrio (solo si NO estamos en modo radio)
+  useEffect(() => {
+    if (centro || panel !== "comparables" || !selected) return
     let cancelled = false
     startLoadComparables(async () => {
       const data = await getComparablesBarrio(selected.codbarrio, operacion)
       if (!cancelled) { setComparables(data); setExcludedIds(new Set()) }
     })
     return () => { cancelled = true }
-  }, [panel, selected, operacion])
+  }, [centro, panel, selected, operacion])
+
+  // Fijar el punto de valoración desde una dirección geocodificada
+  function valorarEnDireccion(lat: number, lng: number, label: string) {
+    setCentro({ lat, lng, label })
+  }
 
   function toggleExcluded(id: number) {
     setExcludedIds((prev) => {
@@ -179,13 +200,13 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           {/* Toggle operación */}
           <div className="flex rounded-lg border border-border overflow-hidden">
             <button
-              onClick={() => { setOperacion("venta"); setComparables([]); setExcludedIds(new Set()) }}
+              onClick={() => { setOperacion("venta"); setComparables([]); setExcludedIds(new Set()); setCentro(null) }}
               className={cn("flex items-center gap-1.5 px-3 h-9 text-sm transition-colors", operacion === "venta" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
             >
               <Home className="h-3.5 w-3.5" /> Venta
             </button>
             <button
-              onClick={() => { setOperacion("alquiler"); setComparables([]); setExcludedIds(new Set()) }}
+              onClick={() => { setOperacion("alquiler"); setComparables([]); setExcludedIds(new Set()); setCentro(null) }}
               className={cn("flex items-center gap-1.5 px-3 h-9 text-sm transition-colors", operacion === "alquiler" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
             >
               <Building2 className="h-3.5 w-3.5" /> Alquiler
@@ -219,6 +240,8 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
               statsByBarrio={statsByBarrio}
               selected={selected?.codbarrio ?? null}
               onSelectZona={handleSelectZona}
+              centro={centro ? [centro.lat, centro.lng] : null}
+              radio={radio}
             />
           ) : (
             <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Cargando mapa…</div>
@@ -232,7 +255,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
                   <MapPin className="h-4 w-4 text-violet-500 shrink-0" />
                   <p className="text-sm font-semibold truncate">{selected.nombre}</p>
                 </div>
-                <button onClick={() => { setSelected(null); setComparables([]); setExcludedIds(new Set()) }} className="text-muted-foreground hover:text-foreground">
+                <button onClick={() => { setSelected(null); setComparables([]); setExcludedIds(new Set()); setCentro(null) }} className="text-muted-foreground hover:text-foreground">
                   <X className="h-4 w-4" />
                 </button>
               </div>
@@ -293,9 +316,9 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
         </div>
 
         {/* Panel Comparables */}
-        {panel === "comparables" && selected && (
+        {panel === "comparables" && (selected || centro) && (
         <ComparablesPanel
-          barrio={selected.nombre}
+          barrio={centro ? `${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`} · ${centro.label}` : selected!.nombre}
           comparables={comparables}
           loading={loadingComparables}
           excludedIds={excludedIds}
@@ -319,8 +342,11 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           excludedIds={excludedIds}
           liveStats={liveStats}
           factores={factores}
+          centro={centro}
+          radio={radio}
+          onRadioChange={setRadio}
+          onValorarDireccion={valorarEnDireccion}
           onOpenComparables={handleOpenComparables}
-          onZonaResuelta={handleSelectZona}
           onClose={() => setPanel(null)}
           onCreada={(v) => { setValoraciones((prev) => [v, ...prev]); setPanel("historial") }}
         />
@@ -528,7 +554,8 @@ const EXTRA_OPTS = [
 // ─── Panel: Nueva valoración ──────────────────────────────────────────────────
 function NuevaValoracionPanel({
   geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats, factores,
-  onOpenComparables, onZonaResuelta, onClose, onCreada,
+  centro, radio, onRadioChange, onValorarDireccion,
+  onOpenComparables, onClose, onCreada,
 }: {
   geojson: GeoBarrios
   statsByBarrio: Record<string, ZonaStat>
@@ -538,11 +565,15 @@ function NuevaValoracionPanel({
   excludedIds: Set<number>
   liveStats: ReturnType<typeof calcStats>
   factores: FactoresMercado
+  centro: { lat: number; lng: number; label: string } | null
+  radio: number
+  onRadioChange: (r: number) => void
+  onValorarDireccion: (lat: number, lng: number, label: string) => void
   onOpenComparables: () => void
-  onZonaResuelta: (codbarrio: string, nombre: string) => void
   onClose: () => void
   onCreada: (v: Valoracion) => void
 }) {
+  const radioMode = centro != null
   const barrios = useMemo(
     () => geojson.features
       .map((f) => f.properties)
@@ -561,8 +592,10 @@ function NuevaValoracionPanel({
   const [extras, setExtras] = useState<Set<string>>(new Set())
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
+  // Descuento del 15% (los pisos suelen venderse ~15% por debajo del anuncio)
+  const [descuento, setDescuento] = useState(true)
 
-  // Búsqueda por dirección (geocodificación → zona)
+  // Búsqueda por dirección (geocodificación → radio de comparación)
   const [geoLoading, setGeoLoading] = useState(false)
   const [geoMsg, setGeoMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -575,21 +608,23 @@ function NuevaValoracionPanel({
     setGeoLoading(false)
     if (!g) { setGeoMsg({ ok: false, text: "No se encontró la dirección" }); return }
     setDireccion(g.direccion)
+    // Modo radio: fija el centro (comparación por radio, no por zona)
+    onValorarDireccion(g.lat, g.lng, g.direccion)
+    // También resolvemos el barrio para etiquetar
     const barrio = barrioEnCoords(geojson, g.lng, g.lat)
-    if (!barrio) { setGeoMsg({ ok: false, text: "La dirección cae fuera de los barrios de Valencia" }); return }
-    setCodbarrio(barrio.codbarrio)
-    onZonaResuelta(barrio.codbarrio, barrio.nombre)
-    setGeoMsg({ ok: true, text: `Zona detectada: ${barrio.nombre}` })
+    if (barrio) { setCodbarrio(barrio.codbarrio); setGeoMsg({ ok: true, text: `${g.direccion} · ${barrio.nombre}` }) }
+    else setGeoMsg({ ok: true, text: g.direccion })
   }
 
-  // Si hay comparables cargados y filtrados → usar esas stats; si no → usar BD
+  // Base de precios: en modo radio o con comparables cargados → usar liveStats;
+  // si no → stats de la zona por barrio.
   const stat = useMemo(() => {
-    if (comparables.length > 0 && liveStats && preselect?.codbarrio === codbarrio) {
+    if (comparables.length > 0 && liveStats) {
       const base = statsByBarrio[codbarrio]
-      return base ? { ...base, ...liveStats } : null
+      return { ...(base ?? {}), ...liveStats } as ZonaStat
     }
     return statsByBarrio[codbarrio] ?? null
-  }, [codbarrio, statsByBarrio, comparables, liveStats, preselect])
+  }, [codbarrio, statsByBarrio, comparables, liveStats])
 
   const m2 = parseFloat(metros.replace(",", "."))
   const nombreBarrio = barrios.find((b) => b.codbarrio === codbarrio)?.nombre ?? null
@@ -604,18 +639,19 @@ function NuevaValoracionPanel({
     return fCond * fPlanta * fAsc * fBanos * fExtras
   }, [condicion, planta, ascensor, banos, extras, factores])
 
-  // Tres bandas
+  // Tres bandas (con descuento opcional del 15%)
   const bandas = useMemo(() => {
     if (!stat || !stat.precio_m2_mediana || !m2 || m2 <= 0) return null
     const med = stat.precio_m2_mediana
     const p25 = stat.precio_m2_p25 ?? Math.round(med * 0.9)
     const p75 = stat.precio_m2_p75 ?? Math.round(med * 1.1)
+    const desc = descuento ? 0.85 : 1
     return {
-      verde:    Math.round(m2 * p25 * factor),
-      amarillo: Math.round(m2 * med * factor),
-      rojo:     Math.round(m2 * p75 * factor),
+      verde:    Math.round(m2 * p25 * factor * desc),
+      amarillo: Math.round(m2 * med * factor * desc),
+      rojo:     Math.round(m2 * p75 * factor * desc),
     }
-  }, [stat, m2, factor])
+  }, [stat, m2, factor, descuento])
 
   const activeCount = comparables.length > 0
     ? comparables.length - excludedIds.size
@@ -634,6 +670,8 @@ function NuevaValoracionPanel({
       ascensor ? "con ascensor" : "sin ascensor",
       banos ? `${banos} baños` : null,
       ...EXTRA_OPTS.filter((o) => extras.has(o.key)).map((o) => o.label),
+      radioMode ? `radio ${radio}m` : null,
+      descuento ? "−15% venta real" : null,
     ].filter(Boolean).join(", ")
     const res = await crearValoracion({
       direccion: direccion.trim() || null,
@@ -673,8 +711,8 @@ function NuevaValoracionPanel({
           </select>
         </Field>
 
-        {/* Botón ver/filtrar comparables */}
-        {codbarrio && preselect?.codbarrio === codbarrio && (
+        {/* Botón ver/editar comparables */}
+        {(radioMode || (codbarrio && preselect?.codbarrio === codbarrio)) && (
           <button
             onClick={onOpenComparables}
             className="w-full h-9 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 flex items-center justify-center gap-2 transition-colors"
@@ -688,7 +726,7 @@ function NuevaValoracionPanel({
           </button>
         )}
 
-        <Field label="Dirección (detecta la zona)">
+        <Field label="Dirección (comparación por radio)">
           <div className="flex gap-2">
             <input
               value={direccion}
@@ -712,6 +750,28 @@ function NuevaValoracionPanel({
             </p>
           )}
         </Field>
+
+        {/* Radio de comparación (modo BetterPlace) */}
+        {radioMode && (
+          <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Radio de comparación</span>
+              <span className="font-medium text-violet-400 tabular-nums">
+                {radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}
+              </span>
+            </div>
+            <input
+              type="range" min={200} max={2500} step={100} value={radio}
+              onChange={(e) => onRadioChange(parseInt(e.target.value))}
+              className="w-full accent-violet-500"
+            />
+            <p className="text-xs text-muted-foreground/70">
+              {comparables.length > 0
+                ? <><span className="text-foreground font-medium">{activeCount}</span> pisos dentro del radio</>
+                : "Sin pisos en este radio — amplíalo"}
+            </p>
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-3">
           <Field label="Metros (m²)">
@@ -772,8 +832,24 @@ function NuevaValoracionPanel({
           </div>
         </div>
 
+        {/* Toggle descuento 15% */}
+        <button
+          onClick={() => setDescuento((v) => !v)}
+          className={cn("w-full rounded-md border px-3 py-2 flex items-center justify-between transition-colors",
+            descuento ? "border-emerald-500/40 bg-emerald-500/5" : "border-border")}
+        >
+          <span className="text-sm text-left">
+            Descuento venta real <span className="text-muted-foreground">(−15%)</span>
+            <span className="block text-[11px] text-muted-foreground/70">Los pisos suelen venderse por debajo del anuncio</span>
+          </span>
+          <span className={cn("text-xs font-semibold px-2 py-0.5 rounded-full shrink-0",
+            descuento ? "bg-emerald-500/15 text-emerald-500" : "bg-muted text-muted-foreground")}>
+            {descuento ? "Aplicado" : "No"}
+          </span>
+        </button>
+
         {/* Resultado: tres bandas */}
-        {codbarrio && !stat && (
+        {codbarrio && !stat && !radioMode && (
           <p className="text-xs text-orange-400 bg-orange-400/10 rounded-md px-3 py-2">
             Este barrio aún no tiene datos de mercado. Elige otro o ejecuta el scraper.
           </p>
@@ -784,9 +860,11 @@ function NuevaValoracionPanel({
             <Banda color="amber"  label="Valor estimado"  valor={bandas.amarillo} destacado />
             <Banda color="red"    label="Ambicioso"       valor={bandas.rojo}     />
             <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
-              Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables en {nombreBarrio}) ·
-              ajuste características ×{factor.toFixed(2)}
-              {!ascensor && <> · <span className="text-emerald-500/80">ascensor con datos reales</span></>}.
+              Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
+              {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
+              características ×{factor.toFixed(2)}
+              {descuento && <> · <span className="text-emerald-500/80">−15% venta real</span></>}
+              {!ascensor && <> · ascensor con datos reales</>}.
               El resto de ajustes son estimaciones.
             </p>
           </div>
