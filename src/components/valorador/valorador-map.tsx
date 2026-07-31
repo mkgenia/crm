@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo } from "react"
-import { MapContainer, TileLayer, GeoJSON, Circle, CircleMarker, useMap } from "react-leaflet"
+import { MapContainer, TileLayer, GeoJSON, Circle, CircleMarker, Tooltip, useMap, useMapEvents } from "react-leaflet"
 import "leaflet/dist/leaflet.css"
 import type { Feature, FeatureCollection, Geometry } from "geojson"
 import type { Layer, PathOptions } from "leaflet"
@@ -50,6 +50,16 @@ function RecenterOn({ centro }: { centro: [number, number] | null }) {
   return null
 }
 
+// Captura clics en el mapa (para colocar el punto de valoración)
+function MapClickHandler({ enabled, onMapClick }: { enabled: boolean; onMapClick?: (lat: number, lng: number) => void }) {
+  useMapEvents({
+    click(e) { if (enabled && onMapClick) onMapClick(e.latlng.lat, e.latlng.lng) },
+  })
+  return null
+}
+
+export interface CompPunto { id: number; lat: number; lng: number; precio_m2: number }
+
 interface Props {
   geojson: FeatureCollection<Geometry, BarrioProps>
   statsByBarrio: Record<string, ZonaStat>
@@ -57,9 +67,23 @@ interface Props {
   onSelectZona: (codbarrio: string, nombre: string) => void
   centro?: [number, number] | null
   radio?: number
+  valuationMode?: boolean
+  onMapClick?: (lat: number, lng: number) => void
+  comparables?: CompPunto[]
+  excludedIds?: Set<number>
+  onToggleComparable?: (id: number) => void
 }
 
-export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona, centro = null, radio = 0 }: Props) {
+export function ValoradorMapa({
+  geojson, statsByBarrio, selected, onSelectZona, centro = null, radio = 0,
+  valuationMode = false, onMapClick, comparables = [], excludedIds, onToggleComparable,
+}: Props) {
+  // Rango de precios de los comparables mostrados (para colorear los puntos)
+  const [cMin, cMax] = useMemo(() => {
+    const vals = comparables.map((c) => c.precio_m2).filter((v) => v != null)
+    if (!vals.length) return [0, 0]
+    return [Math.min(...vals), Math.max(...vals)]
+  }, [comparables])
   // Rango de medianas para la escala de color
   const [min, max] = useMemo(() => {
     const vals = Object.values(statsByBarrio)
@@ -89,7 +113,13 @@ export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona, 
       ? `<strong>${p.nombre}</strong><br/>${precio.toLocaleString("es-ES")} €/m² · ${stat.muestra} comp.`
       : `<strong>${p.nombre}</strong><br/><span style="opacity:.6">Sin datos</span>`
     layer.bindTooltip(tooltip, { sticky: true, direction: "top", opacity: 0.95 })
-    layer.on({ click: () => onSelectZona(p.codbarrio, p.nombre) })
+    layer.on({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      click: (e: any) => {
+        if (valuationMode) onMapClick?.(e.latlng.lat, e.latlng.lng)
+        else onSelectZona(p.codbarrio, p.nombre)
+      },
+    })
   }
 
   return (
@@ -106,22 +136,47 @@ export function ValoradorMapa({ geojson, statsByBarrio, selected, onSelectZona, 
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
         />
         <GeoJSON
-          key={`${Object.keys(statsByBarrio).length}-${selected}`}
+          key={`${Object.keys(statsByBarrio).length}-${selected}-${valuationMode}`}
           data={geojson}
           style={styleFor as never}
           onEachFeature={onEachFeature as never}
         />
+        <MapClickHandler enabled={valuationMode} onMapClick={onMapClick} />
         <RecenterOn centro={centro} />
+
+        {/* Comparables como puntos (coloreados por €/m²) */}
+        {comparables.map((c) => {
+          const excluded = excludedIds?.has(c.id)
+          return (
+            <CircleMarker
+              key={c.id}
+              center={[c.lat, c.lng]}
+              radius={5}
+              pathOptions={{
+                color: "#ffffff",
+                weight: 1,
+                fillColor: excluded ? "#71717a" : colorFor(c.precio_m2, cMin, cMax),
+                fillOpacity: excluded ? 0.25 : 0.9,
+              }}
+              eventHandlers={{ click: () => onToggleComparable?.(c.id) }}
+            >
+              <Tooltip direction="top" opacity={0.95}>
+                {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²{excluded ? " · excluido" : ""}
+              </Tooltip>
+            </CircleMarker>
+          )
+        })}
+
         {centro && radio > 0 && (
           <>
             <Circle
               center={centro}
               radius={radio}
-              pathOptions={{ color: "#8b5cf6", fillColor: "#8b5cf6", fillOpacity: 0.12, weight: 2 }}
+              pathOptions={{ color: "#8b5cf6", fillColor: "#8b5cf6", fillOpacity: 0.08, weight: 2 }}
             />
             <CircleMarker
               center={centro}
-              radius={6}
+              radius={7}
               pathOptions={{ color: "#ffffff", weight: 2, fillColor: "#8b5cf6", fillOpacity: 1 }}
             />
           </>

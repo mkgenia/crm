@@ -224,6 +224,13 @@
   background: oklch(1 0 0 / 20%);
 }
 
+/* Quita el rectángulo de foco del navegador en los polígonos SVG de Leaflet */
+.leaflet-interactive:focus,
+.leaflet-container path:focus,
+svg.leaflet-zoom-animated:focus {
+  outline: none !important;
+}
+
 /* Scrollbar horizontal SIEMPRE visible (pipeline) — indica que se puede desplazar */
 .scrollbar-x-visible {
   scrollbar-width: thin;

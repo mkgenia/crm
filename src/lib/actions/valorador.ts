@@ -165,11 +165,19 @@ export interface GeoResultado {
   lng: number
   direccion: string
   refCatastral: string | null
+  tip_via?: string
+  address?: string
+  portalNumber?: number | null
+  muni?: string
+  province?: string
 }
 
 // Geocodificación de una dirección con CartoCiudad (IGN, gratis, sin key).
 export async function geocodificar(direccion: string): Promise<GeoResultado | null> {
-  const q = encodeURIComponent(`${direccion.trim()}, Valencia`)
+  const dirTrim = direccion.trim()
+  if (!dirTrim) return null
+  const qDir = /valencia|torrent|gandia|paterna|mislata|sagunto|alzira/i.test(dirTrim) ? dirTrim : `${dirTrim}, Valencia`
+  const q = encodeURIComponent(qDir)
   try {
     const res = await fetch(`https://www.cartociudad.es/geocoder/api/geocoder/find?q=${q}`, {
       headers: { Accept: "application/json" },
@@ -181,12 +189,265 @@ export async function geocodificar(direccion: string): Promise<GeoResultado | nu
     return {
       lat: Number(d.lat),
       lng: Number(d.lng),
-      direccion: dir || direccion.trim(),
+      direccion: dir || dirTrim,
       refCatastral: d.refCatastral ?? null,
+      tip_via: d.tip_via,
+      address: d.address,
+      portalNumber: d.portalNumber != null ? Number(d.portalNumber) : null,
+      muni: d.muni,
+      province: d.province,
     }
   } catch {
     return null
   }
+}
+
+export interface UnidadCatastro {
+  rc: string          // referencia catastral (20 car.)
+  planta: string      // pt
+  puerta: string      // pu
+  escalera: string    // es
+  uso: string         // Residencial, Comercial, ...
+  superficie: number | null // m² construidos
+  anio: string | null // año construcción
+  plantaNum?: number | null // número de planta parseado (0=bajo, 1=1ª...)
+}
+
+export interface CatastroResultado {
+  lat: number
+  lng: number
+  direccion: string
+  unidades: UnidadCatastro[]
+  totalPlantas?: number | null // número máximo de plantas del edificio
+}
+
+const _norm = (s: string) => (s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim()
+
+const TIPVIA_SIGLA: Record<string, string> = {
+  CALLE: "CL", CARRER: "CL", CL: "CL",
+  AVENIDA: "AV", AVINGUDA: "AV", AV: "AV",
+  PLAZA: "PZ", PLACA: "PZ", PZ: "PZ",
+  PASEO: "PS", PASSEIG: "PS", PS: "PS",
+  CAMINO: "CM", CAMI: "CM", CM: "CM",
+  RONDA: "RD", RD: "RD",
+  CARRETERA: "CR", CR: "CR",
+  TRAVESIA: "TR", TR: "TR",
+  "GRAN VIA": "GV", GRANVIA: "GV", GV: "GV",
+  VIA: "VI", VI: "VI", MERCADO: "CL",
+}
+
+function parsePlantaNumber(pt: string): number | null {
+  if (!pt) return null
+  const p = pt.trim().toUpperCase()
+  if (["B0", "BJ", "PB", "EN", "BA", "00", "BJ0", "BJ1"].includes(p)) return 0
+  const num = parseInt(p.replace(/\D/g, ""))
+  return isNaN(num) ? null : num
+}
+
+// Extrae fincas del JSON del Catastro (tanto lrcdnp con división horizontal como bico único)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseCatastroUnits(result: any): UnidadCatastro[] {
+  if (!result) return []
+
+  const extract = (u: any): UnidadCatastro => {
+    const rc = u.rc ?? u.idbi?.rc ?? {}
+    const loint = u.dt?.locs?.lous?.lourb?.loint ?? {}
+    const debi = u.debi ?? {}
+    const pt = loint.pt ?? ""
+    return {
+      rc: `${rc.pc1 ?? ""}${rc.pc2 ?? ""}${rc.car ?? ""}${rc.cc1 ?? ""}${rc.cc2 ?? ""}`,
+      planta: pt,
+      puerta: loint.pu ?? "",
+      escalera: loint.es ?? "",
+      uso: debi.luso ?? "—",
+      superficie: debi.sfc != null ? Number(debi.sfc) : null,
+      anio: debi.ant ?? null,
+      plantaNum: parsePlantaNumber(pt),
+    }
+  }
+
+  // Formato 1: lrcdnp (edificio con división horizontal / múltiples fincas)
+  if (result.lrcdnp?.rcdnp) {
+    let list = result.lrcdnp.rcdnp
+    if (!Array.isArray(list)) list = [list]
+    return list.map(extract)
+  }
+
+  // Formato 2: bico (inmueble único sin división horizontal)
+  if (result.bico?.bi) {
+    let list = result.bico.bi
+    if (!Array.isArray(list)) list = [list]
+    return list.map(extract)
+  }
+
+  return []
+}
+
+// Consulta DNPLOC a la API del Catastro
+async function consultarCatastroDNPLOC(
+  provincia: string,
+  municipio: string,
+  sigla: string,
+  calle: string,
+  numero: number
+): Promise<UnidadCatastro[] | { fallbackNum: number } | null> {
+  try {
+    const url = `https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/json/Consulta_DNPLOC`
+      + `?Provincia=${encodeURIComponent(provincia)}&Municipio=${encodeURIComponent(municipio)}`
+      + `&Sigla=${encodeURIComponent(sigla)}&Calle=${encodeURIComponent(calle)}`
+      + `&Numero=${encodeURIComponent(String(numero))}`
+    const dres = await fetch(url, { headers: { Accept: "application/json" } })
+    if (!dres.ok) return null
+    const text = await dres.text()
+    const dj = JSON.parse(text.replace(/^\uFEFF/, ""))
+    const result = dj?.consulta_dnplocResult
+    if (!result) return null
+
+    const units = parseCatastroUnits(result)
+    if (units.length > 0) return units
+
+    // Si el número exacto no tiene fincas pero Catastro devuelve números de portal cercanos
+    if (result.control?.cunum > 0 && result.numerero?.nump) {
+      let numps = result.numerero.nump
+      if (!Array.isArray(numps)) numps = [numps]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const candidateNums = numps.map((x: any) => parseInt(x.num?.pnp)).filter((n: number) => !isNaN(n))
+      if (candidateNums.length > 0) {
+        candidateNums.sort((a: number, b: number) => Math.abs(a - numero) - Math.abs(b - numero))
+        return { fallbackNum: candidateNums[0] }
+      }
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Consulta DNPRC a la API del Catastro por Referencia Catastral (14 caracteres)
+async function consultarCatastroDNPRC(
+  provincia: string,
+  municipio: string,
+  refCat: string
+): Promise<UnidadCatastro[] | null> {
+  try {
+    const url = `https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/json/Consulta_DNPRC`
+      + `?Provincia=${encodeURIComponent(provincia)}&Municipio=${encodeURIComponent(municipio)}`
+      + `&RefCat=${encodeURIComponent(refCat.substring(0, 14))}`
+    const dres = await fetch(url, { headers: { Accept: "application/json" } })
+    if (!dres.ok) return null
+    const text = await dres.text()
+    const dj = JSON.parse(text.replace(/^\uFEFF/, ""))
+    const result = dj?.consulta_dnprcResult
+    if (!result) return null
+
+    const units = parseCatastroUnits(result)
+    if (units.length > 0) return units
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Dirección → geocode (CartoCiudad) + fincas del Catastro (DNPLOC): pisos, puertas, uso, m².
+export async function buscarCatastro(direccion: string): Promise<CatastroResultado | null> {
+  const geo = await geocodificar(direccion)
+  if (!geo) return null
+  const base: CatastroResultado = { lat: geo.lat, lng: geo.lng, direccion: geo.direccion, unidades: [] }
+
+  let provincia = _norm((geo.province ?? "VALENCIA").split("/")[0])
+  if (provincia.includes("VALENC")) provincia = "VALENCIA"
+  let municipio = _norm(geo.muni ?? "VALENCIA")
+  if (municipio.includes("VALENC")) municipio = "VALENCIA"
+
+  const attachTotalPlantas = (units: UnidadCatastro[]) => {
+    base.unidades = units
+    const nums = units.map((u) => u.plantaNum).filter((n): n is number => n != null)
+    base.totalPlantas = nums.length > 0 ? Math.max(...nums) : null
+    return base
+  }
+
+  // Intentar primero por Referencia Catastral (DNPRC) si está disponible (mucho más preciso)
+  if (geo.refCatastral) {
+    const units = await consultarCatastroDNPRC(provincia, municipio, geo.refCatastral)
+    if (units && units.length > 0) {
+      return attachTotalPlantas(units)
+    }
+  }
+
+  let numero = geo.portalNumber
+  if (numero == null) {
+    const mNum = direccion.match(/\b(\d{1,4})\b/)
+    if (mNum) numero = parseInt(mNum[1])
+  }
+  if (numero == null) return base
+
+  const siglaOrig = TIPVIA_SIGLA[_norm(geo.tip_via ?? "")] ?? "CL"
+  const rawAddress = geo.address ?? ""
+  const cleanStr = _norm(rawAddress)
+  const rawParts = cleanStr.split("/").map((s) => s.trim()).filter(Boolean)
+
+  const calleVariants = new Set<string>()
+  for (const p of rawParts) {
+    calleVariants.add(p)
+    calleVariants.add(`${p} DEL`)
+    calleVariants.add(`${p} DE LA`)
+    calleVariants.add(`DEL ${p}`)
+    calleVariants.add(`DE LA ${p}`)
+
+    // Reemplazos de títulos habituales (DOCTOR -> DR, SANTA -> STA, etc.)
+    const drStr = p.replace(/\bDOCTOR\b/g, "DR")
+                   .replace(/\bDOCTORA\b/g, "DRA")
+                   .replace(/\bPROFESOR\b/g, "PROF")
+                   .replace(/\bARQUITECTO\b/g, "ARQ")
+                   .replace(/\bINGENIERO\b/g, "ING")
+                   .replace(/\bSANTA\b/g, "STA")
+                   .replace(/\bGENERAL\b/g, "GEN")
+    if (drStr !== p) {
+      calleVariants.add(drStr)
+      calleVariants.add(`${drStr} DEL`)
+      calleVariants.add(`${drStr} DE LA`)
+    }
+
+    // Eliminación de títulos e iniciales
+    const noTitle = p.replace(/^(DOCTOR|DOCTORA|DR|DRA|PROFESOR|PROF|ARQUITECTO|ARQ|INGENIERO|ING|GENERAL|GEN|SANTA|STA|SANT|SAN|DON|DOÑA|DE LA|DEL|DE|DES|DOS)\s+/, "")
+    if (noTitle !== p) {
+      calleVariants.add(noTitle)
+      calleVariants.add(`${noTitle} DEL`)
+      calleVariants.add(`${noTitle} DE LA`)
+    }
+  }
+
+  const siglasToTry = [siglaOrig]
+  for (const s of ["CL", "AV", "PZ", "GV", "PS", "CR", "RD"]) {
+    if (!siglasToTry.includes(s)) siglasToTry.push(s)
+  }
+
+  const fallbacks: { provincia: string; municipio: string; sig: string; calleVar: string; fallbackNum: number }[] = []
+
+  // FASE 1: Buscar coincidencia exacta con el portal pedido
+  for (const calleVar of calleVariants) {
+    for (const sig of siglasToTry) {
+      const res = await consultarCatastroDNPLOC(provincia, municipio, sig, calleVar, numero)
+      if (Array.isArray(res) && res.length > 0) {
+        return attachTotalPlantas(res)
+      } else if (res && typeof res === "object" && "fallbackNum" in res) {
+        fallbacks.push({ provincia, municipio, sig, calleVar, fallbackNum: res.fallbackNum })
+      }
+    }
+  }
+
+  // FASE 2: Si no hubo fincas en el portal exacto, intentar el portal más cercano devuelto por el Catastro
+  if (fallbacks.length > 0) {
+    for (const fb of fallbacks) {
+      const res = await consultarCatastroDNPLOC(fb.provincia, fb.municipio, fb.sig, fb.calleVar, fb.fallbackNum)
+      if (Array.isArray(res) && res.length > 0) {
+        return attachTotalPlantas(res)
+      }
+    }
+  }
+
+  return base
 }
 
 export async function getValoraciones(): Promise<Valoracion[]> {

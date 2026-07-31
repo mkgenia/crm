@@ -141,14 +141,17 @@ banda = m² × (€/m² de la zona) × (factor de características)
 **Comparables editables**: al excluir pisos, cambian P25/mediana/P75 → cambian
 las 3 bandas. La muestra usada se guarda con la valoración.
 
-### Comparación por RADIO (estilo BetterPlace) — modo preferido
-Al buscar una **dirección**, en vez de comparar por barrio se fija un **centro**
-(pin en el mapa) y un **radio ajustable** (slider, 200 m–2,5 km). Los comparables
-son los pisos **dentro de ese círculo** (`getComparablesRadio`, filtro por
-haversine). El mapa de zonas se mantiene: el círculo se dibuja **encima**.
-- Server action `getComparablesRadio(lat, lng, radio, operacion)`.
-- Cambiar el radio recalcula comparables y bandas en vivo.
-- Si no buscas dirección, sigue disponible la comparación por zona (click en barrio).
+### Comparación por RADIO (estilo BetterPlace) — mecánica única
+Valorar = **fijar un punto + ajustar un radio**. Una sola forma, sin mezclar:
+- **Fijar el punto**: escribir una dirección (geocode) **o hacer clic en el mapa**
+  (en modo valoración, el clic coloca el punto en vez de seleccionar barrio).
+- **Radio ajustable** (slider 200 m–2,5 km) → comparables = pisos **dentro del
+  círculo** (`getComparablesRadio`, filtro haversine).
+- **Los comparables se ven como puntos en el mapa**, coloreados por €/m². Click en
+  un punto → lo excluye/incluye y recalcula las bandas en vivo.
+- El **heatmap de barrios se mantiene** como contexto (el círculo va encima).
+- El **click en barrio** (fuera de valoración) sigue mostrando su ficha de precio
+  para explorar; "Valorar aquí" cae el punto en el centro del barrio.
 
 ### Descuento de venta real (−15%)
 Toggle (por defecto **activado**): los pisos suelen venderse ~15% por debajo del
@@ -186,11 +189,16 @@ motor, ni el mapa. Cero replicación.
 - No añadió columnas ni cambió el motor. Solo setea `codbarrio` (que ya existía).
 - CartoCiudad ya devuelve `refCatastral` → puente natural hacia la opción B.
 
-### B) Referencia catastral → zona + metros + planta + puerta
-- Nuevo server action `consultaCatastro(rc)` → servicios del **Catastro** (gratis) →
-  dirección, **planta, puerta, superficie construida (m²)**, coordenadas.
-- Rellena de una vez: `metros`, `planta`, dirección, y la zona (por coordenadas).
-- Tampoco cambia el modelo: solo **prerrellena inputs existentes**.
+### B) Dirección → fincas del Catastro ✅ HECHO
+- Server action `buscarCatastro(direccion)`: geocodifica con CartoCiudad y con los
+  componentes (tipo vía → sigla, calle, número, municipio) llama al **Catastro
+  DNPLOC** (JSON, gratis, sin key) → lista de **todas las fincas** del portal.
+- Por cada finca: **planta, puerta, escalera, uso** (Residencial/Comercial/…),
+  **superficie construida (m²)** y **año**.
+- En el panel: al buscar una dirección salen las fincas; eliges la tuya y
+  **autorrellena m² y planta**, y ves el **tipo** (piso/local…). El punto de radio
+  se fija igual.
+- Aditivo: solo prerrellena inputs existentes. No cambia BD ni motor.
 
 > Límite honesto: los geocoders gratis tienen tope de uso. Para valoraciones
 > manuales van sobrados; no sirven para miles de llamadas automáticas.

@@ -10,8 +10,8 @@ import {
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  crearValoracion, eliminarValoracion, getComparablesBarrio, getComparablesRadio, geocodificar,
-  type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado,
+  crearValoracion, eliminarValoracion, getComparablesBarrio, getComparablesRadio, buscarCatastro,
+  type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado, type UnidadCatastro,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
 
@@ -69,6 +69,22 @@ function polyContains(coords: number[][][], lng: number, lat: number) {
   for (let k = 1; k < coords.length; k++) if (ringContains(coords[k], lng, lat)) return false
   return true
 }
+// Centroide aproximado (media del anillo exterior) de un barrio → [lat, lng]
+function centroideBarrio(geojson: GeoBarrios, codbarrio: string): [number, number] | null {
+  const f = geojson.features.find((ft) => ft.properties.codbarrio === codbarrio)
+  if (!f || !f.geometry) return null
+  const g = f.geometry
+  const ring = g.type === "Polygon"
+    ? (g.coordinates as number[][][])[0]
+    : g.type === "MultiPolygon"
+      ? (g.coordinates as number[][][][])[0][0]
+      : null
+  if (!ring || !ring.length) return null
+  let sx = 0, sy = 0
+  for (const [x, y] of ring) { sx += x; sy += y }
+  return [sy / ring.length, sx / ring.length]
+}
+
 function barrioEnCoords(geojson: GeoBarrios, lng: number, lat: number): BarrioProps | null {
   for (const f of geojson.features) {
     const g = f.geometry
@@ -102,7 +118,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   const [excludedIds, setExcludedIds] = useState<Set<number>>(new Set())
 
   // Modo radio (estilo BetterPlace): centro + radio en metros
-  const [centro, setCentro] = useState<{ lat: number; lng: number; label: string } | null>(null)
+  const [centro, setCentro] = useState<{ lat: number; lng: number; label: string; codbarrio: string | null; nombre: string | null } | null>(null)
   const [radio, setRadio] = useState(600)
 
   // Carga del GeoJSON de barrios (asset estático)
@@ -168,9 +184,10 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
     return () => { cancelled = true }
   }, [centro, panel, selected, operacion])
 
-  // Fijar el punto de valoración desde una dirección geocodificada
+  // Fijar el punto de valoración (desde dirección geocodificada o clic en el mapa)
   function valorarEnDireccion(lat: number, lng: number, label: string) {
-    setCentro({ lat, lng, label })
+    const b = geojson ? barrioEnCoords(geojson, lng, lat) : null
+    setCentro({ lat, lng, label, codbarrio: b?.codbarrio ?? null, nombre: b?.nombre ?? null })
   }
 
   function toggleExcluded(id: number) {
@@ -242,6 +259,11 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
               onSelectZona={handleSelectZona}
               centro={centro ? [centro.lat, centro.lng] : null}
               radio={radio}
+              valuationMode={panel === "nueva"}
+              onMapClick={(lat, lng) => valorarEnDireccion(lat, lng, "Punto en el mapa")}
+              comparables={centro ? comparables.filter((c) => c.lat != null && c.lng != null).map((c) => ({ id: c.id, lat: c.lat!, lng: c.lng!, precio_m2: c.precio_m2 })) : []}
+              excludedIds={excludedIds}
+              onToggleComparable={toggleExcluded}
             />
           ) : (
             <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Cargando mapa…</div>
@@ -289,7 +311,13 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
                       </button>
                     )}
                     <button
-                      onClick={() => setPanel("nueva")}
+                      onClick={() => {
+                        if (geojson) {
+                          const c = centroideBarrio(geojson, selected.codbarrio)
+                          if (c) valorarEnDireccion(c[0], c[1], selected.nombre)
+                        }
+                        setPanel("nueva")
+                      }}
                       className="flex-1 h-8 rounded-md bg-violet-500/10 text-violet-500 text-xs font-medium hover:bg-violet-500/20 transition-colors flex items-center justify-center gap-1"
                     >
                       <ChevronRight className="h-3.5 w-3.5" />
@@ -347,6 +375,9 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
           onRadioChange={setRadio}
           onValorarDireccion={valorarEnDireccion}
           onOpenComparables={handleOpenComparables}
+          onToggleComparable={toggleExcluded}
+          onSelectAllComparables={selectAll}
+          onDeselectAllComparables={deselectAll}
           onClose={() => setPanel(null)}
           onCreada={(v) => { setValoraciones((prev) => [v, ...prev]); setPanel("historial") }}
         />
@@ -555,7 +586,8 @@ const EXTRA_OPTS = [
 function NuevaValoracionPanel({
   geojson, statsByBarrio, operacion, preselect, comparables, excludedIds, liveStats, factores,
   centro, radio, onRadioChange, onValorarDireccion,
-  onOpenComparables, onClose, onCreada,
+  onOpenComparables, onToggleComparable, onSelectAllComparables, onDeselectAllComparables,
+  onClose, onCreada,
 }: {
   geojson: GeoBarrios
   statsByBarrio: Record<string, ZonaStat>
@@ -565,23 +597,22 @@ function NuevaValoracionPanel({
   excludedIds: Set<number>
   liveStats: ReturnType<typeof calcStats>
   factores: FactoresMercado
-  centro: { lat: number; lng: number; label: string } | null
+  centro: { lat: number; lng: number; label: string; codbarrio: string | null; nombre: string | null } | null
   radio: number
   onRadioChange: (r: number) => void
   onValorarDireccion: (lat: number, lng: number, label: string) => void
   onOpenComparables: () => void
+  onToggleComparable: (id: number) => void
+  onSelectAllComparables: () => void
+  onDeselectAllComparables: () => void
   onClose: () => void
   onCreada: (v: Valoracion) => void
 }) {
   const radioMode = centro != null
-  const barrios = useMemo(
-    () => geojson.features
-      .map((f) => f.properties)
-      .sort((a, b) => a.nombre.localeCompare(b.nombre)),
-    [geojson]
-  )
+  // El barrio se deriva del punto de valoración (centro) o de la zona seleccionada
+  const codbarrio = centro?.codbarrio ?? preselect?.codbarrio ?? ""
+  const nombreBarrio = centro?.nombre ?? preselect?.nombre ?? null
 
-  const [codbarrio, setCodbarrio] = useState(preselect?.codbarrio ?? "")
   const [direccion, setDireccion] = useState("")
   const [metros, setMetros] = useState("")
   const [habitaciones, setHabitaciones] = useState("")
@@ -592,28 +623,53 @@ function NuevaValoracionPanel({
   const [extras, setExtras] = useState<Set<string>>(new Set())
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
-  // Descuento del 15% (los pisos suelen venderse ~15% por debajo del anuncio)
   const [descuento, setDescuento] = useState(true)
 
-  // Búsqueda por dirección (geocodificación → radio de comparación)
+  // Toggle inline comparables list in panel
+  const [showComparablesList, setShowComparablesList] = useState(false)
+
+  // Búsqueda por dirección (geocode + Catastro → radio + fincas)
   const [geoLoading, setGeoLoading] = useState(false)
   const [geoMsg, setGeoMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [unidades, setUnidades] = useState<UnidadCatastro[]>([])
+  const [unidadSel, setUnidadSel] = useState<string | null>(null)
+  const [totalPlantas, setTotalPlantas] = useState<number | null>(null)
+  const [plantaNum, setPlantaNum] = useState<number | null>(null)
 
   async function buscarDireccion() {
     const q = direccion.trim()
     if (!q) return
     setGeoLoading(true)
     setGeoMsg(null)
-    const g = await geocodificar(q)
+    setUnidades([]); setUnidadSel(null); setTotalPlantas(null); setPlantaNum(null)
+    const g = await buscarCatastro(q)
     setGeoLoading(false)
     if (!g) { setGeoMsg({ ok: false, text: "No se encontró la dirección" }); return }
     setDireccion(g.direccion)
-    // Modo radio: fija el centro (comparación por radio, no por zona)
+    // Fija el punto de valoración (el shell resuelve el barrio)
     onValorarDireccion(g.lat, g.lng, g.direccion)
-    // También resolvemos el barrio para etiquetar
     const barrio = barrioEnCoords(geojson, g.lng, g.lat)
-    if (barrio) { setCodbarrio(barrio.codbarrio); setGeoMsg({ ok: true, text: `${g.direccion} · ${barrio.nombre}` }) }
-    else setGeoMsg({ ok: true, text: g.direccion })
+    setUnidades(g.unidades)
+    setTotalPlantas(g.totalPlantas ?? null)
+    setGeoMsg({
+      ok: true,
+      text: `${g.direccion}${barrio ? ` · ${barrio.nombre}` : ""}${g.unidades.length ? ` · ${g.unidades.length} fincas en Catastro` : ""}${g.totalPlantas ? ` (${g.totalPlantas} plantas)` : ""}`,
+    })
+  }
+
+  // Mapea la planta del Catastro a las opciones del selector
+  function plantaCatastro(pt: string): string {
+    const p = pt.toUpperCase()
+    if (["B0", "BJ", "PB", "EN", "BA", "00"].includes(p)) return "bajo"
+    if (["AT", "ÁT", "ATICO", "ÁTICO", "SS"].includes(p)) return "atico"
+    return "intermedia"
+  }
+
+  function elegirUnidad(u: UnidadCatastro) {
+    setUnidadSel(u.rc)
+    if (u.superficie) setMetros(String(u.superficie))
+    if (u.planta) setPlanta(plantaCatastro(u.planta))
+    setPlantaNum(u.plantaNum ?? null)
   }
 
   // Base de precios: en modo radio o con comparables cargados → usar liveStats;
@@ -627,17 +683,52 @@ function NuevaValoracionPanel({
   }, [codbarrio, statsByBarrio, comparables, liveStats])
 
   const m2 = parseFloat(metros.replace(",", "."))
-  const nombreBarrio = barrios.find((b) => b.codbarrio === codbarrio)?.nombre ?? null
 
-  // Factor de ajuste por características
+  // Penalización por falta de ascensor según la altura real de la planta:
+  const ascensorPenalty = useMemo(() => {
+    if (ascensor) return 1
+    if (plantaNum != null) {
+      if (plantaNum <= 0) return 1.0 // Bajo: sin penalización
+      if (plantaNum === 1) return 0.98 // 1º sin ascensor: -2%
+      if (plantaNum === 2) return 0.95 // 2º sin ascensor: -5%
+      if (plantaNum === 3) return 0.92 // 3º sin ascensor: -8%
+      if (plantaNum === 4) return 0.88 // 4º sin ascensor: -12%
+      return 0.85 // 5º+ / Ático sin ascensor: -15%
+    }
+    if (planta === "bajo") return 1.0
+    if (planta === "intermedia") return 0.95
+    if (planta === "alta") return 0.90
+    if (planta === "atico") return 0.85
+    return factores.ascensorFactor
+  }, [ascensor, plantaNum, planta, factores])
+
+  // Multiplicador por habitaciones (estudio/1hab +4%, 2hab 0%, 3hab +2%, 4+hab +4%)
+  const fHab = useMemo(() => {
+    const n = parseInt(habitaciones)
+    if (isNaN(n) || n <= 0) return 1.0
+    if (n === 1) return 1.04
+    if (n === 2) return 1.00
+    if (n === 3) return 1.02
+    return 1.04
+  }, [habitaciones])
+
+  // Multiplicador por baños (1 baño 0%, 2 baños +3%, 3+ baños +6%)
+  const fBanos = useMemo(() => {
+    const n = parseInt(banos)
+    if (isNaN(n) || n <= 0) return 1.0
+    if (n === 1) return 1.00
+    if (n === 2) return 1.03
+    return 1.06
+  }, [banos])
+
+  // Factor de ajuste total por características
   const factor = useMemo(() => {
     const fCond = COND_OPTS.find((o) => o.key === condicion)?.factor ?? 1
     const fPlanta = PLANTA_OPTS.find((o) => o.key === planta)?.factor ?? 1
-    const fAsc = ascensor ? 1 : factores.ascensorFactor
-    const fBanos = banos && parseInt(banos) >= 2 ? 1.02 : 1
+    const fAsc = ascensorPenalty
     const fExtras = 1 + EXTRA_OPTS.filter((o) => extras.has(o.key)).reduce((s, o) => s + o.pct, 0)
-    return fCond * fPlanta * fAsc * fBanos * fExtras
-  }, [condicion, planta, ascensor, banos, extras, factores])
+    return fCond * fPlanta * fAsc * fHab * fBanos * fExtras
+  }, [condicion, planta, ascensorPenalty, fHab, fBanos, extras])
 
   // Tres bandas (con descuento opcional del 15%)
   const bandas = useMemo(() => {
@@ -693,196 +784,406 @@ function NuevaValoracionPanel({
     if (res.valoracion) onCreada(res.valoracion)
   }
 
+  const [paso, setPaso] = useState<1 | 2 | 3>(1)
+
   return (
     <Drawer title="Nueva valoración" onClose={onClose} wide>
       <div className="space-y-4">
-        <Field label="Zona / barrio">
-          <select
-            value={codbarrio}
-            onChange={(e) => setCodbarrio(e.target.value)}
-            className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          >
-            <option value="">Selecciona un barrio…</option>
-            {barrios.map((b) => (
-              <option key={b.codbarrio} value={b.codbarrio}>
-                {b.nombre}{statsByBarrio[b.codbarrio] ? ` · ${statsByBarrio[b.codbarrio].precio_m2_mediana} €/m²` : " (sin datos)"}
-              </option>
-            ))}
-          </select>
-        </Field>
-
-        {/* Botón ver/editar comparables */}
-        {(radioMode || (codbarrio && preselect?.codbarrio === codbarrio)) && (
+        {/* Barra superior de pasos */}
+        <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-muted/30 border border-border text-xs mb-2">
           <button
-            onClick={onOpenComparables}
-            className="w-full h-9 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 flex items-center justify-center gap-2 transition-colors"
+            onClick={() => setPaso(1)}
+            className={cn("py-1.5 px-2 rounded-md font-medium flex items-center justify-center gap-1.5 transition-all select-none",
+              paso === 1 ? "bg-background text-foreground shadow-sm border border-border" : "text-muted-foreground hover:text-foreground")}
           >
-            <BarChart2 className="h-4 w-4" />
-            {comparables.length > 0
-              ? excludedIds.size > 0
-                ? <><span className="text-amber-400">{excludedIds.size} excluidos</span> · {activeCount} activos usados</>
-                : `${comparables.length} comparables · editar`
-              : "Ver y editar comparables"}
+            <span className={cn("w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0",
+              paso === 1 ? "bg-violet-500 text-white" : "bg-muted text-muted-foreground")}>1</span>
+            <span className="truncate">Ubicación</span>
           </button>
-        )}
 
-        <Field label="Dirección (comparación por radio)">
-          <div className="flex gap-2">
-            <input
-              value={direccion}
-              onChange={(e) => setDireccion(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); buscarDireccion() } }}
-              placeholder="Ej: Carrer de Sueca 10"
-              className="flex-1 h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-            />
+          <button
+            onClick={() => setPaso(2)}
+            className={cn("py-1.5 px-2 rounded-md font-medium flex items-center justify-center gap-1.5 transition-all select-none",
+              paso === 2 ? "bg-background text-foreground shadow-sm border border-border" : "text-muted-foreground hover:text-foreground")}
+          >
+            <span className={cn("w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0",
+              paso === 2 ? "bg-violet-500 text-white" : "bg-muted text-muted-foreground")}>2</span>
+            <span className="truncate">Características</span>
+          </button>
+
+          <button
+            onClick={() => setPaso(3)}
+            className={cn("py-1.5 px-2 rounded-md font-medium flex items-center justify-center gap-1.5 transition-all select-none",
+              paso === 3 ? "bg-background text-foreground shadow-sm border border-border" : "text-muted-foreground hover:text-foreground")}
+          >
+            <span className={cn("w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0",
+              paso === 3 ? "bg-violet-500 text-white" : "bg-muted text-muted-foreground")}>3</span>
+            <span className="truncate">Comparables</span>
+          </button>
+        </div>
+
+        {/* ─── PASO 1: Ubicación e Inmueble (Catastro / Mapa / Dirección) ─── */}
+        {paso === 1 && (
+          <div className="space-y-4">
+            <Field label="Dirección o clic en el mapa">
+              <div className="flex gap-2">
+                <input
+                  value={direccion}
+                  onChange={(e) => setDireccion(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); buscarDireccion() } }}
+                  placeholder="Ej: Carrer de Sueca 10"
+                  className="flex-1 h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                <button
+                  onClick={buscarDireccion}
+                  disabled={geoLoading || !direccion.trim()}
+                  className="h-9 px-3 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+                >
+                  {geoLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                  Buscar
+                </button>
+              </div>
+              {geoMsg && (
+                <p className={cn("text-xs mt-1.5 flex items-center gap-1", geoMsg.ok ? "text-emerald-500" : "text-amber-400")}>
+                  {geoMsg.ok && <MapPin className="h-3 w-3" />}{geoMsg.text}
+                </p>
+              )}
+            </Field>
+
+            {/* Fincas del Catastro (piso/puerta/uso/m²) */}
+            {unidades.length > 0 && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">
+                  Fincas del Catastro · elige la del inmueble (autorrellena m² y planta)
+                </label>
+                <div className="max-h-52 overflow-y-auto scrollbar-thin rounded-lg border border-border divide-y divide-border/60">
+                  {unidades.map((u) => {
+                    const sel = unidadSel === u.rc
+                    const esViv = /residencial/i.test(u.uso)
+                    return (
+                      <button
+                        key={u.rc}
+                        onClick={() => elegirUnidad(u)}
+                        className={cn("w-full text-left px-3 py-2 flex items-center justify-between gap-2 transition-colors",
+                          sel ? "bg-violet-500/10 border-l-2 border-l-violet-500" : "hover:bg-muted/40")}
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">
+                            {u.planta ? `Planta ${u.planta}` : "—"}{u.puerta ? ` · Pta ${u.puerta}` : ""}{u.escalera && u.escalera !== "1" ? ` · Esc ${u.escalera}` : ""}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">
+                            <span className={cn(esViv ? "text-emerald-500/80" : "text-amber-400/80")}>{u.uso}</span>
+                            {u.superficie ? ` · ${u.superficie} m²` : ""}{u.anio ? ` · ${u.anio}` : ""}
+                          </p>
+                        </div>
+                        {sel && <Check className="h-4 w-4 text-violet-500 shrink-0" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Sin punto todavía → guía */}
+            {!radioMode && (
+              <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+                <MapPin className="h-5 w-5 mx-auto mb-1.5 opacity-40" />
+                Busca una dirección o <span className="text-foreground">haz clic en el mapa</span> para
+                fijar la ubicación exacta.
+              </div>
+            )}
+
+            {/* Botón avance a paso 2 */}
             <button
-              onClick={buscarDireccion}
-              disabled={geoLoading || !direccion.trim()}
-              className="h-9 px-3 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+              onClick={() => setPaso(2)}
+              disabled={!radioMode && !direccion.trim()}
+              className="w-full h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center justify-center gap-2 mt-4"
             >
-              {geoLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-              Buscar
+              Siguiente: Datos y Características <ChevronRight className="h-4 w-4" />
             </button>
           </div>
-          {geoMsg && (
-            <p className={cn("text-xs mt-1.5 flex items-center gap-1", geoMsg.ok ? "text-emerald-500" : "text-amber-400")}>
-              {geoMsg.ok && <MapPin className="h-3 w-3" />}{geoMsg.text}
-            </p>
-          )}
-        </Field>
+        )}
 
-        {/* Radio de comparación (modo BetterPlace) */}
-        {radioMode && (
-          <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Radio de comparación</span>
-              <span className="font-medium text-violet-400 tabular-nums">
-                {radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}
-              </span>
+        {/* ─── PASO 2: Datos y Características del Inmueble ─── */}
+        {paso === 2 && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="Metros (m²)">
+                <input value={metros} onChange={(e) => setMetros(e.target.value)} inputMode="decimal" placeholder="90"
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+              </Field>
+              <Field label="Habitaciones">
+                <input value={habitaciones} onChange={(e) => setHabitaciones(e.target.value)} inputMode="numeric" placeholder="3"
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+              </Field>
+              <Field label="Baños">
+                <input value={banos} onChange={(e) => setBanos(e.target.value)} inputMode="numeric" placeholder="2"
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
+              </Field>
             </div>
-            <input
-              type="range" min={200} max={2500} step={100} value={radio}
-              onChange={(e) => onRadioChange(parseInt(e.target.value))}
-              className="w-full accent-violet-500"
-            />
-            <p className="text-xs text-muted-foreground/70">
-              {comparables.length > 0
-                ? <><span className="text-foreground font-medium">{activeCount}</span> pisos dentro del radio</>
-                : "Sin pisos en este radio — amplíalo"}
-            </p>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Condición">
+                <select value={condicion} onChange={(e) => setCondicion(e.target.value)}
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring">
+                  {COND_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                </select>
+              </Field>
+              <Field label="Planta">
+                <select value={planta} onChange={(e) => setPlanta(e.target.value)}
+                  disabled={!!unidadSel}
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed">
+                  {PLANTA_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                </select>
+              </Field>
+            </div>
+
+            {/* Ascensor */}
+            <button
+              onClick={() => setAscensor((v) => !v)}
+              className={cn("w-full h-9 rounded-md border text-sm flex items-center justify-between px-3 transition-colors",
+                ascensor ? "border-violet-500/40 bg-violet-500/5 text-foreground" : "border-border text-muted-foreground")}
+            >
+              <span>Ascensor</span>
+              <span className={cn("text-xs font-medium", ascensor ? "text-violet-500" : "text-amber-500")}>
+                {ascensor
+                  ? "Sí"
+                  : `No (${ascensorPenalty === 1 ? "sin penalización en bajo" : `−${Math.round((1 - ascensorPenalty) * 100)}%`})`}
+              </span>
+            </button>
+
+            {/* Extras */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Extras</label>
+              <div className="flex flex-wrap gap-1.5">
+                {EXTRA_OPTS.map((o) => {
+                  const on = extras.has(o.key)
+                  return (
+                    <button key={o.key} onClick={() => toggleExtra(o.key)}
+                      className={cn("px-2.5 h-8 rounded-md border text-xs transition-colors",
+                        on ? "border-violet-500/40 bg-violet-500/10 text-violet-400" : "border-border text-muted-foreground hover:text-foreground")}>
+                      {o.label} <span className="opacity-60">+{Math.round(o.pct * 100)}%</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* Toggle descuento 15% */}
+            <button
+              onClick={() => setDescuento((v) => !v)}
+              className={cn("w-full rounded-md border px-3 py-2 flex items-center justify-between transition-colors",
+                descuento ? "border-emerald-500/40 bg-emerald-500/5" : "border-border")}
+            >
+              <span className="text-sm text-left">
+                Descuento venta real <span className="text-muted-foreground">(−15%)</span>
+                <span className="block text-[11px] text-muted-foreground/70">Los pisos suelen venderse por debajo del anuncio</span>
+              </span>
+              <span className={cn("text-xs font-semibold px-2 py-0.5 rounded-full shrink-0",
+                descuento ? "bg-emerald-500/15 text-emerald-500" : "bg-muted text-muted-foreground")}>
+                {descuento ? "Aplicado" : "No"}
+              </span>
+            </button>
+
+            {/* Desglose de factores de ajuste */}
+            <div className="rounded-xl border border-border bg-card p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-foreground">Ajuste por características</span>
+                <span className="font-bold text-violet-400 tabular-nums">
+                  ×{factor.toFixed(2)} ({factor >= 1 ? `+${Math.round((factor - 1) * 100)}%` : `−${Math.round((1 - factor) * 100)}%`})
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5 pt-1 text-[11px] text-muted-foreground border-t border-border/60">
+                <div>
+                  <span className="opacity-70">Estado:</span>{" "}
+                  <span className="font-medium text-foreground">{COND_OPTS.find(o => o.key === condicion)?.label}</span>
+                </div>
+                <div>
+                  <span className="opacity-70">Planta:</span>{" "}
+                  <span className="font-medium text-foreground">{PLANTA_OPTS.find(o => o.key === planta)?.label}</span>
+                </div>
+                <div>
+                  <span className="opacity-70">Ascensor:</span>{" "}
+                  <span className={cn("font-medium", ascensor ? "text-emerald-500" : "text-amber-500")}>
+                    {ascensor ? "Sí" : ascensorPenalty === 1 ? "Bajo (0%)" : `−${Math.round((1 - ascensorPenalty) * 100)}%`}
+                  </span>
+                </div>
+                <div>
+                  <span className="opacity-70">Habitaciones:</span>{" "}
+                  <span className="font-medium text-foreground">{habitaciones || "—"} ({fHab >= 1 ? `+${Math.round((fHab - 1) * 100)}%` : `${Math.round((fHab - 1) * 100)}%`})</span>
+                </div>
+                <div>
+                  <span className="opacity-70">Baños:</span>{" "}
+                  <span className="font-medium text-foreground">{banos || "—"} ({fBanos >= 1 ? `+${Math.round((fBanos - 1) * 100)}%` : `${Math.round((fBanos - 1) * 100)}%`})</span>
+                </div>
+                <div>
+                  <span className="opacity-70">Extras:</span>{" "}
+                  <span className="font-medium text-foreground">
+                    +{Math.round(EXTRA_OPTS.filter(o => extras.has(o.key)).reduce((s, o) => s + o.pct, 0) * 100)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Vista previa estimación preliminar */}
+            {bandas && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wider">Estimación preliminar</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Basado en características (mediana zona: {stat?.precio_m2_mediana} €/m²)</p>
+                </div>
+                <p className="text-lg font-bold text-amber-400 tabular-nums">{eur(bandas.amarillo)}</p>
+              </div>
+            )}
+
+            {/* Navegación Paso 2 */}
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => setPaso(1)}
+                className="h-10 px-4 rounded-md border border-border text-sm font-medium hover:bg-muted/40 transition-colors"
+              >
+                ← Atrás
+              </button>
+              <button
+                onClick={() => setPaso(3)}
+                disabled={!m2 || m2 <= 0}
+                className="flex-1 h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                Siguiente: Ajustar Comparables <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Metros (m²)">
-            <input value={metros} onChange={(e) => setMetros(e.target.value)} inputMode="decimal" placeholder="90"
-              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
-          </Field>
-          <Field label="Habitaciones">
-            <input value={habitaciones} onChange={(e) => setHabitaciones(e.target.value)} inputMode="numeric" placeholder="3"
-              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
-          </Field>
-          <Field label="Baños">
-            <input value={banos} onChange={(e) => setBanos(e.target.value)} inputMode="numeric" placeholder="2"
-              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" />
-          </Field>
-        </div>
+        {/* ─── PASO 3: Ajuste Fino con Comparables del Entorno ─── */}
+        {paso === 3 && (
+          <div className="space-y-4">
+            {/* Slider de radio de búsqueda */}
+            {radioMode && (
+              <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3 space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">Radio de comparación</span>
+                  <span className="font-medium text-violet-400 tabular-nums">
+                    {radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}
+                  </span>
+                </div>
+                <input
+                  type="range" min={200} max={2500} step={100} value={radio}
+                  onChange={(e) => onRadioChange(parseInt(e.target.value))}
+                  className="w-full accent-violet-500"
+                />
+                <p className="text-xs text-muted-foreground/70">
+                  {comparables.length > 0
+                    ? <><span className="text-foreground font-medium">{activeCount}</span> de {comparables.length} comparables activos</>
+                    : "Sin pisos en este radio — amplíalo"}
+                </p>
+              </div>
+            )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Condición">
-            <select value={condicion} onChange={(e) => setCondicion(e.target.value)}
-              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring">
-              {COND_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
-          </Field>
-          <Field label="Planta">
-            <select value={planta} onChange={(e) => setPlanta(e.target.value)}
-              className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring">
-              {PLANTA_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
-          </Field>
-        </div>
+            {/* Lista interactiva de comparables con casillas para incluir/excluir */}
+            {comparables.length > 0 ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-foreground">Selecciona los comparables que influyen en el precio:</span>
+                  <div className="flex gap-2 text-[11px]">
+                    <button onClick={onSelectAllComparables} className="text-violet-400 hover:underline">Incluir todos</button>
+                    <button onClick={onDeselectAllComparables} className="text-muted-foreground hover:underline">Excluir todos</button>
+                  </div>
+                </div>
+                <div className="max-h-56 overflow-y-auto divide-y divide-border/40 rounded-lg border border-border bg-background scrollbar-thin">
+                  {comparables.map((c) => {
+                    const excluded = excludedIds.has(c.id)
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => onToggleComparable(c.id)}
+                        className={cn(
+                          "px-3 py-2 flex items-center justify-between text-xs cursor-pointer select-none transition-colors",
+                          excluded ? "opacity-40 bg-muted/20" : "hover:bg-muted/40"
+                        )}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={cn(
+                            "h-4 w-4 rounded border flex items-center justify-center shrink-0 transition-colors",
+                            excluded ? "border-border bg-background" : "border-violet-500 bg-violet-500"
+                          )}>
+                            {!excluded && <Check className="h-3 w-3 text-white" />}
+                          </div>
+                          <div className="truncate">
+                            <span className="font-semibold text-foreground">{Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²</span>
+                            <span className="text-muted-foreground text-[11px] ml-2">
+                              {c.metros} m² · {c.habitaciones ?? "—"} hab · {c.banos ?? "—"} baños
+                            </span>
+                          </div>
+                        </div>
+                        <span className="font-medium text-foreground tabular-nums shrink-0 ml-2">
+                          {Math.round(c.precio).toLocaleString("es-ES")} €
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+                No hay comparables individuales en esta zona. Se utilizarán las estadísticas medias del barrio.
+              </div>
+            )}
 
-        {/* Ascensor */}
-        <button
-          onClick={() => setAscensor((v) => !v)}
-          className={cn("w-full h-9 rounded-md border text-sm flex items-center justify-between px-3 transition-colors",
-            ascensor ? "border-violet-500/40 bg-violet-500/5 text-foreground" : "border-border text-muted-foreground")}
-        >
-          <span>Ascensor</span>
-          <span className={cn("text-xs font-medium", ascensor ? "text-violet-500" : "text-muted-foreground")}>
-            {ascensor ? "Sí" : `No (×${factores.ascensorFactor})`}
-          </span>
-        </button>
+            {/* Resultado: Histograma + tres bandas de precio */}
+            {codbarrio && !stat && !radioMode && (
+              <p className="text-xs text-orange-400 bg-orange-400/10 rounded-md px-3 py-2">
+                Este barrio aún no tiene datos de mercado. Elige otro o ejecuta el scraper.
+              </p>
+            )}
+            {bandas && stat && (
+              <div className="space-y-3 pt-1">
+                <PrecioHistograma
+                  comparables={comparables}
+                  excludedIds={excludedIds}
+                  valorEstimado={bandas.amarillo}
+                  valorMin={bandas.verde}
+                  valorMax={bandas.rojo}
+                  m2={m2}
+                  stat={stat}
+                />
+                <Banda color="green"  label="Venta rápida"    valor={bandas.verde}    />
+                <Banda color="amber"  label="Valor estimado"  valor={bandas.amarillo} destacado />
+                <Banda color="red"    label="Ambicioso"       valor={bandas.rojo}     />
+                <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
+                  Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
+                  {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
+                  características ×{factor.toFixed(2)}
+                  {descuento && <> · <span className="text-emerald-500/80">−15% venta real</span></>}.
+                </p>
+              </div>
+            )}
 
-        {/* Extras */}
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Extras</label>
-          <div className="flex flex-wrap gap-1.5">
-            {EXTRA_OPTS.map((o) => {
-              const on = extras.has(o.key)
-              return (
-                <button key={o.key} onClick={() => toggleExtra(o.key)}
-                  className={cn("px-2.5 h-8 rounded-md border text-xs transition-colors",
-                    on ? "border-violet-500/40 bg-violet-500/10 text-violet-400" : "border-border text-muted-foreground hover:text-foreground")}>
-                  {o.label} <span className="opacity-60">+{Math.round(o.pct * 100)}%</span>
-                </button>
-              )
-            })}
+            {/* Campo opcional de Notas */}
+            <Field label="Notas (opcional)">
+              <textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} placeholder="Observaciones de la valoración…"
+                className="w-full px-2.5 py-2 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
+            </Field>
+
+            {/* Navegación y guardar */}
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => setPaso(2)}
+                className="h-10 px-4 rounded-md border border-border text-sm font-medium hover:bg-muted/40 transition-colors"
+              >
+                ← Atrás
+              </button>
+              <button
+                onClick={guardar}
+                disabled={!bandas || saving}
+                className="flex-1 h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                Guardar valoración
+              </button>
+            </div>
           </div>
-        </div>
-
-        {/* Toggle descuento 15% */}
-        <button
-          onClick={() => setDescuento((v) => !v)}
-          className={cn("w-full rounded-md border px-3 py-2 flex items-center justify-between transition-colors",
-            descuento ? "border-emerald-500/40 bg-emerald-500/5" : "border-border")}
-        >
-          <span className="text-sm text-left">
-            Descuento venta real <span className="text-muted-foreground">(−15%)</span>
-            <span className="block text-[11px] text-muted-foreground/70">Los pisos suelen venderse por debajo del anuncio</span>
-          </span>
-          <span className={cn("text-xs font-semibold px-2 py-0.5 rounded-full shrink-0",
-            descuento ? "bg-emerald-500/15 text-emerald-500" : "bg-muted text-muted-foreground")}>
-            {descuento ? "Aplicado" : "No"}
-          </span>
-        </button>
-
-        {/* Resultado: tres bandas */}
-        {codbarrio && !stat && !radioMode && (
-          <p className="text-xs text-orange-400 bg-orange-400/10 rounded-md px-3 py-2">
-            Este barrio aún no tiene datos de mercado. Elige otro o ejecuta el scraper.
-          </p>
         )}
-        {bandas && stat && (
-          <div className="space-y-2 pt-1">
-            <Banda color="green"  label="Venta rápida"    valor={bandas.verde}    />
-            <Banda color="amber"  label="Valor estimado"  valor={bandas.amarillo} destacado />
-            <Banda color="red"    label="Ambicioso"       valor={bandas.rojo}     />
-            <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
-              Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
-              {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
-              características ×{factor.toFixed(2)}
-              {descuento && <> · <span className="text-emerald-500/80">−15% venta real</span></>}
-              {!ascensor && <> · ascensor con datos reales</>}.
-              El resto de ajustes son estimaciones.
-            </p>
-          </div>
-        )}
-
-        <Field label="Notas (opcional)">
-          <textarea value={notas} onChange={(e) => setNotas(e.target.value)} rows={2} placeholder="Observaciones…"
-            className="w-full px-2.5 py-2 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring resize-none" />
-        </Field>
-
-        <button
-          onClick={guardar}
-          disabled={!bandas || saving}
-          className="w-full h-10 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center justify-center gap-2"
-        >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-          Guardar valoración
-        </button>
       </div>
     </Drawer>
   )
@@ -902,6 +1203,165 @@ function Banda({ color, label, valor, destacado }: { color: "green" | "amber" | 
         {label}
       </span>
       <span className={cn("font-semibold tabular-nums", destacado ? "text-lg" : "text-base")}>{eur(valor)}</span>
+    </div>
+  )
+}
+
+// ─── Histograma de distribución de precios ────────────────────────────────────
+function PrecioHistograma({
+  comparables, excludedIds, valorEstimado, valorMin, valorMax, m2, stat,
+}: {
+  comparables: ComparableInmueble[]
+  excludedIds: Set<number>
+  valorEstimado: number
+  valorMin: number
+  valorMax: number
+  m2: number
+  stat: ZonaStat
+}) {
+  const NUM_BINS = 12
+
+  const precios = comparables
+    .filter((c) => !excludedIds.has(c.id))
+    .map((c) => c.precio_m2)
+    .filter((p) => p > 0)
+    .sort((a, b) => a - b)
+
+  const hasComparables = precios.length >= 5
+
+  // Rango del eje siempre desde stat p25*0.85 → p75*1.15 para que el marcador
+  // siempre quede visible aunque no haya comparables individuales
+  const axisMin = hasComparables
+    ? Math.min(precios[0], (stat.precio_m2_p25 ?? precios[0]) * 0.9)
+    : (stat.precio_m2_p25 ?? (stat.precio_m2_mediana ?? 0)) * 0.82
+  const axisMax = hasComparables
+    ? Math.max(precios[precios.length - 1], (stat.precio_m2_p75 ?? precios[precios.length - 1]) * 1.1)
+    : (stat.precio_m2_p75 ?? (stat.precio_m2_mediana ?? 0)) * 1.18
+
+  if (!axisMin || !axisMax || axisMin >= axisMax) return null
+
+  const estimadoPm2 = m2 > 0 ? valorEstimado / m2 : null
+  const minPm2      = m2 > 0 ? valorMin / m2 : null
+  const maxPm2      = m2 > 0 ? valorMax / m2 : null
+
+  const toPercent = (v: number) =>
+    Math.min(99, Math.max(1, ((v - axisMin) / (axisMax - axisMin)) * 100))
+
+  // Percentil del estimado
+  const percentil = hasComparables && estimadoPm2 != null
+    ? Math.round((precios.filter((p) => p <= estimadoPm2).length / precios.length) * 100)
+    : null
+
+  const pctLabel = percentil == null ? null
+    : percentil < 33 ? { text: "Por debajo de la zona", cls: "text-emerald-500 bg-emerald-500/10 border-emerald-500/20" }
+    : percentil < 60 ? { text: "En la media de la zona", cls: "text-amber-400 bg-amber-500/10 border-amber-500/20" }
+    : percentil < 80 ? { text: "Por encima de la media", cls: "text-orange-400 bg-orange-500/10 border-orange-500/20" }
+    : { text: "En el rango alto de la zona", cls: "text-red-500 bg-red-500/10 border-red-500/20" }
+
+  // Bins del histograma
+  const binSize = (axisMax - axisMin) / NUM_BINS
+  const bins = Array.from({ length: NUM_BINS }, (_, i) => {
+    const lo = axisMin + i * binSize
+    const hi = lo + binSize
+    const count = hasComparables
+      ? precios.filter((p) => p >= lo && (i === NUM_BINS - 1 ? p <= hi : p < hi)).length
+      : 0
+    // "activo" si solapan con el rango de valoración
+    const active = minPm2 != null && maxPm2 != null && hi >= minPm2 && lo <= maxPm2
+    return { lo, hi, count, active }
+  })
+  const maxCount = Math.max(...bins.map((b) => b.count), 1)
+
+  const markerLeft = estimadoPm2 != null ? toPercent(estimadoPm2) : null
+
+  return (
+    <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-2.5">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+          Posición en el mercado
+        </p>
+        {pctLabel && (
+          <span className={cn("text-[11px] font-medium px-2 py-0.5 rounded-full border", pctLabel.cls)}>
+            {pctLabel.text}
+          </span>
+        )}
+      </div>
+
+      {/* Histograma + marcador */}
+      <div className="relative">
+        {/* Callout flotante sobre el marcador */}
+        {markerLeft != null && estimadoPm2 != null && (
+          <div
+            className="absolute -top-0.5 -translate-x-1/2 flex flex-col items-center z-10 pointer-events-none"
+            style={{ left: `${markerLeft}%` }}
+          >
+            <div className="bg-amber-400 text-black text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap shadow-md shadow-amber-500/20">
+              {Math.round(estimadoPm2).toLocaleString("es-ES")} €/m²
+            </div>
+            <div className="w-px h-1.5 bg-amber-400/60" />
+          </div>
+        )}
+
+        {/* Barras */}
+        <div className="flex items-end gap-[2px] mt-7" style={{ height: 64 }}>
+          {bins.map((bin, i) => {
+            const h = hasComparables
+              ? Math.max(3, Math.round((bin.count / maxCount) * 100))
+              : 0
+            return (
+              <div
+                key={i}
+                className="flex-1 flex flex-col justify-end relative"
+                title={`${Math.round(bin.lo)}–${Math.round(bin.hi)} €/m²${hasComparables ? `: ${bin.count} pisos` : ""}`}
+              >
+                <div
+                  className={cn(
+                    "w-full rounded-t-sm transition-all duration-300",
+                    hasComparables
+                      ? bin.active
+                        ? "bg-violet-500 hover:bg-violet-400"
+                        : "bg-zinc-700/60 hover:bg-zinc-600/60"
+                      : "bg-zinc-800/40"
+                  )}
+                  style={{ height: hasComparables ? `${h}%` : "4px" }}
+                />
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Línea del marcador que baja por las barras */}
+        {markerLeft != null && (
+          <div
+            className="absolute bottom-0 top-7 w-px bg-amber-400/70 pointer-events-none"
+            style={{ left: `${markerLeft}%` }}
+          />
+        )}
+      </div>
+
+      {/* Eje inferior: min / rango valoración / max */}
+      <div className="relative h-5">
+        <span className="absolute left-0 text-[10px] text-muted-foreground/50">
+          {Math.round(axisMin).toLocaleString("es-ES")} €/m²
+        </span>
+        {minPm2 != null && maxPm2 != null && (
+          <span
+            className="absolute -translate-x-1/2 text-[10px] text-muted-foreground/60 whitespace-nowrap"
+            style={{ left: `${(toPercent(minPm2) + toPercent(maxPm2)) / 2}%` }}
+          >
+            {Math.round(minPm2).toLocaleString("es-ES")}–{Math.round(maxPm2).toLocaleString("es-ES")} €/m²
+          </span>
+        )}
+        <span className="absolute right-0 text-[10px] text-muted-foreground/50">
+          {Math.round(axisMax).toLocaleString("es-ES")} €/m²
+        </span>
+      </div>
+
+      {/* Fuente */}
+      <p className="text-[10px] text-muted-foreground/40 text-right -mt-1">
+        {hasComparables ? `${precios.length} comparables activos` : `Estadística de barrio · ${stat.muestra} comparables`}
+      </p>
     </div>
   )
 }
