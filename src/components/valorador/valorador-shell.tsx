@@ -570,8 +570,13 @@ const COND_OPTS = [
 ] as const
 const PLANTA_OPTS = [
   { key: "bajo",       label: "Bajo",       factor: 0.96 },
-  { key: "intermedia", label: "Intermedia", factor: 1.0 },
-  { key: "alta",       label: "Alta",       factor: 1.03 },
+  { key: "1",          label: "Planta 1",   factor: 0.98 },
+  { key: "2",          label: "Planta 2",   factor: 1.00 },
+  { key: "3",          label: "Planta 3",   factor: 1.00 },
+  { key: "4",          label: "Planta 4",   factor: 1.02 },
+  { key: "5",          label: "Planta 5",   factor: 1.02 },
+  { key: "6",          label: "Planta 6",   factor: 1.03 },
+  { key: "7+",         label: "Planta 7+",  factor: 1.04 },
   { key: "atico",      label: "Ático",      factor: 1.06 },
 ] as const
 const EXTRA_OPTS = [
@@ -659,17 +664,30 @@ function NuevaValoracionPanel({
 
   // Mapea la planta del Catastro a las opciones del selector
   function plantaCatastro(pt: string): string {
-    const p = pt.toUpperCase()
-    if (["B0", "BJ", "PB", "EN", "BA", "00"].includes(p)) return "bajo"
+    const p = pt.toUpperCase().trim()
+    if (["B0", "BJ", "PB", "EN", "BA", "00", "0"].includes(p)) return "bajo"
     if (["AT", "ÁT", "ATICO", "ÁTICO", "SS"].includes(p)) return "atico"
-    return "intermedia"
+
+    const match = p.match(/\d+/)
+    if (match) {
+      const num = parseInt(match[0], 10)
+      if (num === 0) return "bajo"
+      if (num >= 7) return "7+"
+      return String(num)
+    }
+    return "3"
   }
 
   function elegirUnidad(u: UnidadCatastro) {
     setUnidadSel(u.rc)
     if (u.superficie) setMetros(String(u.superficie))
     if (u.planta) setPlanta(plantaCatastro(u.planta))
-    setPlantaNum(u.plantaNum ?? null)
+    if (u.plantaNum != null) {
+      setPlantaNum(u.plantaNum)
+    } else if (u.planta) {
+      const m = u.planta.match(/\d+/)
+      setPlantaNum(m ? parseInt(m[0], 10) : null)
+    }
   }
 
   // Base de precios: en modo radio o con comparables cargados → usar liveStats;
@@ -730,18 +748,22 @@ function NuevaValoracionPanel({
     return fCond * fPlanta * fAsc * fHab * fBanos * fExtras
   }, [condicion, planta, ascensorPenalty, fHab, fBanos, extras])
 
-  // Tres bandas (con descuento opcional del 15%)
+  // Tres bandas de precio (estilo BetterPlace)
   const bandas = useMemo(() => {
     if (!stat || !stat.precio_m2_mediana || !m2 || m2 <= 0) return null
     const med = stat.precio_m2_mediana
     const p25 = stat.precio_m2_p25 ?? Math.round(med * 0.9)
-    const p75 = stat.precio_m2_p75 ?? Math.round(med * 1.1)
+    const p75 = stat.precio_m2_p75 ?? Math.round(med * 1.15)
     const desc = descuento ? 0.85 : 1
-    return {
-      verde:    Math.round(m2 * p25 * factor * desc),
-      amarillo: Math.round(m2 * med * factor * desc),
-      rojo:     Math.round(m2 * p75 * factor * desc),
-    }
+
+    // 1. Precio de venta (Verde): Valor indicado / real de venta (con descuento venta real)
+    const verde = Math.round(m2 * p25 * factor * desc)
+    // 2. Venta poco probable (Amarillo): Precio de anuncio medio
+    const amarillo = Math.max(Math.round(verde * 1.10), Math.round(m2 * med * factor))
+    // 3. Fuera de mercado (Rojo): Rango alto sobrevalorado (P75)
+    const rojo = Math.max(Math.round(amarillo * 1.12), Math.round(m2 * p75 * factor * 1.05))
+
+    return { verde, amarillo, rojo }
   }, [stat, m2, factor, descuento])
 
   const activeCount = comparables.length > 0
@@ -930,9 +952,19 @@ function NuevaValoracionPanel({
                 </select>
               </Field>
               <Field label="Planta">
-                <select value={planta} onChange={(e) => setPlanta(e.target.value)}
+                <select
+                  value={planta}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    setPlanta(val)
+                    const n = parseInt(val, 10)
+                    if (!isNaN(n)) setPlantaNum(n)
+                    else if (val === "bajo") setPlantaNum(0)
+                    else if (val === "atico") setPlantaNum(7)
+                  }}
                   disabled={!!unidadSel}
-                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed">
+                  className="w-full h-9 px-2.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   {PLANTA_OPTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
                 </select>
               </Field>
@@ -1027,12 +1059,14 @@ function NuevaValoracionPanel({
 
             {/* Vista previa estimación preliminar */}
             {bandas && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 flex items-center justify-between">
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wider">Estimación preliminar</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">Basado en características (mediana zona: {stat?.precio_m2_mediana} €/m²)</p>
-                </div>
-                <p className="text-lg font-bold text-amber-400 tabular-nums">{eur(bandas.amarillo)}</p>
+              <div className="space-y-1.5">
+                <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Estimación preliminar de valor</p>
+                <TresBandasBetterPlace
+                  verde={bandas.verde}
+                  amarillo={bandas.amarillo}
+                  rojo={bandas.rojo}
+                  m2={m2}
+                />
               </div>
             )}
 
@@ -1130,7 +1164,7 @@ function NuevaValoracionPanel({
               </div>
             )}
 
-            {/* Resultado: Histograma + tres bandas de precio */}
+            {/* Resultado: Histograma + tres bandas de precio estilo BetterPlace */}
             {codbarrio && !stat && !radioMode && (
               <p className="text-xs text-orange-400 bg-orange-400/10 rounded-md px-3 py-2">
                 Este barrio aún no tiene datos de mercado. Elige otro o ejecuta el scraper.
@@ -1141,15 +1175,18 @@ function NuevaValoracionPanel({
                 <PrecioHistograma
                   comparables={comparables}
                   excludedIds={excludedIds}
-                  valorEstimado={bandas.amarillo}
+                  valorEstimado={bandas.verde}
                   valorMin={bandas.verde}
                   valorMax={bandas.rojo}
                   m2={m2}
                   stat={stat}
                 />
-                <Banda color="green"  label="Venta rápida"    valor={bandas.verde}    />
-                <Banda color="amber"  label="Valor estimado"  valor={bandas.amarillo} destacado />
-                <Banda color="red"    label="Ambicioso"       valor={bandas.rojo}     />
+                <TresBandasBetterPlace
+                  verde={bandas.verde}
+                  amarillo={bandas.amarillo}
+                  rojo={bandas.rojo}
+                  m2={m2}
+                />
                 <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
                   Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
                   {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
@@ -1189,20 +1226,52 @@ function NuevaValoracionPanel({
   )
 }
 
-function Banda({ color, label, valor, destacado }: { color: "green" | "amber" | "red"; label: string; valor: number; destacado?: boolean }) {
-  const cls = {
-    green: "border-emerald-500/30 bg-emerald-500/5 text-emerald-500",
-    amber: "border-amber-500/40 bg-amber-500/10 text-amber-400",
-    red:   "border-red-500/30 bg-red-500/5 text-red-500",
-  }[color]
-  const dot = { green: "bg-emerald-500", amber: "bg-amber-400", red: "bg-red-500" }[color]
+function TresBandasBetterPlace({
+  verde, amarillo, rojo, m2
+}: {
+  verde: number
+  amarillo: number
+  rojo: number
+  m2: number
+}) {
+  const pm2Verde = m2 > 0 ? Math.round(verde / m2) : 0
+  const pm2Amarillo = m2 > 0 ? Math.round(amarillo / m2) : 0
+  const pm2Rojo = m2 > 0 ? Math.round(rojo / m2) : 0
+
   return (
-    <div className={cn("flex items-center justify-between rounded-lg border px-4 py-3", cls, destacado && "ring-1 ring-amber-500/30")}>
-      <span className="flex items-center gap-2 text-sm">
-        <span className={cn("h-2 w-2 rounded-full", dot)} />
-        {label}
-      </span>
-      <span className={cn("font-semibold tabular-nums", destacado ? "text-lg" : "text-base")}>{eur(valor)}</span>
+    <div className="grid grid-cols-3 gap-2 pt-1">
+      {/* 1. Precio de venta (Verde - Recomendado) */}
+      <div className="rounded-r-lg border border-border border-l-[4px] border-l-emerald-500 bg-emerald-500/10 p-2.5 space-y-1">
+        <p className="text-xs font-bold text-foreground truncate">Precio de venta</p>
+        <p className="text-base font-bold text-foreground tabular-nums tracking-tight">
+          {verde.toLocaleString("es-ES")}€
+        </p>
+        <p className="text-[11px] text-muted-foreground tabular-nums">
+          {pm2Verde.toLocaleString("es-ES")}€/m²
+        </p>
+      </div>
+
+      {/* 2. Venta poco probable (Amarillo) */}
+      <div className="rounded-r-lg border border-border border-l-[4px] border-l-amber-500 bg-muted/30 p-2.5 space-y-1">
+        <p className="text-xs font-bold text-foreground truncate">Venta poco probable</p>
+        <p className="text-base font-bold text-foreground tabular-nums tracking-tight">
+          {amarillo.toLocaleString("es-ES")}€
+        </p>
+        <p className="text-[11px] text-muted-foreground tabular-nums">
+          {pm2Amarillo.toLocaleString("es-ES")}€/m²
+        </p>
+      </div>
+
+      {/* 3. Fuera de mercado (Rojo) */}
+      <div className="rounded-r-lg border border-border border-l-[4px] border-l-red-500 bg-muted/30 p-2.5 space-y-1">
+        <p className="text-xs font-bold text-foreground truncate">Fuera de mercado</p>
+        <p className="text-base font-bold text-foreground tabular-nums tracking-tight">
+          {rojo.toLocaleString("es-ES")}€
+        </p>
+        <p className="text-[11px] text-muted-foreground tabular-nums">
+          {pm2Rojo.toLocaleString("es-ES")}€/m²
+        </p>
+      </div>
     </div>
   )
 }
