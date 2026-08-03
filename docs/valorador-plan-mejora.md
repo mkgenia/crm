@@ -1,0 +1,162 @@
+# Valorador — Plan de mejora (ejecutar más adelante)
+
+Objetivo: que la valoración **tenga en cuenta todas las características** de los
+comparables (no solo el €/m²), sea **más precisa** y quede **preparada para añadir
+variables nuevas** sin rehacer nada. Se ejecuta por fases para no romper lo que hay.
+
+Contexto del análisis (ago 2026): el actor `memo23/idealista-scraper` devuelve un
+bloque `moreCharacteristics` muy rico que hoy **NO estamos guardando** casi nada.
+Además hay un **bug**: la condición (`status`) se lee de `l.status` (no existe) en
+vez de `moreCharacteristics.status` → por eso `estado_conservacion` sale null.
+
+---
+
+## FASE 1 — Capturar TODOS los datos (base para todo; no toca el cálculo)
+
+### 1.1 Arreglar el bug de condición
+En el nodo **Barrio + Mapeo** del workflow (`Valorador-Venta.json`):
+`estado_conservacion: l.status` → **`mc.status`** (valores: `good`, `renew`,
+`newdevelopment`). Con esto la condición pasa a ser data-backed.
+
+### 1.2 Campos disponibles a capturar (confirmados en la respuesta real)
+De `moreCharacteristics`:
+- `communityCosts` (gastos comunidad), `usableArea` (área útil), `constructedArea`
+- `exterior` (ext/int → **luminosidad**), `flatLocation` (internal/external)
+- `energyPerformance` (kWh/m²) + `energyCertificationType` (a–g → **eficiencia**)
+- `swimmingPool` (**piscina**), `garden` (**jardín/zonas comunes**), `boxroom` (**trastero**)
+- `lift`, `floor`, `status`, `housingFurnitures` (amueblado), `roomNumber`, `bathNumber`
+De top-level: `propertyType`, `extendedPropertyType`, `homeType`, `newDevelopment`,
+`has360VHS`, `allowsRemoteVisit`, `energyCertification` (objeto detallado).
+Cuando existan (features de Idealista): `terrace`/`balcony`, `airConditioning`,
+`parkingSpace`, `orientation`.
+⚠️ Parciales/proxy: orientación, vistas, urbanización privada (aproximar con
+exterior + planta + garden + swimmingPool).
+
+### 1.3 SQL — guardar todo sin migraciones futuras
+Añadir a `mercado_inmuebles`:
+```sql
+-- columnas "promovidas" (para filtrar/consultar rápido)
+alter table mercado_inmuebles add column if not exists usable_area numeric;
+alter table mercado_inmuebles add column if not exists exterior boolean;
+alter table mercado_inmuebles add column if not exists energia text;       -- a..g
+alter table mercado_inmuebles add column if not exists piscina boolean;
+alter table mercado_inmuebles add column if not exists garden boolean;
+alter table mercado_inmuebles add column if not exists trastero boolean;
+alter table mercado_inmuebles add column if not exists parking boolean;
+alter table mercado_inmuebles add column if not exists terraza boolean;
+alter table mercado_inmuebles add column if not exists gastos_comunidad numeric;
+-- todo lo demás (y lo futuro) en jsonb → añadir variables sin ALTER
+alter table mercado_inmuebles add column if not exists caracteristicas jsonb;
+```
+Clave: **`caracteristicas jsonb`** = cajón extensible. Añadir "orientación" mañana
+= meterla en el jsonb desde el workflow, sin tocar esquema.
+
+### 1.4 Workflow — construir el objeto de características
+En el mapeo, además de los campos promovidos, montar:
+```js
+caracteristicas: {
+  usable_area: mc.usableArea ?? null,
+  exterior: mc.exterior ?? null,
+  flat_location: mc.flatLocation ?? null,
+  energia: mc.energyCertificationType ?? null,
+  energia_kwh: mc.energyPerformance ?? null,
+  piscina: mc.swimmingPool ?? null,
+  garden: mc.garden ?? null,
+  trastero: mc.boxroom ?? null,
+  amueblado: mc.housingFurnitures ?? null,
+  gastos_comunidad: mc.communityCosts ?? null,
+  parking: l.parkingSpace?.hasParkingSpace ?? null,
+  terraza: l.features?.terrace ?? null,
+  aire: l.features?.airConditioning ?? null,
+  orientacion: l.orientation ?? null,
+  tour360: l.has360VHS ?? null,
+  obra_nueva: l.newDevelopment ?? null
+}
+```
+(rellenar también las columnas promovidas con estos mismos valores).
+
+### 1.5 Server actions + tipos
+Añadir los campos nuevos a `ComparableInmueble` y a los `select` de
+`getComparablesBarrio` / `getComparablesRadio`. Sin cambiar el cálculo todavía.
+
+**Resultado de la Fase 1:** empezamos a acumular TODO desde el próximo run.
+El cálculo sigue igual (no se rompe nada). Requiere: SQL + reimportar workflow.
+
+---
+
+## FASE 2 — Motor por semejanza (aquí sube la precisión de verdad)
+
+### 2.1 Idea
+Cada comparable **pesa según lo parecido que es** al piso a valorar. En vez de
+"mediana de €/m² + % inventados", se hace una **mediana ponderada por semejanza**.
+
+### 2.2 Función de semejanza (distancia de Gower, mixta)
+- Numéricas (normalizadas 0–1): m², habitaciones, baños, planta, gastos, energía(kWh),
+  distancia geográfica.
+- Categóricas/booleanas (0/1): condición, ascensor, exterior, piscina, garden,
+  trastero, parking, terraza, tipo, orientación…
+- `similitud = 1 - distancia_media` sobre las variables disponibles en ambos.
+- **Pesos configurables por variable** (constante en código, fáciles de tunear).
+  Añadir una variable nueva = añadir su peso. Extensible por diseño.
+
+### 2.3 Estimación
+- Filtrar comparables mínimamente parecidos (mismo tipo, rango de m² ±X%).
+- €/m² estimado = **mediana ponderada** por `similitud` de los comparables.
+- Bandas: P25/P50/P75 **ponderados** (o similitud-top-K).
+- Corrección por **tamaño** (ajustar €/m² según desviación de m² respecto a la media).
+- Mantener el toggle −15% venta real.
+- Los coeficientes de condición/ascensor/etc. **salen de los datos** (ya no heurísticos).
+
+### 2.4 Explicabilidad
+Guardar y mostrar **cuánto pesa cada factor** en el resultado (para que el agente
+lo defienda ante el cliente). Ej: "ascensor +3%, a reformar −12%, energía G −4%".
+
+---
+
+## FASE 3 — UI/UX (rediseño para lo nuevo)
+
+### 3.1 Panel "Nueva valoración" — inputs por secciones
+- **Ubicación**: dirección/catastro (ya) + radio (ya).
+- **Básicos**: m² (útil/construido), habitaciones, baños, planta, tipo.
+- **Calidad**: condición, ascensor, exterior/luminosidad, **etiqueta energética A–G**
+  como selector de colores.
+- **Extras** (chips): piscina, jardín/zonas comunes, trastero, parking, terraza,
+  balcón, aire, urbanización privada, orientación.
+- Autorrelleno desde Catastro (m², planta) — ya está; ampliar con lo que dé.
+
+### 3.2 Comparables — más visuales y con semejanza
+- Card de comparable: imagen (ya) + **chips de características** (🏊 piscina, ⚡A,
+  🌳 zonas comunes, 🅿️ parking…) + badges (Vendido, ↓ cambió precio) que ya hay.
+- **Indicador de semejanza** por comparable ("92% parecido") y **orden por semejanza**.
+- **Filtros**: por tipo, rango de m², "solo muy parecidos", con/sin extras.
+- Etiqueta energética como badge **A–G con color** (verde→rojo).
+
+### 3.3 Resultado
+- Tres bandas (ya) + **nivel de confianza** (según nº de comparables y semejanza media).
+- Bloque **"Cómo se ha calculado"**: desglose de ajustes (explicabilidad de 2.4) →
+  transparencia y argumento de venta.
+- Barra "Posición en el mercado" (ya) enriquecida: marcar dónde caen los vendidos.
+
+### 3.4 Detalle de piso comparable (opcional)
+Panel/modal al pulsar un comparable: foto grande, todas sus características, link a
+Idealista, historial de precio. Útil para justificar la valoración.
+
+---
+
+## Orden sugerido de ejecución
+1. **Fase 1** completa (SQL + workflow + server actions/tipos) → acumular datos.
+2. Esperar 1–2 runs para tener características pobladas.
+3. **Fase 2** (motor semejanza) sobre esos datos.
+4. **Fase 3** (UI/UX) en paralelo/después, apoyándose en los datos ya ricos.
+
+## Archivos que se tocarán
+- `Desktop/Valorador-Venta.json` (mapeo + caracteristicas).
+- `supabase/valorador-completo.sql` (columnas + jsonb).
+- `src/lib/actions/valorador.ts` (tipos, selects, motor de semejanza).
+- `src/components/valorador/valorador-shell.tsx` (inputs, comparables, resultado).
+- `src/components/valorador/valorador-map.tsx` (chips/semejanza si aplica).
+- `docs/valorador.md` (actualizar cuando se implemente).
+
+## Nota
+Todo es **aditivo**. La Fase 1 no cambia el cálculo actual; solo empieza a guardar.
+Nada de esto rompe el valorador que ya funciona.

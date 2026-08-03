@@ -72,6 +72,7 @@ export interface ComparableInmueble {
   anunciante: string | null
   agencia_nombre: string | null
   fecha_ultima_vista: string | null
+  imagen_url: string | null
   activo: boolean
   precio_baja: number | null
   fecha_baja: string | null
@@ -145,7 +146,7 @@ export async function getComparablesBarrio(
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, activo, precio_baja, fecha_baja")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, activo, precio_baja, fecha_baja")
     .eq("codbarrio", codbarrio)
     .eq("operacion", operacion)
     .not("precio_m2", "is", null)
@@ -176,7 +177,7 @@ export async function getComparablesRadio(
   const dLng = radioMetros / (111320 * Math.cos((lat * Math.PI) / 180) || 1)
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, activo, precio_baja, fecha_baja")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, activo, precio_baja, fecha_baja")
     .eq("operacion", operacion)
     .not("precio_m2", "is", null)
     .not("lat", "is", null)

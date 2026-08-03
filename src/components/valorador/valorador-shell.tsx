@@ -1163,6 +1163,16 @@ function NuevaValoracionPanel({
                           )}>
                             {!excluded && <Check className="h-3 w-3 text-white" />}
                           </div>
+                          {c.imagen_url && (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={c.imagen_url}
+                              alt=""
+                              referrerPolicy="no-referrer"
+                              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none" }}
+                              className={cn("h-8 w-10 rounded object-cover shrink-0 bg-muted", c.activo === false && "grayscale opacity-60")}
+                            />
+                          )}
                           <div className="truncate">
                             <span className="font-semibold text-foreground">{Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²</span>
                             {c.activo === false && (
