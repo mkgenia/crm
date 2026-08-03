@@ -38,6 +38,9 @@ create index if not exists idx_mercado_codbarrio on mercado_inmuebles (codbarrio
 create index if not exists idx_mercado_operacion on mercado_inmuebles (operacion);
 create index if not exists idx_mercado_activo    on mercado_inmuebles (activo);
 
+-- Imagen (URL firmada de Idealista; puede caducar → fallback en el CRM)
+alter table mercado_inmuebles add column if not exists imagen_url text;
+
 -- 2) Vista agregada: €/m² por barrio y operación (mediana + rango + muestra) ---
 create or replace view mercado_zonas_stats as
 select
