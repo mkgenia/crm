@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react"
 import dynamic from "next/dynamic"
 import type { FeatureCollection, Geometry } from "geojson"
 import {
@@ -121,6 +121,8 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
   const [centro, setCentro] = useState<{ lat: number; lng: number; label: string; codbarrio: string | null; nombre: string | null } | null>(null)
   const [radio, setRadio] = useState(600)
 
+  const mapRef = useRef<HTMLDivElement>(null)
+
   // Carga del GeoJSON de barrios (asset estático)
   useEffect(() => {
     fetch("/valencia-barrios.geojson")
@@ -128,6 +130,16 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
       .then((g: GeoBarrios) => setGeojson(g))
       .catch(() => toast.error("No se pudo cargar el mapa de barrios"))
   }, [])
+
+  // Click fuera del mapa → deseleccionar la zona (solo en exploración, sin panel)
+  useEffect(() => {
+    if (!selected || panel) return
+    function onDown(e: MouseEvent) {
+      if (mapRef.current && !mapRef.current.contains(e.target as Node)) setSelected(null)
+    }
+    document.addEventListener("mousedown", onDown)
+    return () => document.removeEventListener("mousedown", onDown)
+  }, [selected, panel])
 
   const statsByBarrio = useMemo(() => {
     const src = operacion === "venta" ? statsVenta : statsAlquiler
@@ -250,7 +262,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
       {/* Contenido: mapa + panel lateral (estilo Leads) */}
       <div className="flex-1 min-h-0 flex gap-4 px-6 pb-6">
         {/* Mapa */}
-        <div className="flex-1 min-w-0 relative rounded-xl border border-border overflow-hidden bg-card">
+        <div ref={mapRef} className="flex-1 min-w-0 relative rounded-xl border border-border overflow-hidden bg-card">
           {geojson ? (
             <ValoradorMapa
               geojson={geojson}
@@ -261,7 +273,7 @@ export function ValoradorShell({ statsVenta, statsAlquiler, valoracionesIniciale
               radio={radio}
               valuationMode={panel === "nueva"}
               onMapClick={(lat, lng) => valorarEnDireccion(lat, lng, "Punto en el mapa")}
-              comparables={centro ? comparables.filter((c) => c.lat != null && c.lng != null).map((c) => ({ id: c.id, lat: c.lat!, lng: c.lng!, precio_m2: c.precio_m2 })) : []}
+              comparables={centro ? comparables.filter((c) => c.lat != null && c.lng != null).map((c) => ({ id: c.id, lat: c.lat!, lng: c.lng!, precio_m2: c.precio_m2, activo: c.activo })) : []}
               excludedIds={excludedIds}
               onToggleComparable={toggleExcluded}
             />
@@ -498,8 +510,15 @@ function ComparablesPanel({
 
                     <div className="flex-1 min-w-0">
                       <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-sm font-semibold text-foreground">
-                          {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²
+                        <span className="flex items-center gap-1.5">
+                          <span className="text-sm font-semibold text-foreground">
+                            {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²
+                          </span>
+                          {c.activo === false && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-zinc-500/20 text-zinc-400 tracking-wide">
+                              Vendido/Retirado
+                            </span>
+                          )}
                         </span>
                         <span className="text-xs text-muted-foreground tabular-nums">
                           {c.precio.toLocaleString("es-ES")} €
@@ -766,8 +785,9 @@ function NuevaValoracionPanel({
     return { verde, amarillo, rojo }
   }, [stat, m2, factor, descuento])
 
+  const vendidos = comparables.filter((c) => c.activo === false).length
   const activeCount = comparables.length > 0
-    ? comparables.length - excludedIds.size
+    ? comparables.filter((c) => !excludedIds.has(c.id)).length
     : stat?.muestra ?? 0
 
   function toggleExtra(k: string) {
@@ -1108,7 +1128,7 @@ function NuevaValoracionPanel({
                 />
                 <p className="text-xs text-muted-foreground/70">
                   {comparables.length > 0
-                    ? <><span className="text-foreground font-medium">{activeCount}</span> de {comparables.length} comparables activos</>
+                    ? <><span className="text-foreground font-medium">{activeCount}</span> comparables{vendidos > 0 ? <> · <span className="text-zinc-400">incluye {vendidos} vendidos/retirados</span></> : null}</>
                     : "Sin pisos en este radio — amplíalo"}
                 </p>
               </div>
@@ -1145,9 +1165,21 @@ function NuevaValoracionPanel({
                           </div>
                           <div className="truncate">
                             <span className="font-semibold text-foreground">{Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²</span>
+                            {c.activo === false && (
+                              <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-zinc-500/20 text-zinc-400 tracking-wide ml-1.5">Vendido</span>
+                            )}
                             <span className="text-muted-foreground text-[11px] ml-2">
                               {c.metros} m² · {c.habitaciones ?? "—"} hab · {c.banos ?? "—"} baños
                             </span>
+                            {c.cambio && c.cambio.delta != null && c.cambio.direccion && (
+                              <span className={cn(
+                                "text-[10px] font-medium ml-2 whitespace-nowrap",
+                                c.cambio.direccion === "decrease" ? "text-amber-400" : "text-red-400"
+                              )}>
+                                {c.cambio.direccion === "decrease" ? "↓" : "↑"} {Math.abs(Math.round(c.cambio.delta)).toLocaleString("es-ES")} €
+                                {c.cambio.pct != null ? ` (${c.cambio.pct > 0 ? "+" : ""}${c.cambio.pct}%)` : ""}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <span className="font-medium text-foreground tabular-nums shrink-0 ml-2">
@@ -1288,8 +1320,6 @@ function PrecioHistograma({
   m2: number
   stat: ZonaStat
 }) {
-  const NUM_BINS = 12
-
   const precios = comparables
     .filter((c) => !excludedIds.has(c.id))
     .map((c) => c.precio_m2)
@@ -1327,24 +1357,12 @@ function PrecioHistograma({
     : percentil < 80 ? { text: "Por encima de la media", cls: "text-orange-400 bg-orange-500/10 border-orange-500/20" }
     : { text: "En el rango alto de la zona", cls: "text-red-500 bg-red-500/10 border-red-500/20" }
 
-  // Bins del histograma
-  const binSize = (axisMax - axisMin) / NUM_BINS
-  const bins = Array.from({ length: NUM_BINS }, (_, i) => {
-    const lo = axisMin + i * binSize
-    const hi = lo + binSize
-    const count = hasComparables
-      ? precios.filter((p) => p >= lo && (i === NUM_BINS - 1 ? p <= hi : p < hi)).length
-      : 0
-    // "activo" si solapan con el rango de valoración
-    const active = minPm2 != null && maxPm2 != null && hi >= minPm2 && lo <= maxPm2
-    return { lo, hi, count, active }
-  })
-  const maxCount = Math.max(...bins.map((b) => b.count), 1)
-
   const markerLeft = estimadoPm2 != null ? toPercent(estimadoPm2) : null
+  const zonaLeft = minPm2 != null ? toPercent(minPm2) : null
+  const zonaWidth = minPm2 != null && maxPm2 != null ? toPercent(maxPm2) - toPercent(minPm2) : null
 
   return (
-    <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-2.5">
+    <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-3">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -1357,78 +1375,44 @@ function PrecioHistograma({
         )}
       </div>
 
-      {/* Histograma + marcador */}
-      <div className="relative">
-        {/* Callout flotante sobre el marcador */}
-        {markerLeft != null && estimadoPm2 != null && (
-          <div
-            className="absolute -top-0.5 -translate-x-1/2 flex flex-col items-center z-10 pointer-events-none"
-            style={{ left: `${markerLeft}%` }}
-          >
-            <div className="bg-amber-400 text-black text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap shadow-md shadow-amber-500/20">
-              {Math.round(estimadoPm2).toLocaleString("es-ES")} €/m²
+      {/* Barra de posición: gradiente barato→caro + rango de zona + marcador */}
+      <div className="pt-7 pb-1">
+        <div
+          className="relative h-2.5 rounded-full"
+          style={{ background: "linear-gradient(90deg, hsl(150 55% 45%), hsl(48 85% 55%), hsl(0 70% 52%))" }}
+        >
+          {/* Rango de la zona (P25–P75) */}
+          {zonaLeft != null && zonaWidth != null && (
+            <div
+              className="absolute -top-1 -bottom-1 rounded-full bg-white/10 ring-1 ring-white/50"
+              style={{ left: `${zonaLeft}%`, width: `${zonaWidth}%` }}
+            />
+          )}
+          {/* Marcador del valor estimado */}
+          {markerLeft != null && estimadoPm2 != null && (
+            <div className="absolute -top-7 -translate-x-1/2 flex flex-col items-center z-10" style={{ left: `${markerLeft}%` }}>
+              <span className="bg-amber-400 text-black text-[10px] font-bold px-1.5 py-0.5 rounded shadow-md shadow-amber-500/20 whitespace-nowrap">
+                {Math.round(estimadoPm2).toLocaleString("es-ES")} €/m²
+              </span>
+              <span className="mt-1 h-3.5 w-3.5 rounded-full bg-amber-400 border-2 border-background shadow" />
             </div>
-            <div className="w-px h-1.5 bg-amber-400/60" />
-          </div>
-        )}
-
-        {/* Barras */}
-        <div className="flex items-end gap-[2px] mt-7" style={{ height: 64 }}>
-          {bins.map((bin, i) => {
-            const h = hasComparables
-              ? Math.max(3, Math.round((bin.count / maxCount) * 100))
-              : 0
-            return (
-              <div
-                key={i}
-                className="flex-1 flex flex-col justify-end relative"
-                title={`${Math.round(bin.lo)}–${Math.round(bin.hi)} €/m²${hasComparables ? `: ${bin.count} pisos` : ""}`}
-              >
-                <div
-                  className={cn(
-                    "w-full rounded-t-sm transition-all duration-300",
-                    hasComparables
-                      ? bin.active
-                        ? "bg-violet-500 hover:bg-violet-400"
-                        : "bg-zinc-700/60 hover:bg-zinc-600/60"
-                      : "bg-zinc-800/40"
-                  )}
-                  style={{ height: hasComparables ? `${h}%` : "4px" }}
-                />
-              </div>
-            )
-          })}
+          )}
         </div>
 
-        {/* Línea del marcador que baja por las barras */}
-        {markerLeft != null && (
-          <div
-            className="absolute bottom-0 top-7 w-px bg-amber-400/70 pointer-events-none"
-            style={{ left: `${markerLeft}%` }}
-          />
-        )}
-      </div>
-
-      {/* Eje inferior: min / rango valoración / max */}
-      <div className="relative h-5">
-        <span className="absolute left-0 text-[10px] text-muted-foreground/50">
-          {Math.round(axisMin).toLocaleString("es-ES")} €/m²
-        </span>
-        {minPm2 != null && maxPm2 != null && (
-          <span
-            className="absolute -translate-x-1/2 text-[10px] text-muted-foreground/60 whitespace-nowrap"
-            style={{ left: `${(toPercent(minPm2) + toPercent(maxPm2)) / 2}%` }}
-          >
-            {Math.round(minPm2).toLocaleString("es-ES")}–{Math.round(maxPm2).toLocaleString("es-ES")} €/m²
-          </span>
-        )}
-        <span className="absolute right-0 text-[10px] text-muted-foreground/50">
-          {Math.round(axisMax).toLocaleString("es-ES")} €/m²
-        </span>
+        {/* Eje */}
+        <div className="relative h-4 mt-2.5 text-[10px] text-muted-foreground/50 tabular-nums">
+          <span className="absolute left-0">{Math.round(axisMin).toLocaleString("es-ES")} €/m²</span>
+          {zonaLeft != null && zonaWidth != null && (
+            <span className="absolute -translate-x-1/2 text-muted-foreground/70" style={{ left: `${zonaLeft + zonaWidth / 2}%` }}>
+              zona
+            </span>
+          )}
+          <span className="absolute right-0">{Math.round(axisMax).toLocaleString("es-ES")} €/m²</span>
+        </div>
       </div>
 
       {/* Fuente */}
-      <p className="text-[10px] text-muted-foreground/40 text-right -mt-1">
+      <p className="text-[10px] text-muted-foreground/40 text-right">
         {hasComparables ? `${precios.length} comparables activos` : `Estadística de barrio · ${stat.muestra} comparables`}
       </p>
     </div>

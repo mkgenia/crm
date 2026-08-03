@@ -72,6 +72,16 @@ export interface ComparableInmueble {
   anunciante: string | null
   agencia_nombre: string | null
   fecha_ultima_vista: string | null
+  activo: boolean
+  precio_baja: number | null
+  fecha_baja: string | null
+  cambio?: {
+    precio_anterior: number | null
+    precio_nuevo: number | null
+    delta: number | null
+    pct: number | null
+    direccion: string | null
+  } | null
 }
 
 export interface Valoracion {
@@ -106,6 +116,27 @@ export async function getZonasStats(operacion: Operacion = "venta"): Promise<Zon
   return (data ?? []) as ZonaStat[]
 }
 
+// Engancha a cada comparable su último cambio de precio (si lo hay)
+async function attachCambios(rows: ComparableInmueble[]): Promise<ComparableInmueble[]> {
+  if (!rows.length) return rows
+  const supabase = await createAdminClient()
+  const { data } = await supabase
+    .from("mercado_precio_historial")
+    .select("idealista_id, precio_anterior, precio_nuevo, delta, pct, direccion, fecha")
+    .in("idealista_id", rows.map((r) => r.idealista_id))
+    .order("fecha", { ascending: false })
+  const map = new Map<string, ComparableInmueble["cambio"]>()
+  for (const h of data ?? []) {
+    if (!map.has(h.idealista_id)) {
+      map.set(h.idealista_id, {
+        precio_anterior: h.precio_anterior, precio_nuevo: h.precio_nuevo,
+        delta: h.delta, pct: h.pct, direccion: h.direccion,
+      })
+    }
+  }
+  return rows.map((r) => ({ ...r, cambio: map.get(r.idealista_id) ?? null }))
+}
+
 // Comparables individuales de un barrio para ver y filtrar en el Valorador
 export async function getComparablesBarrio(
   codbarrio: string,
@@ -114,14 +145,13 @@ export async function getComparablesBarrio(
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, activo, precio_baja, fecha_baja")
     .eq("codbarrio", codbarrio)
     .eq("operacion", operacion)
-    .eq("activo", true)
     .not("precio_m2", "is", null)
     .order("precio_m2", { ascending: true })
   if (error) return []
-  return (data ?? []) as ComparableInmueble[]
+  return attachCambios((data ?? []) as ComparableInmueble[])
 }
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -146,18 +176,18 @@ export async function getComparablesRadio(
   const dLng = radioMetros / (111320 * Math.cos((lat * Math.PI) / 180) || 1)
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, activo, precio_baja, fecha_baja")
     .eq("operacion", operacion)
-    .eq("activo", true)
     .not("precio_m2", "is", null)
     .not("lat", "is", null)
     .gte("lat", lat - dLat).lte("lat", lat + dLat)
     .gte("lng", lng - dLng).lte("lng", lng + dLng)
   if (error) return []
   const rows = (data ?? []) as ComparableInmueble[]
-  return rows
+  const dentro = rows
     .filter((r) => r.lat != null && r.lng != null && haversine(lat, lng, r.lat, r.lng) <= radioMetros)
     .sort((a, b) => a.precio_m2 - b.precio_m2)
+  return attachCambios(dentro)
 }
 
 export interface GeoResultado {
@@ -249,6 +279,7 @@ function parsePlantaNumber(pt: string): number | null {
 function parseCatastroUnits(result: any): UnidadCatastro[] {
   if (!result) return []
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const extract = (u: any): UnidadCatastro => {
     const rc = u.rc ?? u.idbi?.rc ?? {}
     const loint = u.dt?.locs?.lous?.lourb?.loint ?? {}

@@ -58,7 +58,7 @@ function MapClickHandler({ enabled, onMapClick }: { enabled: boolean; onMapClick
   return null
 }
 
-export interface CompPunto { id: number; lat: number; lng: number; precio_m2: number }
+export interface CompPunto { id: number; lat: number; lng: number; precio_m2: number; activo?: boolean }
 
 interface Props {
   geojson: FeatureCollection<Geometry, BarrioProps>
@@ -147,21 +147,24 @@ export function ValoradorMapa({
         {/* Comparables como puntos (coloreados por €/m²) */}
         {comparables.map((c) => {
           const excluded = excludedIds?.has(c.id)
+          const vendido = c.activo === false
           return (
             <CircleMarker
               key={c.id}
               center={[c.lat, c.lng]}
-              radius={5}
+              radius={vendido ? 4 : 5}
               pathOptions={{
-                color: "#ffffff",
+                color: vendido ? "#a1a1aa" : "#ffffff",
                 weight: 1,
-                fillColor: excluded ? "#71717a" : colorFor(c.precio_m2, cMin, cMax),
-                fillOpacity: excluded ? 0.25 : 0.9,
+                dashArray: vendido ? "2 2" : undefined,
+                fillColor: excluded ? "#71717a" : vendido ? "#3f3f46" : colorFor(c.precio_m2, cMin, cMax),
+                fillOpacity: excluded ? 0.25 : vendido ? 0.55 : 0.9,
               }}
               eventHandlers={{ click: () => onToggleComparable?.(c.id) }}
             >
               <Tooltip direction="top" opacity={0.95}>
-                {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²{excluded ? " · excluido" : ""}
+                {Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²
+                {vendido ? " · vendido/retirado" : excluded ? " · excluido" : ""}
               </Tooltip>
             </CircleMarker>
           )

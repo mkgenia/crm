@@ -209,9 +209,19 @@ motor, ni el mapa. Cero replicación.
 
 - **`estado_conservacion` llega null** del scraper → arreglar el mapeo del
   workflow para capturarla. Entonces la **condición** pasaría a ser data-backed.
-- **Rama de bajas** (n8n): leer dataset `removed` → `activo=false`, `precio_baja`.
-  Reutiliza columnas existentes, **sin SQL nuevo**. Alimenta la banda verde.
-- **Rama de cambios** (n8n): leer dataset `changes` → historial de precio.
-  Necesita **1 tabla nueva** (`mercado_precio_historial`).
+- **Rama de bajas** (n8n) ✅ HECHO: el workflow lee el dataset `idealista-removed-<runId>`
+  → marca `activo=false`. Un **trigger** (`supabase/valorador-bajas.sql`) rellena
+  `precio_baja` y `fecha_baja`. El CRM muestra los comparables **activos vs
+  vendidos/retirados** (puntos apagados en el mapa + badge en la lista).
+- **Rama de cambios** (n8n) ✅ HECHO: lee `idealista-changes-<runId>` → actualiza
+  `precio` en `mercado_inmuebles` (y por tanto `precio_m2`) + registra cada cambio
+  en `mercado_precio_historial`. SQL en `supabase/valorador-completo.sql`.
+- **SQL consolidado**: `supabase/valorador-completo.sql` tiene TODO (tablas, vista,
+  trigger de bajas, historial de cambios). Idempotente — se puede reejecutar.
 - **Desplegar el CRM** para que todo lo anterior quede live (y el fix del
   middleware surta efecto).
+- **[TODO] Snapshot mensual de limpieza**: un run puntual (p.ej. 1×/mes) del actor
+  **sin `monitoringMode`** que baje TODO el mercado y refresque las filas ya
+  existentes (precio, fecha_ultima_vista). Con monitoring, un piso que sigue igual
+  no se re-scrapea; este snapshot da una foto 100% fresca de golpe. Más caro/lento,
+  por eso solo mensual. Se puede hacer como 2º workflow o un toggle. (Aplazado.)
