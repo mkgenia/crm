@@ -73,6 +73,22 @@ export interface ComparableInmueble {
   agencia_nombre: string | null
   fecha_ultima_vista: string | null
   imagen_url: string | null
+  // FASE 1 · características ricas
+  tipo_detallado: string | null
+  estado_conservacion: string | null
+  usable_area: number | null
+  exterior: boolean | null
+  energia: string | null
+  energia_kwh: number | null
+  piscina: boolean | null
+  jardin: boolean | null
+  trastero: boolean | null
+  parking: boolean | null
+  terraza: boolean | null
+  aire: boolean | null
+  gastos_comunidad: number | null
+  obra_nueva: boolean | null
+  caracteristicas: Record<string, unknown> | null
   activo: boolean
   precio_baja: number | null
   fecha_baja: string | null
@@ -103,7 +119,26 @@ export interface Valoracion {
   valor_max: number | null
   muestra: number | null
   notas: string | null
+  comparables?: ComparableSnapshot[] | null
   autor?: { nombre: string; apellidos: string | null } | null
+}
+
+/** Datos congelados de un comparable en el momento de la valoración */
+export interface ComparableSnapshot {
+  precio: number
+  metros: number
+  precio_m2: number
+  habitaciones: number | null
+  banos: number | null
+  planta: string | null
+  barrio: string | null
+  estado: string | null
+  energia: string | null
+  ascensor: boolean | null
+  extras: string[]
+  similitud: number
+  activo: boolean
+  idealista_id: string
 }
 
 // Stats €/m² por barrio para una operación. Devuelve mapa codbarrio -> stat.
@@ -146,7 +181,7 @@ export async function getComparablesBarrio(
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, activo, precio_baja, fecha_baja")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, tipo_detallado, estado_conservacion, usable_area, exterior, energia, energia_kwh, piscina, jardin, trastero, parking, terraza, aire, gastos_comunidad, obra_nueva, caracteristicas, activo, precio_baja, fecha_baja")
     .eq("codbarrio", codbarrio)
     .eq("operacion", operacion)
     .not("precio_m2", "is", null)
@@ -177,7 +212,7 @@ export async function getComparablesRadio(
   const dLng = radioMetros / (111320 * Math.cos((lat * Math.PI) / 180) || 1)
   const { data, error } = await supabase
     .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, activo, precio_baja, fecha_baja")
+    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, tipo_detallado, estado_conservacion, usable_area, exterior, energia, energia_kwh, piscina, jardin, trastero, parking, terraza, aire, gastos_comunidad, obra_nueva, caracteristicas, activo, precio_baja, fecha_baja")
     .eq("operacion", operacion)
     .not("precio_m2", "is", null)
     .not("lat", "is", null)
@@ -482,6 +517,22 @@ export async function buscarCatastro(direccion: string): Promise<CatastroResulta
   return base
 }
 
+// Una valoración concreta (para el informe descargable)
+export async function getValoracion(id: number): Promise<Valoracion | null> {
+  const supabase = await createAdminClient()
+  const { data, error } = await supabase
+    .from("valoraciones")
+    .select("*, autor:perfiles!valoraciones_creada_por_fkey(nombre, apellidos)")
+    .eq("id", id)
+    .single()
+  if (error || !data) return null
+  const row = data as Record<string, unknown>
+  return {
+    ...row,
+    autor: Array.isArray(row.autor) ? (row.autor[0] ?? null) : (row.autor ?? null),
+  } as Valoracion
+}
+
 export async function getValoraciones(): Promise<Valoracion[]> {
   const supabase = await createAdminClient()
   const { data, error } = await supabase
@@ -511,6 +562,7 @@ export interface CrearValoracionInput {
   valor_max: number
   muestra: number
   notas?: string | null
+  comparables?: ComparableSnapshot[] | null
 }
 
 export async function crearValoracion(input: CrearValoracionInput) {

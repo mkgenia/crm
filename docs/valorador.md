@@ -42,6 +42,22 @@ Es lo que **colorea el mapa**. Se recalcula sola.
 > ⚠️ Es una **vista**: se salta el RLS de la tabla base. Por eso el mapa
 > funcionaba aunque la tabla tuviera RLS. (Ver punto 8.)
 
+### Informe PDF descargable (2 hojas A4)
+En `/valorador/informe/[id]` ([`informe-valoracion.tsx`](../src/components/valorador/informe-valoracion.tsx)).
+Acceso: icono de documento en el panel **Historial**. Botón **Descargar PDF** →
+`window.print()` → "Guardar como PDF". Sin dependencias, calidad vectorial.
+
+- **Hoja 1**: logo + ref. `VAL-00012`, datos del inmueble, las tres bandas
+  (precio de venta destacado), características consideradas, metodología y aviso
+  legal (no es tasación ECO/805/2003).
+- **Hoja 2**: tabla de **testigos comparables** (zona, m², hab, baños, planta,
+  estado + letra energética, equipamiento, precio, €/m², % semejanza) ordenados
+  por parecido, más un resumen estadístico (mín/mediana/media/máx) y la fuente.
+
+> Los comparables se guardan como **snapshot congelado** en `valoraciones.comparables`
+> (jsonb, máx. 20). Así el informe no cambia aunque el mercado sí. Requiere la
+> columna del SQL: `alter table valoraciones add column if not exists comparables jsonb;`
+
 ### Tabla `valoraciones` — el historial
 Cada valoración guardada desde el CRM: dirección, `codbarrio`, `metros`,
 `operacion`, las tres bandas (`valor_min`=verde, `valor_estimado`=amarillo,

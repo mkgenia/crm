@@ -11,7 +11,15 @@ vez de `moreCharacteristics.status` → por eso `estado_conservacion` sale null.
 
 ---
 
-## FASE 1 — Capturar TODOS los datos (base para todo; no toca el cálculo)
+## FASE 1 — Capturar TODOS los datos ✅ IMPLEMENTADA (ago 2026)
+
+> Hecho: bug de condición corregido (`mc.status`), columnas promovidas +
+> `caracteristicas jsonb` en el SQL, mapeo del workflow construyendo `carac`,
+> tipos y `select` de los server actions ampliados, y **chips de características**
+> en la lista de comparables (energía A–G con color, condición, exterior, piscina,
+> zonas verdes, parking, terraza, trastero, A/A).
+> Pendiente del usuario: ejecutar el SQL y reimportar el workflow.
+> Los datos se poblarán a partir del siguiente run.
 
 ### 1.1 Arreglar el bug de condición
 En el nodo **Barrio + Mapeo** del workflow (`Valorador-Venta.json`):
@@ -84,7 +92,24 @@ El cálculo sigue igual (no se rompe nada). Requiere: SQL + reimportar workflow.
 
 ---
 
-## FASE 2 — Motor por semejanza (aquí sube la precisión de verdad)
+## FASE 2 — Motor por semejanza ✅ IMPLEMENTADA (ago 2026)
+
+> Módulo: `src/lib/valorador/semejanza.ts` (puro, sin "use server").
+> - `similitud(sujeto, comparable)` → Gower ponderada; solo cuenta variables
+>   presentes en AMBOS. Pesos en `PESOS` (añadir variable = añadir peso + 1 línea).
+> - `estimarPorSemejanza()` → percentiles **ponderados por similitud²**, con
+>   `confianza`, `similitudMedia`, `ajustePct` y `scores` por comparable.
+> - Integrado en el panel: si hay semejanza, las bandas usan sus percentiles y
+>   **no** se aplican los factores heurísticos (ya están en los datos). Fallback
+>   al método antiguo si no hay comparables.
+> - UI: comparables **ordenados por parecido**, badge de **% semejanza** por
+>   comparable, y bloque **"Cómo se ha calculado"** con confianza alta/media/baja.
+>
+> Validado con 82 comparables reales: top parecidos 81-85% (92-116 m², 3h, 2b,
+> good, ascensor) vs 23% para estudios de 33 m² a 8.200 €/m². Mediana simple
+> 3.600 → ponderada 3.385 €/m² (−4,1%): los estudios ya no distorsionan.
+
+### (diseño original)
 
 ### 2.1 Idea
 Cada comparable **pesa según lo parecido que es** al piso a valorar. En vez de
@@ -113,7 +138,21 @@ lo defienda ante el cliente). Ej: "ascensor +3%, a reformar −12%, energía G �
 
 ---
 
-## FASE 3 — UI/UX (rediseño para lo nuevo)
+## FASE 3 — UI/UX ✅ IMPLEMENTADA (ago 2026)
+
+> - **Inputs nuevos** que alimentan la semejanza: **Luminosidad** (exterior /
+>   interior / sin dato) y **Certificado energético A–G** como botones de color.
+> - **Comparables**: ordenados por parecido, **badge de % semejanza** por fila
+>   (verde ≥70 / ámbar ≥45 / gris), chips de características, miniatura,
+>   filtro **"Solo parecidos"** (visual, ≥60%; no altera el cálculo).
+> - **Detalle de comparable** (modal): foto grande, chips, tabla completa
+>   (superficie útil, gastos comunidad, consumo kWh, estado del anuncio, último
+>   precio si está vendido), historial de cambio de precio y link a Idealista.
+> - **Resultado**: bloque "Cómo se ha calculado" con base €/m², nº de comparables,
+>   parecido medio y **nivel de confianza** (alta/media/baja).
+> - El guardado registra el método usado (semejanza, muestra y % de parecido).
+
+### (diseño original)
 
 ### 3.1 Panel "Nueva valoración" — inputs por secciones
 - **Ubicación**: dirección/catastro (ya) + radio (ya).
@@ -140,6 +179,68 @@ lo defienda ante el cliente). Ej: "ascensor +3%, a reformar −12%, energía G �
 ### 3.4 Detalle de piso comparable (opcional)
 Panel/modal al pulsar un comparable: foto grande, todas sus características, link a
 Idealista, historial de precio. Útil para justificar la valoración.
+
+---
+
+---
+
+## FASE 4 — Ajuste hedónico ✅ (ago 2026)
+
+> **Problema detectado en una valoración real** (Dr. Vicente Zaragozá 25): el motor
+> elegía comparables parecidos pero **no corregía el precio por las diferencias**.
+> Cambiando los extras del sujeto, el precio no se movía (4.135 €/m² siempre) →
+> valoraciones infladas.
+>
+> **Solución** (`precioAjustado` en `semejanza.ts`): cada comparable se normaliza a
+> las características del sujeto (*paired sales analysis*). Si el comparable tiene
+> parking y el sujeto no, su precio se corrige a la baja antes de entrar al cálculo.
+> Además el percentil ponderado ahora **interpola** (antes era escalonado e insensible).
+>
+> Valores de mercado (`VALOR_ATRIBUTO`, tunear ahí): ascensor 7%, parking 6%,
+> piscina 5%, terraza 4%, exterior 4%, jardín 3%, trastero 2%, aire 2%.
+> Condición: obra nueva ×1.12, buen estado ×1.0, a reformar ×0.84.
+> Energía: A ×1.06 … G ×0.97. Ratio acotado a [0.7, 1.35].
+>
+> Resultado en el caso real (105 m², 1966, Benimaclet): de **369.049 €** (inflado)
+> a **283.280 €** a reformar / **300.773 €** reformado → ~2.700-2.900 €/m²,
+> coherente con el barrio.
+
+## Año de construcción — decisión (ago 2026)
+
+Idealista **no** lo devuelve (verificado). El Catastro sí, pero cuesta ~2 s/piso
+(~1 h para 1.710) con riesgo de rate-limit. **Decisión: usar solo el año del
+sujeto** (que ya viene gratis del Catastro al buscar la dirección) para mostrar la
+antigüedad y **guiar la condición** ("Edificio de 1966 — ¿está reformado?").
+La condición (−16%) y la letra energética ya aproximan bien la antigüedad.
+
+---
+
+## Auditoría: qué se captura vs qué se usa/edita (ago 2026)
+
+| Variable | Capturada | En semejanza | Editable en panel |
+|---|---|---|---|
+| **Tipo** (piso/ático/dúplex/estudio/chalet) | ✅ `tipo_detallado` | ✅ peso 3 | ✅ |
+| Metros | ✅ | ✅ peso 3 | ✅ |
+| Habitaciones / Baños | ✅ | ✅ 2 / 1 | ✅ |
+| Condición | ✅ | ✅ peso 2.5 | ✅ |
+| Planta | ✅ | ✅ peso 1 | ✅ |
+| Ascensor | ✅ | ✅ peso 1.5 | ✅ |
+| Luminosidad (exterior) | ✅ | ✅ peso 1 | ✅ |
+| Energía A–G | ✅ | ✅ peso 0.8 (ordinal) | ✅ |
+| Piscina / Zonas verdes | ✅ | ✅ 0.8 / 0.6 | ✅ (separados) |
+| Parking / Trastero / Terraza / A/A | ✅ | ✅ | ✅ |
+| Distancia geográfica | ✅ | ✅ peso 2 | (automática) |
+| **Balcón** | ✅ solo en jsonb | ❌ | ✅ (solo heurístico) |
+| **Superficie útil** | ✅ | ❌ | ❌ (se muestra en detalle) |
+| **Gastos comunidad** | ✅ | ❌ | ❌ (se muestra en detalle) |
+| Orientación / vistas | ⚠️ casi siempre null en Idealista | ❌ | ❌ |
+
+> ⚠️ Ojo: la columna `tipo` vale siempre `"homes"` y **no sirve**. El bueno es
+> `tipo_detallado` (flat/penthouse/duplex/studio/chalet).
+>
+> Pendientes menores: promover `balcon` a columna para que entre en la semejanza;
+> valorar añadir `gastos_comunidad` y `usable_area` como señales (requieren input
+> del usuario, que no siempre los conoce).
 
 ---
 

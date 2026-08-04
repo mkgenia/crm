@@ -41,6 +41,39 @@ create index if not exists idx_mercado_activo    on mercado_inmuebles (activo);
 -- Imagen (URL firmada de Idealista; puede caducar → fallback en el CRM)
 alter table mercado_inmuebles add column if not exists imagen_url text;
 
+-- FASE 1 · Características ricas del inmueble ---------------------------------
+-- Columnas "promovidas" (para filtrar/consultar rápido en SQL)
+alter table mercado_inmuebles add column if not exists usable_area       numeric;
+alter table mercado_inmuebles add column if not exists exterior          boolean;
+alter table mercado_inmuebles add column if not exists energia           text;    -- a..g
+alter table mercado_inmuebles add column if not exists energia_kwh       numeric;
+alter table mercado_inmuebles add column if not exists piscina           boolean;
+alter table mercado_inmuebles add column if not exists jardin            boolean;
+alter table mercado_inmuebles add column if not exists trastero          boolean;
+alter table mercado_inmuebles add column if not exists parking           boolean;
+alter table mercado_inmuebles add column if not exists terraza           boolean;
+alter table mercado_inmuebles add column if not exists aire              boolean;
+alter table mercado_inmuebles add column if not exists gastos_comunidad  numeric;
+alter table mercado_inmuebles add column if not exists obra_nueva        boolean;
+
+-- Cajón extensible: cualquier variable futura (orientación, vistas, urbanización
+-- privada...) entra aquí SIN necesidad de migrar el esquema.
+alter table mercado_inmuebles add column if not exists caracteristicas jsonb;
+
+-- Tipo real del inmueble (flat, penthouse, duplex, studio, chalet...).
+-- Ojo: la columna `tipo` siempre vale "homes" y no sirve para comparar.
+alter table mercado_inmuebles add column if not exists tipo_detallado text;
+create index if not exists idx_mercado_tipodet on mercado_inmuebles (tipo_detallado);
+
+-- Backfill desde el jsonb ya guardado
+update mercado_inmuebles
+   set tipo_detallado = caracteristicas->>'tipo_detallado'
+ where tipo_detallado is null
+   and caracteristicas ? 'tipo_detallado';
+
+create index if not exists idx_mercado_energia on mercado_inmuebles (energia);
+create index if not exists idx_mercado_carac   on mercado_inmuebles using gin (caracteristicas);
+
 -- 2) Vista agregada: €/m² por barrio y operación (mediana + rango + muestra) ---
 create or replace view mercado_zonas_stats as
 select
@@ -77,6 +110,10 @@ create table if not exists valoraciones (
   notas           text
 );
 create index if not exists idx_valoraciones_creada on valoraciones (creada_en desc);
+
+-- Snapshot de los comparables usados (para el informe PDF, 2ª hoja).
+-- Se congelan los datos del momento: si el mercado cambia, el informe no varía.
+alter table valoraciones add column if not exists comparables jsonb;
 
 -- 4) Bajas: trigger que rellena precio_baja/fecha_baja al pasar a inactivo -----
 create or replace function mercado_marcar_baja()

@@ -5,7 +5,7 @@ import dynamic from "next/dynamic"
 import type { FeatureCollection, Geometry } from "geojson"
 import {
   History, Plus, X, MapPin, Loader2, Check, Home, Building2,
-  Trash2, ExternalLink, BarChart2, ChevronRight, Eye, EyeOff, Search,
+  Trash2, FileText, ExternalLink, BarChart2, ChevronRight, Eye, EyeOff, Search,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -14,6 +14,7 @@ import {
   type ZonaStat, type Valoracion, type Operacion, type ComparableInmueble, type FactoresMercado, type UnidadCatastro,
 } from "@/lib/actions/valorador"
 import type { BarrioProps } from "./valorador-map"
+import { estimarPorSemejanza, type Sujeto } from "@/lib/valorador/semejanza"
 
 const ValoradorMapa = dynamic(() => import("./valorador-map").then((m) => m.ValoradorMapa), {
   ssr: false,
@@ -587,6 +588,13 @@ const COND_OPTS = [
   { key: "buen_estado", label: "Buen estado", factor: 1.0 },
   { key: "a_reformar",  label: "A reformar",  factor: 0.85 },
 ] as const
+// Nuestras keys de condición → valores que guarda Idealista en la BD
+const COND_A_BD: Record<string, string> = {
+  obra_nueva: "newdevelopment",
+  buen_estado: "good",
+  a_reformar: "renew",
+}
+
 const PLANTA_OPTS = [
   { key: "bajo",       label: "Bajo",       factor: 0.96 },
   { key: "1",          label: "Planta 1",   factor: 0.98 },
@@ -603,7 +611,18 @@ const EXTRA_OPTS = [
   { key: "parking",  label: "Parking",     pct: 0.04 },
   { key: "trastero", label: "Trastero",    pct: 0.02 },
   { key: "terraza",  label: "Terraza",     pct: 0.03 },
-  { key: "piscina",  label: "Piscina/comunes", pct: 0.05 },
+  { key: "balcon",   label: "Balcón",      pct: 0.01 },
+  { key: "piscina",  label: "Piscina",     pct: 0.05 },
+  { key: "jardin",   label: "Zonas verdes", pct: 0.03 },
+] as const
+
+// Tipo de inmueble (los valores coinciden con los de Idealista en la BD)
+const TIPO_OPTS = [
+  { key: "flat",      label: "Piso" },
+  { key: "penthouse", label: "Ático" },
+  { key: "duplex",    label: "Dúplex" },
+  { key: "studio",    label: "Estudio" },
+  { key: "chalet",    label: "Chalet" },
 ] as const
 
 // ─── Panel: Nueva valoración ──────────────────────────────────────────────────
@@ -644,7 +663,14 @@ function NuevaValoracionPanel({
   const [condicion, setCondicion] = useState<string>("buen_estado")
   const [planta, setPlanta] = useState<string>("intermedia")
   const [ascensor, setAscensor] = useState(true)
+  const [tipoInmueble, setTipoInmueble] = useState<string>("flat")
+  const [anioEdificio, setAnioEdificio] = useState<number | null>(null)
+  const [exterior, setExterior] = useState<boolean | null>(null)
+  const [energia, setEnergia] = useState<string>("")
   const [extras, setExtras] = useState<Set<string>>(new Set())
+  // Filtro de comparables: solo los muy parecidos
+  const [soloParecidos, setSoloParecidos] = useState(false)
+  const [detalle, setDetalle] = useState<ComparableInmueble | null>(null)
   const [notas, setNotas] = useState("")
   const [saving, setSaving] = useState(false)
   const [descuento, setDescuento] = useState(true)
@@ -701,6 +727,9 @@ function NuevaValoracionPanel({
     setUnidadSel(u.rc)
     if (u.superficie) setMetros(String(u.superficie))
     if (u.planta) setPlanta(plantaCatastro(u.planta))
+    // Año del Catastro: guía la condición y la eficiencia esperadas
+    const anio = u.anio ? parseInt(u.anio, 10) : NaN
+    setAnioEdificio(isNaN(anio) ? null : anio)
     if (u.plantaNum != null) {
       setPlantaNum(u.plantaNum)
     } else if (u.planta) {
@@ -758,6 +787,44 @@ function NuevaValoracionPanel({
     return 1.06
   }, [banos])
 
+  // ── Motor por semejanza (Fase 2) ──────────────────────────────────────────
+  const sujeto = useMemo<Sujeto>(() => ({
+    tipo: tipoInmueble || null,
+    metros: m2 || 0,
+    habitaciones: habitaciones ? parseInt(habitaciones) : null,
+    banos: banos ? parseInt(banos) : null,
+    condicion: COND_A_BD[condicion] ?? null,
+    plantaTipo: planta || null,
+    ascensor,
+    exterior,
+    energia: energia || null,
+    piscina: extras.has("piscina"),
+    jardin: extras.has("jardin"),
+    trastero: extras.has("trastero"),
+    parking: extras.has("parking"),
+    terraza: extras.has("terraza"),
+    aire: extras.has("aire"),
+    lat: centro?.lat ?? null,
+    lng: centro?.lng ?? null,
+  }), [tipoInmueble, m2, habitaciones, banos, condicion, planta, ascensor, exterior, energia, extras, centro])
+
+  const semejanza = useMemo(
+    () => (m2 > 0 && comparables.length > 0
+      ? estimarPorSemejanza(sujeto, comparables, { excluidos: excludedIds })
+      : null),
+    [sujeto, comparables, excludedIds, m2]
+  )
+
+  // Comparables ordenados por parecido (los más relevantes arriba)
+  const comparablesOrdenados = useMemo(() => {
+    if (!semejanza) return comparables
+    const orden = [...comparables].sort(
+      (a, b) => (semejanza.scores.get(b.id) ?? 0) - (semejanza.scores.get(a.id) ?? 0)
+    )
+    // Filtro visual: no altera el cálculo (los poco parecidos ya pesan poco)
+    return soloParecidos ? orden.filter((c) => (semejanza.scores.get(c.id) ?? 0) >= 0.6) : orden
+  }, [comparables, semejanza, soloParecidos])
+
   // Factor de ajuste total por características
   const factor = useMemo(() => {
     const fCond = COND_OPTS.find((o) => o.key === condicion)?.factor ?? 1
@@ -769,21 +836,27 @@ function NuevaValoracionPanel({
 
   // Tres bandas de precio (estilo BetterPlace)
   const bandas = useMemo(() => {
-    if (!stat || !stat.precio_m2_mediana || !m2 || m2 <= 0) return null
-    const med = stat.precio_m2_mediana
-    const p25 = stat.precio_m2_p25 ?? Math.round(med * 0.9)
-    const p75 = stat.precio_m2_p75 ?? Math.round(med * 1.15)
+    if (!m2 || m2 <= 0) return null
+    // Con semejanza: los percentiles ya vienen ajustados por las características
+    // reales de los comparables → no se aplican los factores heurísticos.
+    const usaSemejanza = semejanza != null
+    if (!usaSemejanza && (!stat || !stat.precio_m2_mediana)) return null
+
+    const med = usaSemejanza ? semejanza!.mediana : stat!.precio_m2_mediana!
+    const p25 = usaSemejanza ? semejanza!.p25 : (stat!.precio_m2_p25 ?? Math.round(med * 0.9))
+    const p75 = usaSemejanza ? semejanza!.p75 : (stat!.precio_m2_p75 ?? Math.round(med * 1.15))
+    const factorAplicado = usaSemejanza ? 1 : factor
     const desc = descuento ? 0.85 : 1
 
     // 1. Precio de venta (Verde): Valor indicado / real de venta (con descuento venta real)
-    const verde = Math.round(m2 * p25 * factor * desc)
+    const verde = Math.round(m2 * p25 * factorAplicado * desc)
     // 2. Venta poco probable (Amarillo): Precio de anuncio medio
-    const amarillo = Math.max(Math.round(verde * 1.10), Math.round(m2 * med * factor))
+    const amarillo = Math.max(Math.round(verde * 1.10), Math.round(m2 * med * factorAplicado))
     // 3. Fuera de mercado (Rojo): Rango alto sobrevalorado (P75)
-    const rojo = Math.max(Math.round(amarillo * 1.12), Math.round(m2 * p75 * factor * 1.05))
+    const rojo = Math.max(Math.round(amarillo * 1.12), Math.round(m2 * p75 * factorAplicado * 1.05))
 
     return { verde, amarillo, rojo }
-  }, [stat, m2, factor, descuento])
+  }, [stat, m2, factor, descuento, semejanza])
 
   const vendidos = comparables.filter((c) => c.activo === false).length
   const activeCount = comparables.length > 0
@@ -795,16 +868,21 @@ function NuevaValoracionPanel({
   }
 
   async function guardar() {
-    if (!bandas || !stat) return
+    if (!bandas) return
     setSaving(true)
     const resumen = [
+      TIPO_OPTS.find((t) => t.key === tipoInmueble)?.label,
+      anioEdificio ? `edificio ${anioEdificio}` : null,
       COND_OPTS.find((o) => o.key === condicion)?.label,
       PLANTA_OPTS.find((o) => o.key === planta)?.label,
       ascensor ? "con ascensor" : "sin ascensor",
       banos ? `${banos} baños` : null,
+      exterior === true ? "exterior" : exterior === false ? "interior" : null,
+      energia ? `energía ${energia.toUpperCase()}` : null,
       ...EXTRA_OPTS.filter((o) => extras.has(o.key)).map((o) => o.label),
       radioMode ? `radio ${radio}m` : null,
       descuento ? "−15% venta real" : null,
+      semejanza ? `semejanza ${semejanza.muestraUsada} comp. (${Math.round(semejanza.similitudMedia * 100)}%)` : null,
     ].filter(Boolean).join(", ")
     const res = await crearValoracion({
       direccion: direccion.trim() || null,
@@ -813,11 +891,34 @@ function NuevaValoracionPanel({
       metros: m2,
       habitaciones: habitaciones ? parseInt(habitaciones) : null,
       operacion,
-      precio_m2_zona: stat.precio_m2_mediana!,
+      precio_m2_zona: semejanza?.mediana ?? stat?.precio_m2_mediana ?? 0,
       valor_estimado: bandas.amarillo,
       valor_min: bandas.verde,
       valor_max: bandas.rojo,
-      muestra: activeCount,
+      muestra: semejanza?.muestraUsada ?? activeCount,
+      // Snapshot de los comparables usados (2ª hoja del informe)
+      comparables: comparablesOrdenados
+        .filter((c) => !excludedIds.has(c.id))
+        .slice(0, 20)
+        .map((c) => ({
+          precio: c.precio,
+          metros: c.metros,
+          precio_m2: Math.round(c.precio_m2),
+          habitaciones: c.habitaciones,
+          banos: c.banos,
+          planta: c.planta,
+          barrio: c.barrio,
+          estado: c.estado_conservacion,
+          energia: c.energia,
+          ascensor: c.ascensor,
+          extras: [
+            c.parking && "Parking", c.terraza && "Terraza", c.piscina && "Piscina",
+            c.jardin && "Zonas verdes", c.trastero && "Trastero", c.aire && "A/A",
+          ].filter(Boolean) as string[],
+          similitud: Math.round((semejanza?.scores.get(c.id) ?? 0) * 100),
+          activo: c.activo !== false,
+          idealista_id: c.idealista_id,
+        })),
       notas: [resumen, notas.trim()].filter(Boolean).join(" — ") || null,
     })
     setSaving(false)
@@ -1004,6 +1105,101 @@ function NuevaValoracionPanel({
               </span>
             </button>
 
+            {/* Antigüedad del edificio (Catastro) → guía la condición */}
+            {anioEdificio != null && (
+              <div className={cn(
+                "rounded-lg border px-3 py-2 flex items-start gap-2",
+                anioEdificio < 1980
+                  ? "border-amber-500/30 bg-amber-500/5"
+                  : "border-border bg-muted/20"
+              )}>
+                <Home className={cn("h-4 w-4 mt-0.5 shrink-0", anioEdificio < 1980 ? "text-amber-400" : "text-muted-foreground")} />
+                <div className="text-xs">
+                  <p className="text-foreground">
+                    Edificio de <span className="font-semibold">{anioEdificio}</span>
+                    <span className="text-muted-foreground"> · {new Date().getFullYear() - anioEdificio} años</span>
+                  </p>
+                  <p className="text-muted-foreground/80 mt-0.5">
+                    {anioEdificio < 1980
+                      ? "¿Está reformado? Si no lo está, marca «A reformar» — baja el precio un 16%."
+                      : anioEdificio >= 2015
+                        ? "Construcción reciente: valora si es «Obra nueva»."
+                        : "Comprueba la condición real del inmueble."}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Tipo de inmueble (peso alto en la comparación) */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Tipo de inmueble</label>
+              <div className="flex flex-wrap gap-1.5">
+                {TIPO_OPTS.map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setTipoInmueble(t.key)}
+                    className={cn(
+                      "px-3 h-8 rounded-md border text-xs transition-colors",
+                      tipoInmueble === t.key
+                        ? "border-violet-500/40 bg-violet-500/10 text-violet-400 font-medium"
+                        : "border-border text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Luminosidad + eficiencia energética (afinan la semejanza) */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">Luminosidad</label>
+                <div className="flex rounded-md border border-border overflow-hidden h-9">
+                  {[
+                    { v: null, l: "—" },
+                    { v: true, l: "Exterior" },
+                    { v: false, l: "Interior" },
+                  ].map((o) => (
+                    <button
+                      key={String(o.v)}
+                      onClick={() => setExterior(o.v)}
+                      className={cn(
+                        "flex-1 text-xs transition-colors",
+                        exterior === o.v ? "bg-muted text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {o.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">Certificado energético</label>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => setEnergia("")}
+                    className={cn("h-9 px-2 rounded-md border text-xs transition-colors",
+                      !energia ? "bg-muted text-foreground border-border" : "border-border text-muted-foreground hover:text-foreground")}
+                  >—</button>
+                  {["a", "b", "c", "d", "e", "f", "g"].map((e) => (
+                    <button
+                      key={e}
+                      onClick={() => setEnergia(energia === e ? "" : e)}
+                      className={cn(
+                        "h-9 flex-1 rounded-md text-xs font-bold uppercase transition-all border",
+                        energia === e
+                          ? cn(ENERGIA_CLS[e], "border-transparent ring-1 ring-white/30")
+                          : "border-border text-muted-foreground/60 hover:text-foreground"
+                      )}
+                    >
+                      {e}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             {/* Extras */}
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Extras</label>
@@ -1139,14 +1335,28 @@ function NuevaValoracionPanel({
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-medium text-foreground">Selecciona los comparables que influyen en el precio:</span>
-                  <div className="flex gap-2 text-[11px]">
+                  <div className="flex items-center gap-2 text-[11px]">
+                    {semejanza && (
+                      <button
+                        onClick={() => setSoloParecidos((v) => !v)}
+                        className={cn(
+                          "px-2 py-0.5 rounded-full border transition-colors",
+                          soloParecidos
+                            ? "border-violet-500/40 bg-violet-500/10 text-violet-400"
+                            : "border-border text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        Solo parecidos
+                      </button>
+                    )}
                     <button onClick={onSelectAllComparables} className="text-violet-400 hover:underline">Incluir todos</button>
                     <button onClick={onDeselectAllComparables} className="text-muted-foreground hover:underline">Excluir todos</button>
                   </div>
                 </div>
                 <div className="max-h-56 overflow-y-auto divide-y divide-border/40 rounded-lg border border-border bg-background scrollbar-thin">
-                  {comparables.map((c) => {
+                  {comparablesOrdenados.map((c) => {
                     const excluded = excludedIds.has(c.id)
+                    const sim = semejanza?.scores.get(c.id)
                     return (
                       <div
                         key={c.id}
@@ -1181,6 +1391,7 @@ function NuevaValoracionPanel({
                             <span className="text-muted-foreground text-[11px] ml-2">
                               {c.metros} m² · {c.habitaciones ?? "—"} hab · {c.banos ?? "—"} baños
                             </span>
+                            <CaracChips c={c} />
                             {c.cambio && c.cambio.delta != null && c.cambio.direccion && (
                               <span className={cn(
                                 "text-[10px] font-medium ml-2 whitespace-nowrap",
@@ -1192,8 +1403,30 @@ function NuevaValoracionPanel({
                             )}
                           </div>
                         </div>
-                        <span className="font-medium text-foreground tabular-nums shrink-0 ml-2">
-                          {Math.round(c.precio).toLocaleString("es-ES")} €
+                        <span className="flex items-center gap-2 shrink-0 ml-2">
+                          {sim != null && (
+                            <span
+                              title="Parecido con el inmueble valorado"
+                              className={cn(
+                                "text-[10px] font-semibold px-1.5 py-0.5 rounded tabular-nums",
+                                sim >= 0.7 ? "bg-emerald-500/15 text-emerald-400"
+                                  : sim >= 0.45 ? "bg-amber-500/15 text-amber-400"
+                                  : "bg-muted text-muted-foreground/70"
+                              )}
+                            >
+                              {Math.round(sim * 100)}%
+                            </span>
+                          )}
+                          <span className="font-medium text-foreground tabular-nums">
+                            {Math.round(c.precio).toLocaleString("es-ES")} €
+                          </span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDetalle(c) }}
+                            title="Ver detalle"
+                            className="text-muted-foreground/50 hover:text-violet-400 transition-colors"
+                          >
+                            <BarChart2 className="h-3.5 w-3.5" />
+                          </button>
                         </span>
                       </div>
                     )
@@ -1229,12 +1462,58 @@ function NuevaValoracionPanel({
                   rojo={bandas.rojo}
                   m2={m2}
                 />
-                <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
-                  Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
-                  {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
-                  características ×{factor.toFixed(2)}
-                  {descuento && <> · <span className="text-emerald-500/80">−15% venta real</span></>}.
-                </p>
+                {/* Cómo se ha calculado (explicabilidad) */}
+                {semejanza ? (
+                  <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+                        Cómo se ha calculado
+                      </span>
+                      <span className={cn(
+                        "text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                        semejanza.confianza >= 0.66 ? "bg-emerald-500/15 text-emerald-400"
+                          : semejanza.confianza >= 0.4 ? "bg-amber-500/15 text-amber-400"
+                          : "bg-red-500/15 text-red-400"
+                      )}>
+                        Confianza {semejanza.confianza >= 0.66 ? "alta" : semejanza.confianza >= 0.4 ? "media" : "baja"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div>
+                        <p className="text-[9px] text-muted-foreground uppercase">Base</p>
+                        <p className="text-sm font-semibold text-foreground tabular-nums">{semejanza.mediana} €/m²</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] text-muted-foreground uppercase">Comparables</p>
+                        <p className="text-sm font-semibold text-foreground tabular-nums">{semejanza.muestraUsada}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] text-muted-foreground uppercase">Parecido medio</p>
+                        <p className="text-sm font-semibold text-violet-400 tabular-nums">{Math.round(semejanza.similitudMedia * 100)}%</p>
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+                      Ponderado por semejanza real (m², habitaciones, baños, condición, planta,
+                      ascensor, extras y distancia).
+                      {Math.abs(semejanza.ajustePct) >= 1 && (
+                        <> Los pisos más parecidos valen un{" "}
+                          <span className={semejanza.ajustePct > 0 ? "text-amber-400" : "text-emerald-400"}>
+                            {semejanza.ajustePct > 0 ? "+" : ""}{semejanza.ajustePct.toFixed(1)}%
+                          </span>{" "}
+                          respecto a la media de la zona.
+                        </>
+                      )}
+                      {descuento && <> · <span className="text-emerald-500/80">−15% venta real aplicado</span></>}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground/70 pt-1 leading-relaxed">
+                    Base {stat.precio_m2_mediana} €/m² (mediana de {activeCount} comparables
+                    {radioMode ? ` en ${radio >= 1000 ? `${(radio / 1000).toFixed(1)} km` : `${radio} m`}` : nombreBarrio ? ` en ${nombreBarrio}` : ""}) ·
+                    características ×{factor.toFixed(2)}
+                    {descuento && <> · <span className="text-emerald-500/80">−15% venta real</span></>}.
+                  </p>
+                )}
               </div>
             )}
 
@@ -1264,7 +1543,105 @@ function NuevaValoracionPanel({
           </div>
         )}
       </div>
+
+      {/* Detalle de un comparable */}
+      {detalle && (
+        <ComparableDetalle
+          c={detalle}
+          similitud={semejanza?.scores.get(detalle.id) ?? null}
+          onClose={() => setDetalle(null)}
+        />
+      )}
     </Drawer>
+  )
+}
+
+// ─── Modal: detalle de un comparable ──────────────────────────────────────────
+function ComparableDetalle({
+  c, similitud, onClose,
+}: {
+  c: ComparableInmueble
+  similitud: number | null
+  onClose: () => void
+}) {
+  const filas: [string, React.ReactNode][] = [
+    ["Precio", `${c.precio.toLocaleString("es-ES")} €`],
+    ["€/m²", `${Math.round(c.precio_m2).toLocaleString("es-ES")} €/m²`],
+    ["Superficie", `${c.metros} m²${c.usable_area ? ` (${c.usable_area} m² útiles)` : ""}`],
+    ["Habitaciones", c.habitaciones ?? "—"],
+    ["Baños", c.banos ?? "—"],
+    ["Planta", c.planta ?? "—"],
+    ["Estado", c.estado_conservacion ? (COND_LABEL[c.estado_conservacion] ?? c.estado_conservacion) : "—"],
+    ["Barrio", c.barrio ?? "—"],
+    ["Anunciante", c.anunciante === "agencia" ? (c.agencia_nombre || "Agencia") : "Particular"],
+  ]
+  if (c.gastos_comunidad != null) filas.push(["Gastos comunidad", `${c.gastos_comunidad} €/mes`])
+  if (c.energia_kwh != null) filas.push(["Consumo", `${c.energia_kwh} kWh/m² año`])
+  if (c.activo === false) {
+    filas.push(["Estado anuncio", <span key="s" className="text-zinc-400">Vendido / retirado</span>])
+    if (c.precio_baja != null) filas.push(["Último precio", `${c.precio_baja.toLocaleString("es-ES")} €`])
+  }
+
+  return (
+    <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-sm bg-card border border-border rounded-xl shadow-2xl overflow-hidden max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold">Comparable</h3>
+            {similitud != null && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+                {Math.round(similitud * 100)}% parecido
+              </span>
+            )}
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto scrollbar-thin">
+          {c.imagen_url && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={c.imagen_url}
+              alt=""
+              referrerPolicy="no-referrer"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none" }}
+              className={cn("w-full h-40 object-cover", c.activo === false && "grayscale opacity-70")}
+            />
+          )}
+          <div className="p-4 space-y-3">
+            <CaracChips c={c} />
+            <div className="divide-y divide-border/50">
+              {filas.map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between py-1.5 text-xs">
+                  <span className="text-muted-foreground">{k}</span>
+                  <span className="font-medium text-foreground text-right">{v}</span>
+                </div>
+              ))}
+            </div>
+            {c.cambio && c.cambio.delta != null && (
+              <div className="rounded-lg bg-muted/40 p-2.5 text-xs">
+                <span className="text-muted-foreground">Cambio de precio: </span>
+                <span className={c.cambio.direccion === "decrease" ? "text-amber-400" : "text-red-400"}>
+                  {c.cambio.precio_anterior?.toLocaleString("es-ES")} € → {c.cambio.precio_nuevo?.toLocaleString("es-ES")} €
+                  {c.cambio.pct != null ? ` (${c.cambio.pct > 0 ? "+" : ""}${c.cambio.pct}%)` : ""}
+                </span>
+              </div>
+            )}
+            <a
+              href={`https://www.idealista.com/inmueble/${c.idealista_id}/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full h-9 rounded-md border border-border text-xs flex items-center justify-center gap-1.5 text-violet-400 hover:bg-muted/40 transition-colors"
+            >
+              Ver en Idealista <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1456,12 +1833,23 @@ function HistorialPanel({
                     {v.barrio ? `${v.barrio} · ` : ""}{v.metros ? `${v.metros} m²` : ""}{v.habitaciones ? ` · ${v.habitaciones} hab.` : ""} · {v.operacion}
                   </p>
                 </div>
-                <button
-                  onClick={() => onDelete(v.id)}
-                  className="text-muted-foreground/40 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={`/valorador/informe/${v.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Descargar informe en PDF"
+                    className="text-muted-foreground/50 hover:text-violet-400 transition-colors"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                  </a>
+                  <button
+                    onClick={() => onDelete(v.id)}
+                    className="text-muted-foreground/40 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
               <div className="flex items-baseline justify-between mt-2">
                 <span className="text-lg font-semibold text-foreground">{eur(v.valor_estimado)}</span>
@@ -1494,6 +1882,58 @@ function Drawer({ title, onClose, children, wide }: { title: string; onClose: ()
       </div>
       <div className="flex-1 overflow-y-auto p-5 scrollbar-thin">{children}</div>
     </aside>
+  )
+}
+
+// Etiqueta energética A–G con su color oficial
+const ENERGIA_CLS: Record<string, string> = {
+  a: "bg-emerald-600/25 text-emerald-400", b: "bg-green-600/25 text-green-400",
+  c: "bg-lime-600/25 text-lime-400",       d: "bg-yellow-600/25 text-yellow-400",
+  e: "bg-amber-600/25 text-amber-400",     f: "bg-orange-600/25 text-orange-400",
+  g: "bg-red-600/25 text-red-400",
+}
+const COND_LABEL: Record<string, string> = {
+  good: "Buen estado", renew: "A reformar", newdevelopment: "Obra nueva",
+}
+
+// Chips de características del comparable (solo muestra lo que existe)
+function CaracChips({ c }: { c: ComparableInmueble }) {
+  const chips: { k: string; label: string; cls?: string }[] = []
+  // Tipo, salvo "piso" que es lo habitual y no aporta
+  const tipo = c.tipo_detallado?.toLowerCase()
+  if (tipo && tipo !== "flat") {
+    const lbl = TIPO_OPTS.find((t) => t.key === tipo)?.label
+    if (lbl) chips.push({ k: "tipo", label: lbl, cls: "bg-violet-500/15 text-violet-400" })
+  }
+  const energia = c.energia?.toLowerCase()
+  if (energia && ENERGIA_CLS[energia]) {
+    chips.push({ k: "energia", label: energia.toUpperCase(), cls: ENERGIA_CLS[energia] })
+  }
+  const cond = c.estado_conservacion && COND_LABEL[c.estado_conservacion]
+  if (cond) chips.push({ k: "cond", label: cond })
+  if (c.exterior === true) chips.push({ k: "ext", label: "Exterior" })
+  if (c.piscina) chips.push({ k: "pis", label: "Piscina" })
+  if (c.jardin) chips.push({ k: "jar", label: "Zonas verdes" })
+  if (c.parking) chips.push({ k: "par", label: "Parking" })
+  if (c.terraza) chips.push({ k: "ter", label: "Terraza" })
+  if (c.trastero) chips.push({ k: "tra", label: "Trastero" })
+  if (c.aire) chips.push({ k: "aire", label: "A/A" })
+  if (!chips.length) return null
+
+  return (
+    <span className="inline-flex flex-wrap gap-1 ml-2 align-middle">
+      {chips.map((ch) => (
+        <span
+          key={ch.k}
+          className={cn(
+            "text-[9px] font-medium px-1.5 py-0.5 rounded",
+            ch.cls ?? "bg-muted text-muted-foreground"
+          )}
+        >
+          {ch.label}
+        </span>
+      ))}
+    </span>
   )
 }
 
