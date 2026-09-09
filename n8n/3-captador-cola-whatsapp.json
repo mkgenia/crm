@@ -1,0 +1,959 @@
+{
+  "name": "3 · Captador — Cola de WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */6 10-13,16-20 * * 1-6"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1340,
+        0
+      ],
+      "id": "wf3-cron",
+      "name": "Turno de Cola (cada 6 min)",
+      "notes": "Franjas 10-14h y 16-21h, L-S. Fuera de horario comercial no se escribe a nadie: un WhatsApp comercial a las 8 de la manana o en domingo es denuncia y bloqueo casi asegurados."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/app_settings?key=in.(auto_contact_enabled,wa_limite_diario)&select=key,value",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1120,
+        0
+      ],
+      "id": "wf3-ajustes",
+      "name": "Leer Ajustes",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?ultimo_contacto_en=gte.{{ encodeURIComponent($now.startOf('day').toISO()) }}&select=id&limit=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -900,
+        0
+      ],
+      "id": "wf3-enviados",
+      "name": "Enviados Hoy",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Cuenta tambien los envios manuales del CRM, asi que el tope diario es global y no solo del automatismo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Un unico punto de control del ritmo de envio. Nada mas manda WhatsApps.\nconst ajustes = {};\nfor (const it of $('Leer Ajustes').all()) {\n  const r = it.json || {};\n  if (r.key) ajustes[r.key] = r.value;\n}\n\nif (String(ajustes.auto_contact_enabled) !== 'true') return [];\n\nconst limite = Number(ajustes.wa_limite_diario != null ? ajustes.wa_limite_diario : 25);\nconst enviadosHoy = $('Enviados Hoy').all()\n  .filter(function (i) { return i.json && i.json.id != null; }).length;\n\nif (enviadosHoy >= limite) return [];\n\n// Salto aleatorio del 45% de los turnos. Sin esto los mensajes saldrian clavados\n// cada 6 minutos, y esa regularidad milimetrica es de los primeros patrones que\n// usa WhatsApp para marcar una cuenta como automatizada. Con el salto, el hueco\n// entre envios queda entre 6 y ~30 min de forma irregular.\nif (Math.random() < 0.45) return [];\n\nreturn [{ json: { enviados_hoy: enviadosHoy, limite: limite } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        0
+      ],
+      "id": "wf3-decidir",
+      "name": "Decidir Turno"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?contacto_lock_en=lt.{{ encodeURIComponent($now.minus({ hours: 2 }).toISO()) }}&estado_whatsapp=is.null&ultimo_contacto_en=is.null",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contacto_lock_en: null }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        0
+      ],
+      "id": "wf3-limpiar",
+      "name": "Liberar Reservas Caducadas",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Autocuracion: si n8n se reinicia entre la reserva y el envio, esa captacion quedaria bloqueada para siempre. Suelta las reservas de mas de 2h. El filtro ultimo_contacto_en=is.null es imprescindible: sin el tambien soltaria las filas cuyo mensaje SI salio pero cuyo \"Marcar Enviado\" fallo, y se reenviaria."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?estado_whatsapp=is.null&contacto_lock_en=is.null&ultimo_contacto_en=is.null&activo=eq.true&telefono=like.34*&select=id,nombre,telefono,barrio,calle,precio,created_at&order=created_at.desc&limit=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        0
+      ],
+      "id": "wf3-siguiente",
+      "name": "Siguiente en Cola",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Mas reciente primero: en captacion de particulares el valor de un lead cae en picado con las horas. telefono=like.34* en vez de not.is.null porque el scraper antiguo dejo numeros de 9 digitos y textos tipo \"No disponible\", que quemaban turno y acababan en Sin_WhatsApp; la migracion 003 normaliza el historico a 34XXXXXXXXX."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?telefono=eq.{{ $json.telefono }}&ultimo_contacto_en=not.is.null&select=id&limit=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        0
+      ],
+      "id": "wf3-dup",
+      "name": "Otro Anuncio del Mismo Dueno",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Un particular puede tener dos anuncios en la misma zona. Sin esto recibe dos mensajes distintos del mismo agente, que es exactamente lo que hace que marque el numero como spam."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf3-if-dup-c1",
+              "leftValue": "={{ $json.id != null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "id": "wf3-if-dup",
+      "name": "Ya Contactado?"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Siguiente en Cola').first().json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ estado_whatsapp: \"Duplicado\" }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        180
+      ],
+      "id": "wf3-marcar-dup",
+      "name": "Marcar Duplicado",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Estado terminal explicito. No se toca ultimo_contacto_en a proposito: no se ha enviado nada, asi que no debe consumir cupo del tope diario."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/historial_cambios",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ captacion_id: $('Siguiente en Cola').first().json.id, campo: 'estado_whatsapp', valor_anterior: null, valor_nuevo: 'Duplicado: ya contactado por otro anuncio del mismo telefono', tipo_entidad: 'captacion' }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        180
+      ],
+      "id": "wf3-hist-dup",
+      "name": "Historial Duplicado",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Siguiente en Cola').first().json.id }}&contacto_lock_en=is.null",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contacto_lock_en: $now.toISO() }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -140
+      ],
+      "id": "wf3-reservar",
+      "name": "Reservar Contacto",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "notes": "Reserva atomica: el PATCH solo afecta a filas sin lock. Si no devuelve nada, otra ejecucion ya la tiene y esta se para sola. Es lo que impide mandar dos veces el mismo mensaje. Sin reintentos a proposito: si el primer intento funciono pero se perdio la respuesta, el reintento devolveria vacio y dejaria la captacion bloqueada sin enviar. Mejor saltar el turno."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 20000
+        },
+        "method": "POST",
+        "url": "https://test-evolution-api.pzkz6e.easypanel.host/chat/whatsappNumbers/demo",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ numbers: [$json.telefono] }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        -140
+      ],
+      "id": "wf3-check-wa",
+      "name": "Comprobar WhatsApp",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "EVOLUTION_API",
+          "name": "Evolution API (apikey)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "notes": "Va ANTES de la IA. Al reves se pagaba una generacion de OpenAI por cada numero sin WhatsApp, en cada pasada y para siempre."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf3-if-wa-c1",
+              "leftValue": "={{ $json.exists === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        860,
+        -140
+      ],
+      "id": "wf3-if-wa",
+      "name": "Tiene WhatsApp?"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Reservar Contacto').first().json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ estado_whatsapp: \"Sin_WhatsApp\" }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        20
+      ],
+      "id": "wf3-sin-wa",
+      "name": "Marcar Sin WhatsApp",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Rama que antes no existia: sin ella la captacion volvia a la cola cada hora indefinidamente. Se ve en el CRM como \"Sin WhatsApp\" y el agente puede reintentar desde el panel de detalle tras corregir el telefono."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 120000
+        },
+        "method": "POST",
+        "url": "https://test-n8n.pzkz6e.easypanel.host/webhook/ia-lead-gen",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ captacion_id: $('Reservar Contacto').first().json.id, agent: 'Josep' }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        -280
+      ],
+      "id": "wf3-ia",
+      "name": "Generar Mensaje IA",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "amount": "={{ 20 + Math.floor(Math.random() * 70) }}",
+        "unit": "seconds"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1300,
+        -280
+      ],
+      "id": "wf3-wait",
+      "name": "Pausa Humana",
+      "webhookId": "c1a4f2e8-7b30-4c11-9f52-1d8a6b3e0c77",
+      "notes": "Espera 20-90s tras generar el mensaje. Desacopla la hora de envio del tic del cron: aunque dos turnos seguidos pasen el filtro, los mensajes no salen sincronizados."
+    },
+    {
+      "parameters": {
+        "jsCode": "const ia = $('Generar Mensaje IA').first().json;\nconst cap = $('Reservar Contacto').first().json;\n\n// El generador responde JSON limpio ({ message }). Los fallbacks quedan por si\n// alguna vez se revierte a respuesta de texto plano.\nlet texto = '';\nif (typeof ia === 'string') texto = ia;\nelse if (ia.message) texto = ia.message;\nelse if (ia.data && ia.data.message) texto = ia.data.message;\nelse if (ia.text) texto = ia.text;\n\ntexto = String(texto).trim();\nif (!texto) throw new Error('El generador de IA no devolvio ningun mensaje');\n\n// El telefono ya viene normalizado a 34XXXXXXXXX desde el scraper.\nconst numero = String(cap.telefono).replace(/\\D/g, '');\n\nreturn [{ json: { number: numero, text: texto, captacion_id: cap.id } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        -280
+      ],
+      "id": "wf3-preparar-envio",
+      "name": "Preparar Envio"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Reservar Contacto').first().json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ultimo_contacto_en: $now.toISO() }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1740,
+        -280
+      ],
+      "id": "wf3-marcar-intento",
+      "name": "Marcar Intento",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "notes": "Sello ANTES de llamar a Evolution, y es el nodo mas importante del workflow. Si el mensaje sale pero la respuesta HTTP se pierde, \"Marcar Enviado\" nunca corre y la fila se queda con estado_whatsapp NULL; con ultimo_contacto_en ya puesto, ni la cola ni el limpiador de reservas la vuelven a coger, asi que el propietario NO recibe un segundo mensaje. Ademas cuenta en el tope diario aunque el envio quede a medias."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 30000
+        },
+        "method": "POST",
+        "url": "https://test-evolution-api.pzkz6e.easypanel.host/message/sendText/demo",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('Preparar Envio').first().json.number, text: $('Preparar Envio').first().json.text }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1960,
+        -280
+      ],
+      "id": "wf3-enviar-wa",
+      "name": "Enviar WhatsApp",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "EVOLUTION_API",
+          "name": "Evolution API (apikey)"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Sin reintentos y con la salida de error SIN conectar. Un reintento sobre un envio que quizas si salio duplica el mensaje; y dejar la reserva puesta hace que la fila no vuelva a la cola. El agente la ve en el CRM con la reserva marcada y puede reintentarla a mano."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Reservar Contacto').first().json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ estado_whatsapp: \"Enviado\", estado_crm: \"Contactado\" }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2180,
+        -280
+      ],
+      "id": "wf3-marcar-enviado",
+      "name": "Marcar Enviado",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $('Preparar Envio').first().json.number }}_human_mode",
+        "value": "blocked",
+        "keyType": "automatic",
+        "expire": true,
+        "ttl": 2592000
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -280
+      ],
+      "id": "wf3-redis",
+      "name": "Bloquear Bot Captaciones",
+      "credentials": {
+        "redis": {
+          "id": "xZU5G6jBaUHDEknf",
+          "name": "Redis account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "TTL de 30 dias. Antes la clave no caducaba nunca y Redis acumulaba un bloqueo por cada propietario contactado desde el primer dia."
+    },
+    {
+      "parameters": {
+        "jsCode": "const cap = $('Reservar Contacto').first().json;\nlet jid = null;\ntry {\n  const wa = $('Enviar WhatsApp').first().json;\n  jid = (wa && wa.key && wa.key.remoteJid) || null;\n} catch (e) { jid = null; }\n\n// Construido en Code y no interpolando dentro del JSON del nodo: un nombre de\n// propietario con comillas dobles rompia el body y tumbaba la creacion del lead.\nreturn [{\n  json: {\n    nombre: cap.nombre || 'Propietario',\n    telefono: cap.telefono,\n    fuente: 'Captaciones',\n    estado: 'Contactado',\n    captacion_id: cap.id,\n    notas: 'Contacto automatico del captador (Idealista -> WhatsApp)',\n    wa_jid: jid,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        -280
+      ],
+      "id": "wf3-prep-lead",
+      "name": "Preparar Lead"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2840,
+        -280
+      ],
+      "id": "wf3-crear-lead",
+      "name": "Crear Lead",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "fuente \"Captaciones\": es el valor que espera el desplegable de filtros de /leads. Convivian tres etiquetas para el mismo origen (Captaciones / Captacion / Captacion con tilde); la migracion 003 unifica el historico."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Turno de Cola (cada 6 min)": {
+      "main": [
+        [
+          {
+            "node": "Leer Ajustes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Ajustes": {
+      "main": [
+        [
+          {
+            "node": "Enviados Hoy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviados Hoy": {
+      "main": [
+        [
+          {
+            "node": "Decidir Turno",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decidir Turno": {
+      "main": [
+        [
+          {
+            "node": "Liberar Reservas Caducadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Liberar Reservas Caducadas": {
+      "main": [
+        [
+          {
+            "node": "Siguiente en Cola",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Siguiente en Cola": {
+      "main": [
+        [
+          {
+            "node": "Otro Anuncio del Mismo Dueno",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Otro Anuncio del Mismo Dueno": {
+      "main": [
+        [
+          {
+            "node": "Ya Contactado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ya Contactado?": {
+      "main": [
+        [
+          {
+            "node": "Marcar Duplicado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reservar Contacto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar Duplicado": {
+      "main": [
+        [
+          {
+            "node": "Historial Duplicado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reservar Contacto": {
+      "main": [
+        [
+          {
+            "node": "Comprobar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comprobar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Tiene WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Tiene WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "Generar Mensaje IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar Sin WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar Mensaje IA": {
+      "main": [
+        [
+          {
+            "node": "Pausa Humana",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Pausa Humana": {
+      "main": [
+        [
+          {
+            "node": "Preparar Envio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Envio": {
+      "main": [
+        [
+          {
+            "node": "Marcar Intento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar Intento": {
+      "main": [
+        [
+          {
+            "node": "Enviar WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Marcar Enviado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Marcar Enviado": {
+      "main": [
+        [
+          {
+            "node": "Bloquear Bot Captaciones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bloquear Bot Captaciones": {
+      "main": [
+        [
+          {
+            "node": "Preparar Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Lead": {
+      "main": [
+        [
+          {
+            "node": "Crear Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "availableInMCP": false
+  },
+  "tags": []
+}

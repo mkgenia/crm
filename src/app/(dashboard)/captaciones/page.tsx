@@ -1,5 +1,5 @@
 import { getCaptaciones, getCaptacionesEliminadas, getCaptacionesEliminadasPorAgente, getAgentes } from "@/lib/actions/captaciones"
-import { getAutoContactoConfig } from "@/lib/actions/captaciones-config"
+import { getAutoContactoConfig, getEstadoCola } from "@/lib/actions/captaciones-config"
 import { CaptacionesList } from "@/components/captaciones/captaciones-list"
 import { PapeleraList } from "@/components/captaciones/papelera-list"
 import { CaptacionesConfig } from "@/components/captaciones/captaciones-config"
@@ -21,13 +21,14 @@ export default async function CaptacionesPage() {
 
   const isAdmin = perfil?.rol === "Admin"
 
-  const [captaciones, eliminadas, config, agentes] = await Promise.all([
+  const [captaciones, eliminadas, config, agentes, cola] = await Promise.all([
     isAdmin
       ? getCaptaciones(undefined, undefined, undefined, true)
       : getCaptaciones(undefined, undefined, user.id),
     isAdmin ? getCaptacionesEliminadas() : getCaptacionesEliminadasPorAgente(user.id),
     isAdmin ? getAutoContactoConfig() : null,
     isAdmin ? getAgentes() : [],
+    isAdmin ? getEstadoCola() : { enCola: 0, enviadasHoy: 0 },
   ])
 
   const total = captaciones.length
@@ -48,7 +49,13 @@ export default async function CaptacionesPage() {
           </p>
         </div>
         {isAdmin && config && (
-          <CaptacionesConfig enabled={config.enabled} zonas={config.zonas} />
+          <CaptacionesConfig
+            enabled={config.enabled}
+            zonas={config.zonas}
+            limiteDiario={config.limiteDiario}
+            uso={config.uso}
+            cola={cola}
+          />
         )}
       </div>
 

@@ -71,6 +71,14 @@ export async function crearLeadDesdeCaptacion(captacionId: number) {
 
   if (capErr || !cap) return { error: "No se encontró la captación" }
 
+  // Un lead como máximo por captación (índice único leads_captacion_id_uidx)
+  const { data: yaVinculado } = await supabase
+    .from("leads")
+    .select("id")
+    .eq("captacion_id", captacionId)
+    .maybeSingle()
+  if (yaVinculado) return { error: "Esta captación ya tiene un lead", leadId: yaVinculado.id }
+
   // Comprobar si ya existe un lead con ese teléfono
   if (cap.telefono) {
     const { data: existing } = await supabase
@@ -90,7 +98,11 @@ export async function crearLeadDesdeCaptacion(captacionId: number) {
   const { data: lead, error } = await supabase.from("leads").insert({
     nombre:       cap.nombre || "Propietario",
     telefono:     cap.telefono || null,
-    fuente:       "Captación",
+    // Sin captacion_id el lead nace huérfano: el clasificador de respuestas actualiza
+    // por captacion_id, así que nunca volvería a tocarlo. Y "Captaciones" es el valor
+    // que espera el desplegable de fuentes de /leads.
+    captacion_id: captacionId,
+    fuente:       "Captaciones",
     notas:        notas || null,
     estado:       "Nuevo",
     captado_por:  user.id,

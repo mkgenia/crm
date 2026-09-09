@@ -1,6 +1,6 @@
 "use server"
 
-import { createClient, createAdminClient } from "@/lib/supabase/server"
+import { createClient, createAdminClient, createServiceClient } from "@/lib/supabase/server"
 import { revalidatePath } from "next/cache"
 import type { EstadoAgenda } from "@/types/captaciones"
 
@@ -29,6 +29,7 @@ export async function getCaptaciones(filtro?: string, search?: string, soloAgent
       barrio, calle, metros, habitaciones, banos, planta,
       tiene_ascensor, estado, estado_crm, estado_whatsapp, activo, imagen_url, imagenes,
       agente_id, fecha_agenda, recordatorio_fecha, notas_agenda, estado_agenda,
+      operacion:raw_data->>operation,
       agente:perfiles!captaciones_agente_id_fkey(id, nombre, apellidos, avatar_url)
     `)
     .eq("activo", true)
@@ -135,11 +136,60 @@ export async function actualizarEstadoAgenda(captacionId: number, estado: Estado
   return { success: true }
 }
 
+/**
+ * Formato canónico del teléfono en todo el captador: 34XXXXXXXXX, solo dígitos.
+ *
+ * Es el que produce el scraper (`telefonoES`), el que deja la migración 003 en el
+ * histórico y el que exige la cola de WhatsApp con su filtro `telefono=like.34*`.
+ * Devuelve null si no es un fijo/móvil español, para no guardar un número que la
+ * cola intentaría enviar y Evolution rechazaría.
+ */
+function normalizar(telefono: string | null): string | null {
+  let d = String(telefono ?? "").replace(/\D/g, "")
+  if (d.startsWith("00")) d = d.slice(2)
+  if (d.length === 9) d = "34" + d
+  return /^34[6-9]\d{8}$/.test(d) ? d : null
+}
+
 function phoneToJid(phone: string): string {
-  let clean = phone.replace(/[^\d]/g, "")
-  if (clean.startsWith("00")) clean = clean.slice(2)
-  if (clean.length === 9) clean = "34" + clean
+  const clean = normalizar(phone) ?? phone.replace(/[^\d]/g, "")
   return `${clean}@s.whatsapp.net`
+}
+
+/**
+ * Garantiza que la captación tiene su lead espejo, creándolo si hace falta.
+ *
+ * El contacto manual no creaba ninguno, y el clasificador de respuestas (workflow 5)
+ * actualiza el lead filtrando por captacion_id: sin fila, ese PATCH afectaba a cero
+ * filas, PostgREST devolvía 204 y el propietario interesado no aparecía en /leads.
+ */
+async function asegurarLead(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  captacionId: number,
+  nombre: string | null,
+  telefono: string | null,
+) {
+  const { data: existente } = await supabase
+    .from("leads")
+    .select("id, estado")
+    .eq("captacion_id", captacionId)
+    .maybeSingle()
+
+  if (existente) {
+    if (existente.estado === "Nuevo") {
+      await supabase.from("leads").update({ estado: "Contactado" }).eq("id", existente.id)
+    }
+    return
+  }
+
+  await supabase.from("leads").insert({
+    nombre: nombre || "Propietario",
+    telefono,
+    fuente: "Captaciones",
+    estado: "Contactado",
+    captacion_id: captacionId,
+    notas: "Contacto manual desde el panel de captaciones",
+  })
 }
 
 function hasValidPhone(telefono: string | null): boolean {
@@ -175,11 +225,17 @@ export async function generarMensajeIA(captacionId: number): Promise<string> {
     else if (perfil?.nombre) agenteName = perfil.nombre
   }
 
-  const n8nUrl = "https://test-n8n.pzkz6e.easypanel.host/webhook/ia-lead-gen"
+  const n8nUrl = process.env.NEXT_PUBLIC_N8N_WEBHOOK_IA_LEAD_GEN
+  if (!n8nUrl) return generateDefaultMessage(cap)
+
   try {
     const res = await fetch(n8nUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // El webhook de n8n exige esta cabecera desde el captador v2.
+        ...(process.env.WEBHOOK_SECRET ? { "x-webhook-secret": process.env.WEBHOOK_SECRET } : {}),
+      },
       body: JSON.stringify({ captacion_id: captacionId, agent: agenteName }),
     })
     if (res.ok) {
@@ -226,19 +282,22 @@ export async function contactarCaptacion(captacionId: number, mensaje: string) {
     return { error: `Evolution API: ${err}` }
   }
 
-  // Actualizar estado captación
+  // Actualizar estado captación.
+  // contacto_lock_en saca la captación de la cola automática (si no, el captador
+  // volvería a escribirle) y ultimo_contacto_en la hace contar en el tope diario
+  // de WhatsApp, para que los envíos manuales y los automáticos compartan cupo.
+  const ahora = new Date().toISOString()
   await supabase
     .from("captaciones")
-    .update({ estado_whatsapp: "Enviado", estado_crm: "Contactado" })
+    .update({
+      estado_whatsapp: "Enviado",
+      estado_crm: "Contactado",
+      contacto_lock_en: ahora,
+      ultimo_contacto_en: ahora,
+    })
     .eq("id", captacionId)
 
-  // Lead vinculado → Contactado (solo si estaba en Nuevo)
-  await supabase
-    .from("leads")
-    .update({ estado: "Contactado" })
-    .eq("captacion_id", captacionId)
-    .eq("estado", "Nuevo")
-
+  await asegurarLead(supabase, captacionId, cap.nombre, cap.telefono)
   revalidatePath("/leads")
 
   // Notificar n8n para activar modo humano
@@ -276,12 +335,16 @@ export async function contactarCaptacion(captacionId: number, mensaje: string) {
 export async function contactarCaptacionConTelefono(captacionId: number, telefono: string, mensaje: string) {
   const supabase = await createAdminClient()
 
-  const raw = telefono.replace(/[^\d]/g, "")
-  const jid = raw.startsWith("34") ? raw : "34" + raw
+  // Se guarda normalizado, no como lo teclee el agente: si no, el clasificador de
+  // respuestas (que busca por los últimos 9 dígitos) no encuentra la captación cuando
+  // el propietario contesta.
+  const jid = normalizar(telefono)
+  if (!jid) return { error: "El teléfono no parece un número español válido" }
 
-  const EVO_URL = "https://test-evolution-api.pzkz6e.easypanel.host"
-  const EVO_KEY = "CB475A12852B-4DF3-86BA-4B8B379C7064"
-  const EVO_INSTANCE = "demo"
+  const EVO_URL = process.env.EVO_API_URL
+  const EVO_KEY = process.env.EVO_API_KEY
+  const EVO_INSTANCE = process.env.EVO_INSTANCE
+  if (!EVO_URL || !EVO_KEY || !EVO_INSTANCE) return { error: "Evolution API no configurada" }
 
   const res = await fetch(`${EVO_URL}/message/sendText/${EVO_INSTANCE}`, {
     method: "POST",
@@ -294,17 +357,67 @@ export async function contactarCaptacionConTelefono(captacionId: number, telefon
     return { error: `Evolution API: ${err}` }
   }
 
-  // Guardar teléfono + actualizar estados
-  await supabase
+  // Guardar teléfono + actualizar estados (ver nota en contactarCaptacion)
+  const ahora = new Date().toISOString()
+  const { data: actualizada } = await supabase
     .from("captaciones")
-    .update({ telefono, estado_whatsapp: "Enviado", estado_crm: "Contactado" })
+    .update({
+      telefono: jid,
+      estado_whatsapp: "Enviado",
+      estado_crm: "Contactado",
+      contacto_lock_en: ahora,
+      ultimo_contacto_en: ahora,
+    })
     .eq("id", captacionId)
+    .select("nombre")
+    .maybeSingle()
+
+  await asegurarLead(supabase, captacionId, actualizada?.nombre ?? null, jid)
+  revalidatePath("/leads")
 
   await supabase.from("historial_cambios").insert({
     captacion_id: captacionId,
     campo: "estado_whatsapp",
     valor_anterior: null,
     valor_nuevo: "Enviado",
+  })
+
+  revalidatePath("/captaciones")
+  return { success: true }
+}
+
+/**
+ * Devuelve la captación a la cola del captador automático.
+ *
+ * Casos típicos: quedó en "Sin WhatsApp" y el agente corrigió el teléfono, quedó en
+ * "Duplicado" y se quiere escribir igualmente por el segundo anuncio, o el envío se
+ * quedó a medias y la reserva sigue puesta.
+ *
+ * Hay que vaciar las TRES marcas: la cola exige `estado_whatsapp`, `contacto_lock_en`
+ * y `ultimo_contacto_en` a null. Dejarse `ultimo_contacto_en` haría que el botón no
+ * hiciera nada visible.
+ */
+export async function reintentarAutoContacto(captacionId: number) {
+  const supabase = await createAdminClient()
+
+  const { data: previa } = await supabase
+    .from("captaciones")
+    .select("estado_whatsapp")
+    .eq("id", captacionId)
+    .maybeSingle()
+
+  const { error } = await supabase
+    .from("captaciones")
+    .update({ contacto_lock_en: null, ultimo_contacto_en: null, estado_whatsapp: null })
+    .eq("id", captacionId)
+
+  if (error) return { error: error.message }
+
+  await supabase.from("historial_cambios").insert({
+    captacion_id: captacionId,
+    campo: "estado_whatsapp",
+    valor_anterior: previa?.estado_whatsapp ?? null,
+    valor_nuevo: "En cola",
   })
 
   revalidatePath("/captaciones")
@@ -433,17 +546,36 @@ export async function restaurarCaptaciones(ids: number[]) {
 export async function eliminarDefinitivamente(ids: number[]) {
   if (!ids.length) return { success: true }
   const supabase = await createAdminClient()
+  // Storage necesita service_role PURO: createAdminClient arrastra las cookies del
+  // usuario y las políticas del bucket bloquean el borrado (dejaba carpetas huérfanas).
+  const service = createServiceClient()
 
-  // Limpiar Storage (errores no bloquean el delete)
-  await Promise.allSettled(
+  // Limpiar Storage. Los errores no bloquean el borrado, pero sí se registran.
+  const limpieza = await Promise.allSettled(
     ids.map(async (id) => {
-      const { data: files } = await supabase.storage.from("captaciones").list(String(id))
-      if (files?.length) {
-        const paths = files.map((f) => `${id}/${f.name}`)
-        await supabase.storage.from("captaciones").remove(paths)
-      }
+      const { data: files, error: errList } = await service.storage
+        .from("captaciones")
+        .list(String(id), { limit: 1000 })
+      if (errList) throw new Error(`list ${id}: ${errList.message}`)
+      if (!files?.length) return 0
+      const paths = files.map((f) => `${id}/${f.name}`)
+      const { data: borrados, error: errDel } = await service.storage
+        .from("captaciones")
+        .remove(paths)
+      if (errDel) throw new Error(`remove ${id}: ${errDel.message}`)
+      // Sin permisos, Storage responde 200 con lista vacía: hay que detectarlo
+      if (!borrados?.length) throw new Error(`remove ${id}: 0 de ${paths.length} archivos borrados (¿permisos?)`)
+      return borrados.length
     })
   )
+
+  const fallos = limpieza.filter((r) => r.status === "rejected")
+  if (fallos.length) {
+    console.error(
+      `[eliminarDefinitivamente] Storage: ${fallos.length}/${ids.length} carpetas no se pudieron borrar.`,
+      fallos.slice(0, 3).map((f) => (f as PromiseRejectedResult).reason?.message)
+    )
+  }
 
   // Borrar registros relacionados y la captación
   await supabase.from("historial_cambios").delete().in("captacion_id", ids)
@@ -451,7 +583,7 @@ export async function eliminarDefinitivamente(ids: number[]) {
   if (error) return { error: error.message }
 
   revalidatePath("/captaciones")
-  return { success: true }
+  return { success: true, storageErrores: fallos.length }
 }
 
 // Mapa estado_crm captación → estado lead

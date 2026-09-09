@@ -1,4 +1,5 @@
 import { createServerClient } from "@supabase/ssr"
+import { createClient as createSupabaseClient } from "@supabase/supabase-js"
 import { cookies } from "next/headers"
 
 export async function createClient() {
@@ -21,6 +22,22 @@ export async function createClient() {
         },
       },
     }
+  )
+}
+
+/**
+ * Cliente service_role PURO, sin cookies de sesión.
+ *
+ * `createAdminClient` pasa las cookies del usuario, así que @supabase/ssr usa ese
+ * JWT y la petición se ejecuta como usuario autenticado → las políticas de RLS y
+ * de Storage se aplican igualmente. Para operaciones administrativas reales
+ * (borrar objetos del Storage, saltarse RLS) hay que usar este cliente.
+ */
+export function createServiceClient() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } }
   )
 }
 

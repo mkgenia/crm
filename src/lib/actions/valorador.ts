@@ -1,6 +1,6 @@
 "use server"
 
-import { createClient, createAdminClient } from "@/lib/supabase/server"
+import { createClient, createAdminClient, createServiceClient } from "@/lib/supabase/server"
 import { revalidatePath } from "next/cache"
 
 export type Operacion = "venta" | "alquiler"
@@ -139,6 +139,7 @@ export interface ComparableSnapshot {
   similitud: number
   activo: boolean
   idealista_id: string
+  imagen_url?: string | null
 }
 
 // Stats €/m² por barrio para una operación. Devuelve mapa codbarrio -> stat.
@@ -565,14 +566,53 @@ export interface CrearValoracionInput {
   comparables?: ComparableSnapshot[] | null
 }
 
+/**
+ * Las URLs de imagen de Idealista van firmadas y caducan en ~24 h. Para que el
+ * informe siga mostrando las fotos meses después, se copian a nuestro Storage
+ * al guardar la valoración.
+ */
+async function archivarImagenes(comps: ComparableSnapshot[]): Promise<ComparableSnapshot[]> {
+  // Storage requiere service_role puro (createAdminClient arrastra cookies de sesión)
+  const supabase = createServiceClient()
+  const resultados = await Promise.allSettled(
+    comps.map(async (c): Promise<ComparableSnapshot> => {
+      const url = c.imagen_url
+      if (!url || url.includes("supabase.co")) return c // ya archivada o sin foto
+      try {
+        const res = await fetch(url, { headers: { Referer: "https://www.idealista.com/" } })
+        if (!res.ok) return { ...c, imagen_url: null }
+        const buf = Buffer.from(await res.arrayBuffer())
+        if (buf.byteLength < 500) return { ...c, imagen_url: null } // respuesta de error
+        const path = `valoraciones/${c.idealista_id}.jpg`
+        const { error } = await supabase.storage
+          .from("captaciones")
+          .upload(path, buf, { contentType: "image/jpeg", upsert: true })
+        if (error) return { ...c, imagen_url: null }
+        const { data } = supabase.storage.from("captaciones").getPublicUrl(path)
+        return { ...c, imagen_url: data.publicUrl }
+      } catch {
+        return { ...c, imagen_url: null }
+      }
+    })
+  )
+  return resultados.map((r, i) =>
+    r.status === "fulfilled" ? r.value : { ...comps[i], imagen_url: null }
+  )
+}
+
 export async function crearValoracion(input: CrearValoracionInput) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
+  // Copiamos las fotos a nuestro Storage: las de Idealista caducan en ~24 h
+  const comparables = input.comparables?.length
+    ? await archivarImagenes(input.comparables)
+    : input.comparables
+
   const admin = await createAdminClient()
   const { data, error } = await admin
     .from("valoraciones")
-    .insert({ ...input, creada_por: user?.id ?? null })
+    .insert({ ...input, comparables, creada_por: user?.id ?? null })
     .select("*, autor:perfiles!valoraciones_creada_por_fkey(nombre, apellidos)")
     .single()
 

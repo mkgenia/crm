@@ -50,9 +50,27 @@ Acceso: icono de documento en el panel **Historial**. Botón **Descargar PDF** �
 - **Hoja 1**: logo + ref. `VAL-00012`, datos del inmueble, las tres bandas
   (precio de venta destacado), características consideradas, metodología y aviso
   legal (no es tasación ECO/805/2003).
-- **Hoja 2**: tabla de **testigos comparables** (zona, m², hab, baños, planta,
-  estado + letra energética, equipamiento, precio, €/m², % semejanza) ordenados
-  por parecido, más un resumen estadístico (mín/mediana/media/máx) y la fuente.
+- **Hoja 2**: **testigos comparables como cards con foto, 4 por fila** (máx. 16 =
+  4×4, encaja en una A4 con holgura). Cada card: imagen, nº, % de semejanza,
+  precio, €/m², m²/hab/baños/planta, zona, estado + letra energética y
+  equipamiento. Los vendidos salen en gris con sello "VENDIDO". Debajo, resumen
+  estadístico (mín/mediana/media/máx) y la fuente.
+
+**Formato de impresión**: A4 (210×297 mm) con márgenes de 18 mm, `@page { size: A4 }`,
+pie anclado abajo (`margin-top:auto`), salto de página entre hojas y
+`break-inside: avoid` en las cards para que no se partan. El CSS vive en
+`globals.css` (con styled-jsx, Turbopack rompía la página).
+
+**Imágenes — importante**: las URLs de Idealista van **firmadas y caducan en ~24 h**
+(sin firma → 403; no existe URL permanente). Por eso se archivan en Supabase Storage
+(`captaciones/mercado/<idealista_id>.jpg`) en dos puntos:
+1. **En el workflow** (nodos `Preparar Imagenes → Descargar Imagen → Subir a Storage
+   → Fijar URL Permanente`, máx. 150 por run): las fotos quedan permanentes en
+   `mercado_inmuebles.imagen_url`.
+2. **Al guardar una valoración** (`archivarImagenes` en las server actions): red de
+   seguridad para las que aún apunten a Idealista.
+Si una foto no está disponible, el testigo se muestra en la **lista compacta** en
+lugar de como card — las dos vistas conviven en la misma hoja.
 
 > Los comparables se guardan como **snapshot congelado** en `valoraciones.comparables`
 > (jsonb, máx. 20). Así el informe no cambia aunque el mercado sí. Requiere la

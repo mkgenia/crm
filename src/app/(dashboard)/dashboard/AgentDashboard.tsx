@@ -24,10 +24,13 @@ const WA_BADGE_STYLES: Record<string, string> = {
   No_Interesado:  "bg-red-500/10 text-red-600 dark:text-red-300 border-red-500/20",
   Enviado:        "bg-violet-500/10 text-violet-600 dark:text-violet-300 border-violet-500/20",
   Pendiente:      "bg-zinc-500/10 text-zinc-500 border-zinc-500/20",
+  Sin_WhatsApp:   "bg-amber-500/10 text-amber-600 dark:text-amber-300 border-amber-500/20",
+  Duplicado:      "bg-slate-500/10 text-slate-500 border-slate-500/20",
 }
 const WA_BADGE_LABELS: Record<string, string> = {
   Interesado: "Interesado", Quiere_Llamada: "Quiere llamada", Respondido: "Respondido",
   No_Interesado: "No interesado", Enviado: "Enviado", Pendiente: "Pendiente",
+  Sin_WhatsApp: "Sin WhatsApp", Duplicado: "Duplicado",
 }
 
 function timeAgo(date: string) {

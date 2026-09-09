@@ -1,0 +1,316 @@
+{
+  "name": "4 · Captador — Generador de Mensaje IA",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ia-lead-gen",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        0
+      ],
+      "id": "wf4-webhook",
+      "name": "Webhook Lead Gen",
+      "webhookId": "ia-lead-gen",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      },
+      "notes": "Lo llaman la cola de WhatsApp y el boton \"Generar con IA\" del CRM. Autenticado: antes era publico y cualquiera podia quemar saldo de OpenAI."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $json.body.captacion_id }}&select=*",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -680,
+        0
+      ],
+      "id": "wf4-consultar",
+      "name": "Consultar Propiedad",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "get",
+        "documentURL": "https://docs.google.com/document/d/1dMpbi9DEq0T4SjYLyJSzTUN0L8BGZ_QYnLYY3aqWg-E/edit"
+      },
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        0
+      ],
+      "id": "wf4-docs",
+      "name": "Leer Plantillas",
+      "credentials": {
+        "googleApi": {
+          "id": "KWVgSyjhSlu1ubJa",
+          "name": "Google Service Account account"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "executeOnce": true,
+      "notes": "Plantillas de VENTA. Ahora es un nodo normal y no una tool del agente: antes el agente podia saltarse la lectura por mucho \"PROCESO OBLIGATORIO\" que dijera el prompt. Para ALQUILER no se usa: ese generador nunca tuvo Google Doc, su plantilla va escrita en \"Analizar Inmueble\"."
+    },
+    {
+      "parameters": {
+        "jsCode": "// El analisis se hace AQUI y el modelo solo redacta: recibe la operacion, el tipo\n// de inmueble, el angulo ya elegido y las cifras ya calculadas. No puede inventarse\n// un dato ni hablar de 'su piso' cuando lo que se vende es una nave.\nconst body = $('Webhook Lead Gen').first().json.body || {};\nconst agente = body.agent || 'Josep';\n\nconst filas = $('Consultar Propiedad').all()\n  .map(function (i) { return i.json; })\n  .filter(function (r) { return r && r.id != null; });\nconst cap = filas[0];\n\nfunction texto(n) { return String(n == null ? '' : n).trim(); }\n\n// Idealista devuelve el barrio como \"Subdistrict Els Orriols\" / \"District Camins\".\n// Ese prefijo en ingles se colaba literal en el mensaje y delataba que era automatico.\n// Espacio literal en vez de \\s: este workflow se genera desde cadenas JS y el escape\n// se perdia por el camino, dejando la expresion sin efecto.\nfunction zona(b) {\n  // Solo se quita el prefijo en ingles de Idealista. El 'Zona '/'Barrio ' del\n  // propio toponimo se respeta: recortarlo daba 'la zona de de Favara' a partir\n  // de 'Zona de Favara'. Quien pone la preposicion es la frase, no el nombre.\n  return texto(b).replace(/^(sub)?district +/i, '').trim();\n}\n\n// El scraper antiguo guardaba literales como \"No especificada\" en vez de dejar el\n// campo vacio. Colarselos al modelo solo sirve para que escriba \"su piso, planta no\n// especificada\": si no hay dato, mejor no mencionarlo.\nconst VACIOS = ['no especificada', 'no especificado', 'sin especificar', 'sin identificar', 'desconocido', 'n/a', '-'];\n\n// Cuando el anuncio no trae nombre, el scraper guarda el literal 'Propietario'.\n// Tratarlo como un nombre de verdad daba 'Hola Propietario, soy Josep' y una\n// ficha con 'Propietario: Propietario'. Mejor no saludar por el nombre.\nfunction nombrePila(v) {\n  const t = texto(v);\n  if (!t) return '';\n  const b = t.toLowerCase();\n  if (b === 'propietario' || b === 'propietaria' || b === 'particular') return '';\n  return t.split(/[ ,]/)[0];\n}\nfunction dato(v) {\n  const t = texto(v);\n  return t && VACIOS.indexOf(t.toLowerCase()) === -1 ? t : null;\n}\n\nif (!cap) {\n  return [{ json: { ok: false, fallback: 'Hola, he visto su anuncio en Idealista y me gustaria comentarle una cosa. Un saludo, ' + agente } }];\n}\n\nconst rd = cap.raw_data || {};\nconst mc = rd.moreCharacteristics || {};\n\n// ---- VENTA o ALQUILER ----\n// La tabla mezcla las dos cosas: el mismo mensaje para ambas es el error mas caro\n// posible, porque a quien alquila se le estaria hablando de vender.\nlet operacion = rd.operation;\nif (operacion !== 'sale' && operacion !== 'rent') {\n  // Red de seguridad si falta el dato: un precio de tres o cuatro cifras solo puede\n  // ser una renta mensual, nunca el precio de venta de un inmueble.\n  const p = Number(cap.precio);\n  operacion = (p > 0 && p < 10000) ? 'rent' : 'sale';\n}\nconst esAlquiler = operacion === 'rent';\n\n// ---- QUE TIPO DE INMUEBLE ES ----\n// Sin esto, a quien vende un local se le escribe 'su piso' y se le habla de plantas\n// sin ascensor. Los valores salen del propio actor (homes/premises/garages/...).\n// compra/alquila son sujetos SIN verbo ('inversores y negocios'), nunca\n// 'inversores buscando local': el verbo lo pone cada frase. Al llevarlo dentro\n// salian cosas como 'tienes negocios buscando local buscando por ahi'.\nconst TIPOS = {\n  homes:        { que: 'la vivienda',        suyo: 'su vivienda',        busca: 'vivienda',        compra: 'compradores',             alquila: 'inquilinos' },\n  rooms:        { que: 'la habitacion',      suyo: 'su habitacion',      busca: 'habitacion',      compra: 'compradores',             alquila: 'inquilinos' },\n  premises:     { que: 'el local',           suyo: 'su local',           busca: 'local',           compra: 'inversores y negocios',   alquila: 'negocios' },\n  offices:      { que: 'la oficina',         suyo: 'su oficina',         busca: 'oficina',         compra: 'empresas e inversores',   alquila: 'empresas' },\n  garages:      { que: 'la plaza de garaje', suyo: 'su plaza de garaje', busca: 'plaza de garaje', compra: 'compradores de la zona',  alquila: 'vecinos de la zona' },\n  lands:        { que: 'el terreno',         suyo: 'su terreno',         busca: 'suelo',           compra: 'promotores e inversores', alquila: 'interesados' },\n  storageRooms: { que: 'el trastero',        suyo: 'su trastero',        busca: 'trastero',        compra: 'compradores de la zona',  alquila: 'vecinos de la zona' },\n};\nconst tipoBruto = rd.propertyType || 'homes';\nconst T = TIPOS[tipoBruto] || { que: 'el inmueble', suyo: 'su inmueble', busca: 'inmuebles asi', compra: 'compradores', alquila: 'inquilinos' };\nconst esVivienda = tipoBruto === 'homes' || tipoBruto === 'rooms';\nconst esComercial = tipoBruto === 'premises' || tipoBruto === 'offices';\nconst CLIENTES = esAlquiler ? T.alquila : T.compra;\n\nfunction eur(n) { return n == null ? null : Number(n).toLocaleString('es-ES') + ' EUR' + (esAlquiler ? '/mes' : ''); }\n\n// 1 de cada 4 captaciones no trae barrio, pero todas llevan alguna referencia\n// geografica en raw_data.ubication. Sin este rescate el modelo se inventaba la zona\n// a partir del nombre de la calle.\nconst ub = rd.ubication || {};\nconst BARRIO = zona(cap.barrio)\n  || zona(ub.administrativeAreaLevel4)\n  || zona(ub.administrativeAreaLevel3)\n  || zona(String(ub.locationName || '').split(',')[0])\n  || zona(ub.administrativeAreaLevel2)\n  || '';\n// 'la zona de ' + barrio se rompe con nombres que ya traen articulo o\n// preposicion: 'Zona de Favara' daba 'la zona de Zona de Favara', y 'de Favara'\n// daba 'la zona de de Favara'.\n// Espacios literales en vez de \\b y \\s: este codigo se genera desde cadenas JS y\n// las barras invertidas se pierden por el camino. Ya ha pasado tres veces.\nlet LUGAR;\nif (!BARRIO) LUGAR = 'su zona de Valencia';\nelse if (/^(zona|barrio|poligono|urbanizacion) /i.test(BARRIO)) LUGAR = 'la ' + BARRIO.charAt(0).toLowerCase() + BARRIO.slice(1);\nelse if (/^(de|del|dels|d.) /i.test(BARRIO)) LUGAR = 'la zona ' + BARRIO;\nelse LUGAR = 'la zona de ' + BARRIO;\n\n// ---- antiguedad del anuncio ----\nconst ts = rd.modificationDate && rd.modificationDate.value;\nconst dias = ts ? Math.floor((Date.now() - Number(ts)) / 86400000) : null;\n\n// ---- hora local en Espana ----\n// El modelo saludaba a ojo y solto un 'Buenas tardes' a las 11:12 de la manana.\n// El servidor de n8n va en UTC, asi que la hora hay que calcularla con la zona\n// horaria puesta a mano. Se le pasa la hora y que elija el saludo el, en vez de\n// darle el texto ya escrito: asi no viajan acentos por el generador de codigo.\nlet HORA_ES = '';\ntry {\n  HORA_ES = new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());\n} catch (e) { HORA_ES = ''; }\n\n// ---- detalles del INMUEBLE que se le pueden mencionar ----\n// Solo rasgos del inmueble, nunca de como esta hecho el anuncio. Aqui hubo\n// 'el anuncio tiene solo 2 fotos' y 'la descripcion es muy escueta', y en la\n// prueba en vivo el modelo escribio 'Observo que su anuncio tiene solo dos\n// fotografias': es criticarle el trabajo al propietario en el primer mensaje,\n// lo contrario de lo que se busca. Lo mismo con '3o sin ascensor', que es\n// senalarle un defecto. Todo eso fuera.\n// Ademas van filtrados por tipo: a quien vende una nave no se le habla de\n// plantas ni de ascensores.\nconst bajada = cap.precio_anterior != null && Number(cap.precio) < Number(cap.precio_anterior);\nconst señales = [];\nif (cap.estado === 'A reformar') señales.push('esta a reformar, y hay quien busca justo eso para dejarlo a su gusto');\n// Salida de humos: es lo primero que pregunta cualquiera que quiera montar\n// hosteleria, y solo lo trae el anuncio de un local.\nif (esComercial && mc.smokeExtractor === true) señales.push('tiene salida de humos, que es lo primero que preguntan los negocios de hosteleria');\nif (cap.metros) señales.push('son ' + cap.metros + ' m2');\nif (esVivienda && Number(cap.habitaciones) >= 3) señales.push('tiene ' + cap.habitaciones + ' habitaciones');\n\n// ---- eleccion del angulo (determinista, por prioridad) ----\n// Todos apuntan a lo mismo: que YA hay clientes buscando en su zona. Es lo unico\n// que le da al propietario una razon concreta para fiarse y contestar. Nada de\n// meterle prisa ni de decirle que su anuncio esta mal: eso genera rechazo.\n// Los mercados finos (locales, garajes) se mueven mas despacio que la vivienda.\nconst UMBRAL_ESTANCADO = esComercial ? 60 : (esAlquiler ? 30 : 45);\nlet angulo, gancho;\n\nif (bajada) {\n  angulo = 'bajada_de_precio';\n  gancho = 'Ha ajustado el precio de ' + eur(cap.precio_anterior) + ' a ' + eur(cap.precio) +\n    '. Menciona el ajuste con naturalidad, SIN dar a entender que estaba caro, y ofrecele que antes de volver a bajarlo vea los ' + CLIENTES + ' que ya estas moviendo en ' + LUGAR + '.';\n} else if (dias != null && dias >= UMBRAL_ESTANCADO) {\n  angulo = 'anuncio_estancado';\n  gancho = 'Llevas unas ' + Math.floor(dias / 7) + ' semanas viendo el anuncio publicado. Dilo como que le sigues la pista porque trabajas ' + LUGAR +\n    ', y que en ese tiempo te han pasado por delante ' + CLIENTES + ' que encajaban con ' + T.suyo + '. NO insinues que el anuncio o el precio esten mal.';\n} else if (dias != null && dias <= 3) {\n  angulo = 'recien_publicado';\n  gancho = 'Acabas de ver el anuncio. Di que trabajas ' + LUGAR + ' y que justo ahora tienes ' + CLIENTES +\n    ' buscando por ahi. NO le avises de que va a recibir muchas llamadas: eso es meterle presion, no ayudarle.';\n} else {\n  angulo = 'generico';\n  gancho = 'Sin gancho de datos: ve directo. Trabajas ' + LUGAR + ' y tienes ' + CLIENTES +\n    ' ahi ahora mismo; ofrecele conocer esos perfiles.';\n}\n\nif (señales.length && angulo !== 'generico') {\n  gancho += ' Puedes mencionar ademas un detalle real del inmueble, como algo que has visto tu del anuncio y no como un requisito de tus clientes: ' + señales[0] + '.';\n}\n\n// ---- ficha, con los campos que tienen sentido para este tipo ----\nconst ETIQUETA = { homes: 'VIVIENDA', rooms: 'HABITACION', premises: 'LOCAL O NAVE', offices: 'OFICINA', garages: 'GARAJE', lands: 'TERRENO', storageRooms: 'TRASTERO' };\nconst ficha = [\n  'Tipo de inmueble: ' + (ETIQUETA[tipoBruto] || 'INMUEBLE') + '   Operacion: ' + (esAlquiler ? 'ALQUILER' : 'VENTA'),\n  'Propietario: ' + (nombrePila(cap.nombre) || 'no publica su nombre. Saluda sin nombre y NUNCA le llames Propietario.'),\n  'Direccion: ' + (texto(cap.calle) || 'no publicada en el anuncio'),\n  'Zona: ' + (BARRIO || 'no especificada'),\n  (esAlquiler ? 'Renta: ' : 'Precio: ') + (eur(cap.precio) || 'no especificado'),\n  cap.metros ? 'Superficie: ' + cap.metros + ' m2' : null,\n  esVivienda && cap.habitaciones ? 'Habitaciones: ' + cap.habitaciones : null,\n  esVivienda && cap.banos ? 'Banos: ' + cap.banos : null,\n  esComercial && mc.bathNumber ? 'Aseos: ' + mc.bathNumber : null,\n  esComercial && mc.roomDistributionNumber ? 'Estancias: ' + mc.roomDistributionNumber : null,\n  esComercial && mc.smokeExtractor === true ? 'Tiene salida de humos' : null,\n  esVivienda && dato(cap.planta) ? 'Planta: ' + dato(cap.planta) : null,\n  dato(cap.estado) ? 'Estado: ' + dato(cap.estado) : null,\n  dias != null ? 'Anuncio actualizado hace ' + dias + ' dias' : null,\n  señales.length ? 'Detalles que puedes mencionar: ' + señales.join('; ') : null,\n].filter(Boolean).join('\\n');\n\n// ---- plantillas de estilo ----\n// Venta de vivienda: del Google Doc que ya usaba el generador antiguo.\n// Alquiler de vivienda: el generador de alquiler antiguo no usaba Google Docs,\n// llevaba su plantilla en el prompt. Se conserva literal porque es el discurso\n// que funciona: perfiles solventes y seguro de impago aprobado.\n// El nodo de Google Docs de n8n NO devuelve la estructura cruda de la API de\n// Google: devuelve { documentId, content } con el texto ya plano. Esta funcion\n// leia d.body.content, que no existe, asi que devolvia siempre cadena vacia y\n// el prompt salia SIN plantilla. Es decir: los 20.000 caracteres de plantillas\n// escritas a mano no se han usado NUNCA. Se admiten las dos formas.\nfunction docToTexto(d) {\n  if (!d) return '';\n  if (typeof d.content === 'string') return d.content.trim();\n  if (typeof d === 'string') return d.trim();\n  const bloques = (d.body && d.body.content) || [];\n  let out = '';\n  for (const b of bloques) {\n    for (const el of ((b.paragraph && b.paragraph.elements) || [])) {\n      if (el.textRun && el.textRun.content) out += el.textRun.content;\n    }\n    for (const fila of ((b.table && b.table.tableRows) || [])) {\n      for (const celda of (fila.tableCells || [])) {\n        for (const c of (celda.content || [])) {\n          for (const el of ((c.paragraph && c.paragraph.elements) || [])) {\n            if (el.textRun && el.textRun.content) out += el.textRun.content;\n          }\n        }\n      }\n    }\n  }\n  return out.trim();\n}\n\n// El documento esta organizado por situacion, con titulos que coinciden casi uno\n// a uno con los angulos que calcula este codigo. Meter los 20.000 caracteres\n// enteros en el prompt seria caro y ademas confundiria al modelo con ejemplos de\n// situaciones que no son la de este propietario: se le pasa SOLO su seccion, y\n// unas pocas frases, que es lo que hace falta para copiar el tono.\nconst SECCION_POR_ANGULO = {\n  bajada_de_precio: 'Bajada de Precio',\n  anuncio_estancado: 'Antiguedad Del Anuncio',\n  recien_publicado: 'Actualizacion',\n  generico: 'Valor de Mercado',\n};\nfunction sinTildes(s) { return String(s).normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().trim(); }\nfunction seccionDelDoc(texto, titulo, maxEjemplos) {\n  const lineas = String(texto).split('\\n');\n  const buscado = sinTildes(titulo).replace(/:$/, '');\n  // Un titulo es una linea corta que no es un mensaje (los mensajes empiezan por Hola)\n  const esTitulo = function (l) {\n    const t = l.trim();\n    return t.length > 0 && t.length < 60 && !/^(hola|\\u{1F4E9})/iu.test(t);\n  };\n  let i = lineas.findIndex(function (l) { return esTitulo(l) && sinTildes(l).replace(/:$/, '') === buscado; });\n  if (i === -1) return '';\n  const out = [];\n  for (let k = i + 1; k < lineas.length && out.length < maxEjemplos; k++) {\n    const t = lineas[k].trim();\n    if (!t) continue;\n    if (esTitulo(lineas[k])) break;\n    out.push(t);\n  }\n  return out.join('\\n');\n}\n\nconst PLANTILLA_ALQUILER_VIVIENDA = [\n  'Hola, le escribo por la vivienda situada en *[DIRECCION]*.',\n  '',\n  'Queria comentarle que actualmente dispongo de *inquilinos solventes*, que ademas cuentan con el *Seguro de Impago Caser aprobado*, lo que aporta mayor seguridad y tranquilidad al propietario.',\n  '',\n  'Si la vivienda continua disponible para alquiler, puedo presentarle estos perfiles de forma *totalmente gratuita y sin ningun compromiso*.',\n  '',\n  'Le interesaria conocer estos perfiles?',\n].join('\\n');\n\nconst usaPlantillaAlquiler = esAlquiler && esVivienda;\nlet plantillas = '';\nif (usaPlantillaAlquiler) plantillas = PLANTILLA_ALQUILER_VIVIENDA;\nelse if (!esAlquiler && esVivienda) {\n  try {\n    const doc = docToTexto($input.first().json);\n    plantillas = seccionDelDoc(doc, SECCION_POR_ANGULO[angulo] || 'Valor de Mercado', 6);\n    // Si el titulo cambia en el documento, mejor las primeras frases que nada\n    if (!plantillas) plantillas = doc.split('\\n').filter(function (l) { return /^\\s*(hola|\\u{1F4E9})/iu.test(l); }).slice(0, 5).join('\\n');\n  } catch (e) { plantillas = ''; }\n}\n\n// ---- que le ofreces, segun tipo y operacion ----\n// El seguro de impago Caser se menciona SOLO en alquiler de vivienda, que es de\n// donde salio ese discurso. Extenderlo a un local seria afirmar algo que no consta.\nlet oferta;\nif (esAlquiler && esVivienda) {\n  oferta = 'Tienes inquilinos solventes ya buscando, con Seguro de Impago Caser aprobado, y puedes presentarle esos perfiles gratis y sin compromiso.';\n} else if (esAlquiler && esComercial) {\n  oferta = 'Tienes ' + CLIENTES + ' buscando ' + T.busca + ' en la zona, con solvencia ya comprobada, y puedes presentarle esos perfiles gratis y sin compromiso. Tambien te encargas del contrato y de la seleccion.';\n} else if (esAlquiler) {\n  oferta = 'Tienes ' + CLIENTES + ' buscando ' + T.busca + ' y puedes presentarle esos perfiles gratis y sin compromiso.';\n} else if (esComercial) {\n  oferta = 'Trabajas ' + LUGAR + ' y tienes ' + CLIENTES + ' buscando ' + T.busca + '. Puedes encargarte de la operacion: ensenarle los perfiles, filtrar las visitas de curiosos, negociar y llevar el papeleo.';\n} else if (esVivienda) {\n  oferta = 'Trabajas ' + LUGAR + ' y tienes ' + CLIENTES + ' buscando ' + T.busca + '. Puedes encargarte tu de la venta: ensenarle los perfiles que ya tienes, filtrar las visitas para que no le pasee gente por casa sin motivo, negociar y llevar el papeleo.';\n} else {\n  // Garajes, terrenos y trasteros: aqui no hay visitas que filtrar ni gente\n  // paseandose por casa. Con la rama de vivienda salia 'que no le pasee gente\n  // por casa' para una plaza de garaje.\n  oferta = 'Trabajas ' + LUGAR + ' y tienes ' + CLIENTES + ' buscando ' + T.busca + '. Puedes encargarte tu de la venta: ensenarle los perfiles que ya tienes, cerrar la operacion y llevar el papeleo.';\n}\n\n// El objetivo del primer mensaje no es cerrar nada: es que el propietario se fie lo\n// suficiente como para contestar. Por eso las reglas van casi todas sobre el tono.\nconst comun = [\n  'REGLAS INNEGOCIABLES:',\n  '1. Usa UNICAMENTE los datos de la ficha y el angulo indicado. Puedes decir que tienes clientes buscando en su zona, pero NUNCA te inventes cuantos son, ni sus nombres, ni presupuestos, ni plazos, ni datos de mercado.',\n  '1b. Tampoco les atribuyas requisitos: nada de \"busco compradores de unos 80 m2\" ni \"quieren tres habitaciones\". Los detalles de la ficha son del inmueble, no criterios de tus clientes.',\n  '2. Desarrolla el angulo indicado: es lo que hace que el mensaje no parezca una plantilla masiva.',\n  '3. GENERAR CONFIANZA ES EL OBJETIVO. Prohibido: meter prisa o urgencia, avisar de que le van a llover llamadas, insinuar que su precio esta mal, que su anuncio esta mal hecho o que no va a vender solo. Nada de \"no deje pasar esta oportunidad\", \"somos lideres del sector\" ni \"tengo el comprador perfecto\".',\n  '4. Habla como una persona que conoce esa zona, no como una agencia mandando circulares. Nombra la zona.',\n  '5. Referirte al inmueble SIEMPRE como \"' + T.suyo + '\". Nunca lo llames de otra forma: es ' + (ETIQUETA[tipoBruto] || 'un inmueble') + ', no otra cosa.',\n  '6. En el primer mensaje ofreces algo sin pedirle nada. No pidas cita, ni exclusividad, ni datos.',\n  '7. Maximo 90 palabras.',\n  '8. Termina con UNA pregunta corta y facil de responder.',\n  (HORA_ES ? '8b. En Espana son las ' + HORA_ES + ' ahora mismo. Si empiezas saludando por el momento del dia, que corresponda a esa hora. Ante la duda, saluda sin mencionar la hora.' : '8b. No saludes mencionando el momento del dia: no sabes a que hora se enviara.'),\n  '9. Firma como ' + agente + '. Nunca digas que eres una IA ni que el mensaje es automatico.',\n  '9b. NUNCA digas de que agencia o inmobiliaria eres, ni su nombre, ni \"le escribo desde...\". Presentate solo con tu nombre. Esto manda por encima de la plantilla de referencia: si la plantilla nombra una agencia, quitalo. Si el propietario pregunta, ya se lo dira ' + agente + ' en persona.',\n  '10. Devuelve SOLO el texto del mensaje: sin comillas, sin encabezados, sin explicaciones.',\n];\n\nconst cabecera = 'Eres ' + agente + ', agente inmobiliario en Valencia que trabaja esa zona. Escribes el PRIMER mensaje de WhatsApp a un particular que ' +\n  (esAlquiler ? 'ALQUILA ' : 'VENDE ') + T.que + ' por su cuenta en Idealista.';\n\nconst bloques = [cabecera, '', 'LO QUE LE OFRECES (es tu propuesta de valor, no la cambies):', oferta, ''];\n\nif (plantillas) {\n  bloques.push('PLANTILLA DE REFERENCIA (respeta su tono, su estructura y su longitud):', plantillas, '');\n}\n\nif (usaPlantillaAlquiler) {\n  bloques.push('ESPECIFICO:', 'a. Trato de USTED, como la plantilla.', 'b. Resalta con *asteriscos* los dos o tres conceptos clave, formato de WhatsApp.', 'c. Nada de emojis.', '');\n} else if (esComercial) {\n  bloques.push('ESPECIFICO:', 'a. Trato de usted: en comercial se espera mas formalidad que en vivienda.', 'b. Nada de emojis.', 'c. Habla de metros, ubicacion y rentabilidad, no de habitaciones ni de comodidad para vivir.', '');\n} else if (plantillas) {\n  bloques.push('ESPECIFICO:', 'a. Usa el MISMO trato (tu o usted) que la plantilla: no lo cambies por tu cuenta.', 'b. Como mucho un emoji, y solo si la plantilla los usa.', '');\n} else {\n  bloques.push('ESPECIFICO:', 'a. Trato de usted.', 'b. Nada de emojis.', '');\n}\n\nconst sistema = bloques.concat(comun).join('\\n');\n\nconst prompt = [\n  'FICHA DEL INMUEBLE',\n  ficha,\n  '',\n  'ANGULO A USAR: ' + angulo,\n  gancho,\n  '',\n  'Redacta el mensaje.',\n].join('\\n');\n\n// ---- fallback si el modelo falla ----\nconst donde = (cap.calle ? ' de ' + texto(cap.calle) : '') + (BARRIO ? ' en ' + BARRIO : '');\nconst saludo = nombrePila(cap.nombre) ? 'Hola ' + nombrePila(cap.nombre) + ', ' : 'Hola, ';\nconst fallback = (saludo + 'soy ' + agente + '. He visto su anuncio' + donde +\n  ' en Idealista. Trabajo esa zona y ahora mismo tengo ' + CLIENTES + ' buscando ' + T.busca + '. Si le interesa, le puedo ensenar esos perfiles sin ningun compromiso. Le va bien?').replace(/  +/g, ' ').trim();\n\nreturn [{\n  json: {\n    ok: true,\n    operacion: operacion,\n    tipo: tipoBruto,\n    angulo: angulo,\n    dias_publicado: dias,\n    sistema: sistema,\n    prompt: prompt,\n    fallback: fallback,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        0
+      ],
+      "id": "wf4-analizar",
+      "name": "Analizar Inmueble"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf4-if-ok-c1",
+              "leftValue": "={{ $json.ok === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        0
+      ],
+      "id": "wf4-if-ok",
+      "name": "Ficha OK?"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "={{ $json.sistema }}"
+            }
+          ]
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        200,
+        -80
+      ],
+      "id": "wf4-chain",
+      "name": "Redactar Mensaje",
+      "onError": "continueErrorOutput",
+      "notes": "Cadena LLM simple en lugar de un Agent: sin tools que llamar, el Agent solo anadia latencia, coste y no determinismo."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4.1-mini",
+        "options": {
+          "temperature": 0.7
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        200,
+        140
+      ],
+      "id": "wf4-openai",
+      "name": "Modelo OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "4DonTanQncT5MOfr",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ message: $json.text }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        460,
+        -80
+      ],
+      "id": "wf4-resp",
+      "name": "Respuesta al CRM",
+      "notes": "JSON de verdad. Antes respondia texto plano con un JSON montado a mano, y por eso el consumidor necesitaba cuatro ramas de parseo para adivinar el formato."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ message: $('Analizar Inmueble').first().json.fallback }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        460,
+        140
+      ],
+      "id": "wf4-resp-fb",
+      "name": "Respuesta Fallback",
+      "notes": "Si OpenAI falla o la captacion no existe se devuelve un mensaje decente con codigo 200, distinto para venta y para alquiler. Antes el webhook se quedaba sin responder y el que llamaba se colgaba hasta agotar el timeout."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Lead Gen": {
+      "main": [
+        [
+          {
+            "node": "Consultar Propiedad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar Propiedad": {
+      "main": [
+        [
+          {
+            "node": "Leer Plantillas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Plantillas": {
+      "main": [
+        [
+          {
+            "node": "Analizar Inmueble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analizar Inmueble": {
+      "main": [
+        [
+          {
+            "node": "Ficha OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ficha OK?": {
+      "main": [
+        [
+          {
+            "node": "Redactar Mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respuesta Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redactar Mensaje": {
+      "main": [
+        [
+          {
+            "node": "Respuesta al CRM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respuesta Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Modelo OpenAI": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Redactar Mensaje",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "availableInMCP": false
+  },
+  "tags": []
+}

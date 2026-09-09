@@ -899,7 +899,7 @@ function NuevaValoracionPanel({
       // Snapshot de los comparables usados (2ª hoja del informe)
       comparables: comparablesOrdenados
         .filter((c) => !excludedIds.has(c.id))
-        .slice(0, 20)
+        .slice(0, 16) // 4 filas de 4 cards → encaja en una hoja A4
         .map((c) => ({
           precio: c.precio,
           metros: c.metros,
@@ -918,6 +918,7 @@ function NuevaValoracionPanel({
           similitud: Math.round((semejanza?.scores.get(c.id) ?? 0) * 100),
           activo: c.activo !== false,
           idealista_id: c.idealista_id,
+          imagen_url: c.imagen_url,
         })),
       notas: [resumen, notas.trim()].filter(Boolean).join(" — ") || null,
     })

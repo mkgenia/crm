@@ -18,6 +18,9 @@ const ENERGIA_OK = ["a", "b", "c", "d", "e", "f", "g"]
 export function InformeValoracion({ v }: { v: Valoracion }) {
   const fecha = new Date(v.creada_en)
   const comparables = v.comparables ?? []
+  // Con foto → cards visuales; sin foto → tabla compacta. Pueden convivir.
+  const conFoto = comparables.filter((c) => !!c.imagen_url)
+  const sinFoto = comparables.filter((c) => !c.imagen_url)
   const m2 = v.metros ?? 0
   const pm2 = (n: number | null) => (n && m2 > 0 ? `${Math.round(n / m2).toLocaleString("es-ES")} €/m²` : "—")
 
@@ -164,7 +167,7 @@ export function InformeValoracion({ v }: { v: Valoracion }) {
 
       {/* ── HOJA 2: testigos comparados ── */}
       {comparables.length > 0 && (
-        <div className="informe mx-auto my-6 bg-white text-zinc-900 shadow-lg print:shadow-none print:my-0 print:break-before-page">
+        <div className="informe mx-auto my-6 bg-white text-zinc-900 shadow-lg print:shadow-none print:my-0">
           <header className="flex items-start justify-between border-b-2 border-zinc-900 pb-3 mb-5">
             <div>
               <Image src="/logo.png" alt="mkgenia" width={100} height={25} />
@@ -183,55 +186,128 @@ export function InformeValoracion({ v }: { v: Valoracion }) {
             inmueble objeto antes de calcular el valor final.
           </p>
 
-          <table className="w-full text-[9.5px] border-collapse">
-            <thead>
-              <tr className="bg-zinc-100 text-left">
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold">#</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold">Zona</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-right">m²</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-center">Hab</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-center">Baños</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-center">Pl.</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold">Estado</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold">Equipamiento</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-right">Precio</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-right">€/m²</th>
-                <th className="border border-zinc-300 px-1.5 py-1.5 font-bold text-center">Simil.</th>
-              </tr>
-            </thead>
-            <tbody>
-              {comparables.map((c, i) => (
-                <tr key={i} className={i % 2 ? "bg-zinc-50" : ""}>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-zinc-500">{i + 1}</td>
-                  <td className="border border-zinc-300 px-1.5 py-1">
-                    {c.barrio ?? "—"}
-                    {!c.activo && <span className="text-zinc-500"> (vendido)</span>}
-                  </td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-right">{c.metros}</td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-center">{c.habitaciones ?? "—"}</td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-center">{c.banos ?? "—"}</td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-center">{c.planta ?? "—"}</td>
-                  <td className="border border-zinc-300 px-1.5 py-1">
+          {/* Con foto → cards de 4 en fila */}
+          {conFoto.length > 0 && (
+          <div className="grid grid-cols-4 gap-2.5">
+            {conFoto.map((c, i) => (
+              <div key={i} className="card-testigo border border-zinc-300 rounded overflow-hidden flex flex-col">
+                {/* Imagen */}
+                <div className="relative h-[23mm] bg-zinc-100">
+                  {c.imagen_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={c.imagen_url}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden" }}
+                      className={`w-full h-full object-cover ${c.activo ? "" : "grayscale"}`}
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-[8px] text-zinc-400">
+                      Sin imagen
+                    </div>
+                  )}
+                  <span className="absolute top-1 left-1 bg-zinc-900/85 text-white text-[8px] font-bold px-1 py-0.5 rounded">
+                    {i + 1}
+                  </span>
+                  <span className="absolute top-1 right-1 bg-white/95 text-zinc-900 text-[8px] font-bold px-1 py-0.5 rounded border border-zinc-300">
+                    {c.similitud}%
+                  </span>
+                  {!c.activo && (
+                    <span className="absolute bottom-1 left-1 bg-zinc-700 text-white text-[7px] font-bold px-1 py-0.5 rounded uppercase">
+                      Vendido
+                    </span>
+                  )}
+                </div>
+
+                {/* Datos */}
+                <div className="p-1.5 flex-1 flex flex-col">
+                  <p className="text-[11px] font-bold leading-none">
+                    {c.precio.toLocaleString("es-ES")} €
+                  </p>
+                  <p className="text-[9px] text-zinc-600 mt-0.5">
+                    {c.precio_m2.toLocaleString("es-ES")} €/m²
+                  </p>
+                  <p className="text-[8.5px] text-zinc-700 mt-1 leading-tight">
+                    {c.metros} m² · {c.habitaciones ?? "—"} hab · {c.banos ?? "—"} baños
+                    {c.planta ? ` · Pl. ${c.planta}` : ""}
+                  </p>
+                  <p className="text-[8px] text-zinc-500 truncate leading-tight">{c.barrio ?? "—"}</p>
+                  <p className="text-[8px] text-zinc-600 mt-0.5 leading-tight">
                     {COND_LABEL[c.estado ?? ""] ?? "—"}
                     {c.energia && ENERGIA_OK.includes(c.energia.toLowerCase())
                       ? ` · ${c.energia.toUpperCase()}` : ""}
-                  </td>
-                  <td className="border border-zinc-300 px-1.5 py-1">
-                    {[c.ascensor ? "Ascensor" : null, ...c.extras].filter(Boolean).join(", ") || "—"}
-                  </td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-right font-medium">
-                    {c.precio.toLocaleString("es-ES")} €
-                  </td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-right">
-                    {c.precio_m2.toLocaleString("es-ES")}
-                  </td>
-                  <td className="border border-zinc-300 px-1.5 py-1 text-center font-semibold">
-                    {c.similitud}%
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </p>
+                  {(c.ascensor || c.extras.length > 0) && (
+                    <p className="text-[7.5px] text-zinc-500 mt-auto pt-1 leading-tight">
+                      {[c.ascensor ? "Ascensor" : null, ...c.extras].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
+
+          {/* Sin foto → lista compacta */}
+          {sinFoto.length > 0 && (
+            <div className={conFoto.length > 0 ? "mt-4" : ""}>
+              {conFoto.length > 0 && (
+                <p className="text-[9px] font-bold tracking-widest text-zinc-500 mb-1.5">
+                  OTROS TESTIGOS (sin fotografía disponible)
+                </p>
+              )}
+              <table className="w-full text-[9px] border-collapse">
+                <thead>
+                  <tr className="bg-zinc-100 text-left">
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold w-6">#</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold">Zona</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold">Características</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold">Estado</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold text-right">Precio</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold text-right">€/m²</th>
+                    <th className="border border-zinc-300 px-1.5 py-1 font-bold text-center w-10">Simil.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sinFoto.map((c, i) => (
+                    <tr key={i} className={i % 2 ? "bg-zinc-50" : ""}>
+                      <td className="border border-zinc-300 px-1.5 py-1 text-zinc-500">
+                        {conFoto.length + i + 1}
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1">
+                        {c.barrio ?? "—"}
+                        {!c.activo && <span className="text-zinc-500"> (vendido)</span>}
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1">
+                        {c.metros} m² · {c.habitaciones ?? "—"} hab · {c.banos ?? "—"} baños
+                        {c.planta ? ` · Pl. ${c.planta}` : ""}
+                        {(c.ascensor || c.extras.length > 0) && (
+                          <span className="text-zinc-500">
+                            {" · "}{[c.ascensor ? "Ascensor" : null, ...c.extras].filter(Boolean).join(", ")}
+                          </span>
+                        )}
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1">
+                        {COND_LABEL[c.estado ?? ""] ?? "—"}
+                        {c.energia && ENERGIA_OK.includes(c.energia.toLowerCase())
+                          ? ` · ${c.energia.toUpperCase()}` : ""}
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1 text-right font-medium">
+                        {c.precio.toLocaleString("es-ES")} €
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1 text-right">
+                        {c.precio_m2.toLocaleString("es-ES")}
+                      </td>
+                      <td className="border border-zinc-300 px-1.5 py-1 text-center font-semibold">
+                        {c.similitud}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {/* Resumen estadístico */}
           <div className="grid grid-cols-4 gap-3 mt-4">
@@ -270,44 +346,6 @@ export function InformeValoracion({ v }: { v: Valoracion }) {
         </div>
       )}
 
-      <style jsx global>{`
-        /* Hoja A4: 210 × 297 mm con márgenes de 18 mm (estándar de documento) */
-        .informe {
-          width: 210mm;
-          min-height: 297mm;
-          padding: 18mm;
-          box-sizing: border-box;
-          display: flex;
-          flex-direction: column;
-        }
-        /* El pie siempre abajo del todo de la hoja */
-        .informe > footer { margin-top: auto; }
-        @media print {
-          @page { size: A4; margin: 0; }
-          html, body { background: #fff !important; height: auto !important; overflow: visible !important; }
-          /* Oculta el layout del dashboard (sidebar, barra de acciones) */
-          .no-print, aside, nav { display: none !important; }
-          /* Neutraliza contenedores con scroll/altura fija del dashboard */
-          body > div, main, main > div {
-            display: block !important;
-            height: auto !important;
-            max-height: none !important;
-            overflow: visible !important;
-            padding: 0 !important;
-            margin: 0 !important;
-          }
-          .informe {
-            margin: 0 !important;
-            box-shadow: none !important;
-            break-after: page;
-            page-break-after: always;
-          }
-          .informe:last-of-type { break-after: auto; page-break-after: auto; }
-          table { page-break-inside: auto; }
-          tr, thead { page-break-inside: avoid; }
-          * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        }
-      `}</style>
     </>
   )
 }

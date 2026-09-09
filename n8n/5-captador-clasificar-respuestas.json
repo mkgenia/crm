@@ -1,0 +1,676 @@
+{
+  "name": "5 · Captador — Clasificar Respuestas WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "evolution-respuesta-wa",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "wf5-webhook",
+      "name": "Webhook Respuesta WA",
+      "webhookId": "51106b05-3bc0-45e9-b5d2-4492e27407ee",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      },
+      "notes": "Quien llama aqui NO es Evolution sino el workflow \"Dispatcher Evolution -> Bot + Flujo4\", que reparte el evento entre el bot y este flujo. Como el llamante es n8n, basta con la credencial interna y no hay que tocar nada en Evolution: solo anadir la cabecera x-webhook-secret al nodo \"Enviar a Flujo 4\" del dispatcher."
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst body = raw.body || raw;\nconst data = body.data || body;\nconst key = (data && data.key) || (data && data.message && data.message.key) || {};\n\nfunction saltar(motivo) { return [{ json: { procesar: false, motivo: motivo } }]; }\n\nif (key.fromMe === true) return saltar('mensaje propio');\n\nconst jid = String(key.remoteJid || data.remoteJid || '');\nif (!jid) return saltar('evento sin remoteJid');\nif (jid.indexOf('@g.us') !== -1) return saltar('grupo');\nif (jid.indexOf('@broadcast') !== -1 || jid.indexOf('@newsletter') !== -1) return saltar('difusion o canal');\n\n// WhatsApp esta migrando a direccionamiento LID: en esos chats el remoteJid ya no es\n// el telefono sino un identificador opaco de 15+ digitos. Cogerle los ultimos 9 y\n// buscar por sufijo emparejaba con la captacion de OTRO propietario y le escribia\n// el estado encima. Aqui se resuelve el telefono real o se descarta el evento.\nlet digits = '';\nif (jid.indexOf('@lid') !== -1) {\n  const alt = key.senderPn || key.remoteJidAlt || key.previousRemoteJid || '';\n  digits = String(alt).split('@')[0].replace(/\\D/g, '');\n  if (!digits) return saltar('LID sin telefono resoluble: ' + jid);\n} else if (jid.indexOf('@s.whatsapp.net') !== -1) {\n  digits = jid.split('@')[0].replace(/\\D/g, '');\n} else {\n  return saltar('jid no soportado: ' + jid);\n}\n\nif (digits.indexOf('00') === 0) digits = digits.slice(2);\nif (digits.length === 9) digits = '34' + digits;\n\n// Sin este corte, un sufijo vacio convertia el filtro en telefono=ilike.* (comodin)\n// y el flujo clasificaba y pisaba una captacion cualquiera de la base.\nif (!/^34[6-9]\\d{8}$/.test(digits)) return saltar('telefono no valido: ' + digits);\n\nreturn [{ json: { procesar: true, jid: jid, telefono: digits, sufijo: digits.slice(-9) } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "wf5-extraer",
+      "name": "Extraer Remitente"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf5-if-procesar-c1",
+              "leftValue": "={{ $json.procesar === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "wf5-if-procesar",
+      "name": "Procesar?",
+      "notes": "Descarta mensajes propios, grupos, difusiones, canales y LID no resolubles."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?telefono=ilike.*{{ $json.sufijo }}&or=(estado_whatsapp.not.is.null,ultimo_contacto_en.not.is.null)&activo=eq.true&select=id,nombre,telefono,estado_crm,estado_whatsapp&order=ultimo_contacto_en.desc.nullslast,created_at.desc&limit=2",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        -100
+      ],
+      "id": "wf5-buscar",
+      "name": "Buscar Captacion",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "notes": "Antes filtraba estado_whatsapp=not.eq.Pendiente, que en PostgREST tambien excluye las filas NULL: si el envio salio pero \"Marcar Enviado\" fallo, la respuesta del propietario no encontraba su captacion. El or() cubre las dos senales de \"ya se le escribio\". Y el order es imprescindible: con limit=1 sin ordenar, dos anuncios del mismo propietario devolvian una fila arbitraria."
+    },
+    {
+      "parameters": {
+        "jsCode": "const filas = $input.all().map(function (i) { return i.json; })\n  .filter(function (r) { return r && r.id != null; });\n\nif (!filas.length) return [{ json: { encontrada: false } }];\n\n// Se piden 2 filas a proposito. Si un particular tiene dos anuncios con el mismo\n// telefono no hay forma de saber por cual responde; el order de la consulta pone\n// primera la contactada mas recientemente, que es la que provoco la respuesta.\nconst cap = filas[0];\n\nreturn [{\n  json: {\n    encontrada: true,\n    captacion_id: cap.id,\n    nombre: cap.nombre,\n    telefono: cap.telefono,\n    estado_crm: cap.estado_crm,\n    estado_whatsapp: cap.estado_whatsapp,\n    ambigua: filas.length > 1,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -100
+      ],
+      "id": "wf5-elegir",
+      "name": "Elegir Captacion"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf5-if-cap-c1",
+              "leftValue": "={{ $json.encontrada === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -100
+      ],
+      "id": "wf5-if-cap",
+      "name": "Hay Captacion?"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 20000
+        },
+        "method": "POST",
+        "url": "https://test-evolution-api.pzkz6e.easypanel.host/chat/findMessages/demo",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ where: { key: { remoteJid: $('Extraer Remitente').first().json.jid } }, limit: 12 }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        -200
+      ],
+      "id": "wf5-historial-wa",
+      "name": "Historial WhatsApp",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "EVOLUTION_API",
+          "name": "Evolution API (apikey)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Una sola llamada, con el JID que de verdad trajo el webhook. Antes habia DOS (@s.whatsapp.net y @lid) encadenadas cuyo resultado el nodo siguiente descartaba por completo: eran codigo muerto en el camino critico, y un fallo suyo tumbaba la clasificacion de una respuesta ya localizada. Ahora el historial se usa de verdad y su fallo no bloquea."
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhook = $('Webhook Respuesta WA').first().json;\nconst wBody = webhook.body || webhook;\nconst wData = wBody.data || wBody;\n\n// Los envoltorios de WhatsApp ANIDAN: en un chat con mensajes temporales, una foto\n// de un solo uso llega como ephemeralMessage.message.viewOnceMessageV2.message.\n// Por eso se desenvuelve en bucle y no con una cadena de ?? de un nivel.\nfunction desenvolver(m) {\n  let cur = m || {};\n  for (let i = 0; i < 5; i++) {\n    const w = cur.ephemeralMessage || cur.viewOnceMessage || cur.viewOnceMessageV2\n      || cur.viewOnceMessageV2Extension || cur.documentWithCaptionMessage;\n    if (!w || !w.message) break;\n    cur = w.message;\n  }\n  return cur;\n}\n\nfunction texto(msg) {\n  const m = desenvolver(msg);\n  if (!m) return null;\n  if (m.conversation) return m.conversation;\n  if (m.extendedTextMessage && m.extendedTextMessage.text) return m.extendedTextMessage.text;\n  if (m.imageMessage && m.imageMessage.caption) return m.imageMessage.caption;\n  if (m.videoMessage && m.videoMessage.caption) return m.videoMessage.caption;\n  if (m.documentMessage && m.documentMessage.caption) return m.documentMessage.caption;\n  // La reaccion lleva el emoji en .text: un pulgar arriba es un 'si' que no hay que perder.\n  if (m.reactionMessage && m.reactionMessage.text) return m.reactionMessage.text;\n  if (m.buttonsResponseMessage && m.buttonsResponseMessage.selectedDisplayText) return m.buttonsResponseMessage.selectedDisplayText;\n  if (m.listResponseMessage && m.listResponseMessage.title) return m.listResponseMessage.title;\n  if (m.audioMessage) return '[nota de voz]';\n  if (m.imageMessage) return '[foto]';\n  if (m.videoMessage) return '[video]';\n  if (m.documentMessage) return '[documento]';\n  if (m.locationMessage) return '[ubicacion]';\n  if (m.contactMessage || m.contactsArrayMessage) return '[contacto]';\n  if (m.stickerMessage) return '[sticker]';\n  return null;\n}\n\nconst entrante = texto(wData.message);\n\n// Historial de la conversacion. Si Evolution falla no se aborta: se clasifica el\n// mensaje suelto, que es lo unico que hacia el flujo anterior de todas formas.\nconst registros = [];\nfor (const it of $input.all()) {\n  const j = it.json || {};\n  const lista = (j.messages && j.messages.records) || j.records || (Array.isArray(j) ? j : []);\n  if (Array.isArray(lista)) for (const m of lista) registros.push(m);\n}\n\nconst hilo = registros\n  .filter(function (m) { return m && m.key; })\n  .map(function (m) {\n    return {\n      ts: Number(m.messageTimestamp || 0),\n      quien: m.key.fromMe ? 'Agente' : 'Propietario',\n      txt: texto(m.message),\n    };\n  })\n  .filter(function (m) { return m.txt; })\n  .sort(function (a, b) { return a.ts - b.ts; })\n  .slice(-8);\n\nconst lineas = hilo.map(function (m) { return m.quien + ': ' + m.txt; });\nconst ultimo = entrante || (hilo.length ? hilo[hilo.length - 1].txt : null);\n\n// Nunca se lanza un throw: perder la respuesta de un propietario por un tipo de\n// mensaje raro es mucho peor que clasificarla como 'Respondido'.\nif (!ultimo) {\n  return [{ json: { conversacion: 'Propietario: [mensaje no textual]', ultimo: '[mensaje no textual]' } }];\n}\n\nif (!lineas.length || lineas[lineas.length - 1] !== 'Propietario: ' + ultimo) {\n  lineas.push('Propietario: ' + ultimo);\n}\n\nreturn [{ json: { conversacion: lineas.join('\\n'), ultimo: ultimo } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        -200
+      ],
+      "id": "wf5-hilo",
+      "name": "Montar Hilo"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Conversacion de WhatsApp entre un agente inmobiliario y el propietario de un inmueble:\n\n{{ $json.conversacion }}\n\nClasifica la intencion del propietario en su ultimo mensaje.",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Eres un clasificador de respuestas de WhatsApp para una agencia inmobiliaria de Valencia que capta pisos de particulares.\n\nRecibes el hilo de la conversacion en orden cronologico. Clasifica la INTENCION DEL PROPIETARIO en su ultimo mensaje, leyendolo en el contexto de lo que el agente le acaba de preguntar: un \"no\" a \"¿le viene bien el jueves?\" es una cuestion de agenda, no un rechazo a la agencia.\n\nResponde UNICAMENTE con una de estas cuatro palabras, sin puntuacion ni explicacion:\n\nInteresado      quiere vender con la agencia, pide informacion o precio, acepta una valoracion o una visita\nQuiere_Llamada  pide que le llamen o dice que prefiere hablar por telefono\nNo_Interesado   rechaza a la agencia, ya tiene otra, pide que no le contacten, o el inmueble ya esta vendido\nRespondido      contesta pero su intencion no queda clara\n\nAnte la duda, Respondido."
+            }
+          ]
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        1760,
+        -200
+      ],
+      "id": "wf5-chain",
+      "name": "Clasificar Respuesta",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "notes": "Se quito del prompt la regla \"si el ultimo mensaje es negativo clasifica No_Interesado aunque los anteriores fueran positivos\": anulaba justo el historial que ahora se le pasa y convertia cualquier \"no puedo el jueves\" en una captacion perdida. Si el modelo falla, \"Aplicar Clasificacion\" cae a Respondido."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4.1-mini",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        20
+      ],
+      "id": "wf5-openai",
+      "name": "Modelo OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "4DonTanQncT5MOfr",
+          "name": "OpenAi account"
+        }
+      },
+      "notes": "temperature 0: clasificar no es redactar, aqui interesa que la misma conversacion de siempre la misma etiqueta."
+    },
+    {
+      "parameters": {
+        "jsCode": "const salida = $input.first().json || {};\nconst bruto = String(salida.text || salida.output || '').trim();\n\nconst validos = ['No_Interesado', 'Interesado', 'Quiere_Llamada', 'Respondido'];\nconst clasificacion = validos.find(function (v) { return bruto === v; })\n  || validos.find(function (v) { return bruto.indexOf(v) !== -1; })\n  || 'Respondido';\n\nconst cap = $('Elegir Captacion').first().json;\n\n// Un clasificador automatico no puede deshacer el trabajo del agente. Si la captacion\n// ya avanzo mas alla de Contactado/Interesado (Propuesta, Negociacion, Ganado), solo\n// se registra la senal de WhatsApp y se deja el estado del CRM como esta: un\n// 'no, el jueves no puedo' en mitad de una negociacion no es una captacion perdida.\nconst WA_A_CRM = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido' };\nconst EDITABLES = ['Nuevo', 'Contactado', 'Interesado', 'Perdido'];\nconst actual = cap.estado_crm || 'Nuevo';\n\nconst update = { estado_whatsapp: clasificacion };\nlet crmNuevo = null;\nif (WA_A_CRM[clasificacion] && EDITABLES.indexOf(actual) !== -1) {\n  crmNuevo = WA_A_CRM[clasificacion];\n  update.estado_crm = crmNuevo;\n}\n\nconst WA_A_LEAD = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido', Respondido: 'Contactado' };\n\nreturn [{\n  json: {\n    captacion_id: cap.captacion_id,\n    nombre: cap.nombre || 'Propietario',\n    telefono: cap.telefono,\n    clasificacion: clasificacion,\n    update: update,\n    estado_crm_anterior: actual,\n    estado_crm_nuevo: crmNuevo,\n    estado_wa_anterior: cap.estado_whatsapp || null,\n    lead_estado: WA_A_LEAD[clasificacion] || 'Contactado',\n    ambigua: cap.ambigua === true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        -200
+      ],
+      "id": "wf5-aplicar",
+      "name": "Aplicar Clasificacion"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $json.captacion_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.update) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        -200
+      ],
+      "id": "wf5-upd-cap",
+      "name": "Actualizar Captacion",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/leads?captacion_id=eq.{{ $('Aplicar Clasificacion').first().json.captacion_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ estado: $('Aplicar Clasificacion').first().json.lead_estado }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2420,
+        -200
+      ],
+      "id": "wf5-upd-lead",
+      "name": "Actualizar Lead",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "return=representation para saber si afecto a alguna fila. Con return=minimal, un PATCH sobre 0 filas devuelve 204 y n8n lo daba por bueno: la clasificacion se perdia para el lead."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf5-if-lead-c1",
+              "leftValue": "={{ $json.id != null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -200
+      ],
+      "id": "wf5-if-lead",
+      "name": "Lead Existe?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Aplicar Clasificacion').first().json;\n\n// Se llega aqui cuando el PATCH por captacion_id no encontro ninguna fila: pasa\n// siempre que el agente contacto a mano desde el CRM (esa via no creaba lead) y\n// tambien si el 'Crear Lead' de la cola fallo. Sin esto la clasificacion se aplicaba\n// a la captacion pero el propietario interesado no aparecia nunca en /leads.\nreturn [{\n  json: {\n    nombre: c.nombre,\n    telefono: c.telefono,\n    fuente: 'Captaciones',\n    estado: c.lead_estado,\n    captacion_id: c.captacion_id,\n    notas: 'Creado al clasificar la respuesta del propietario por WhatsApp',\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        -60
+      ],
+      "id": "wf5-prep-lead",
+      "name": "Preparar Lead Nuevo"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/leads",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3080,
+        -60
+      ],
+      "id": "wf5-crear-lead",
+      "name": "Crear Lead",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/historial_cambios",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify([{ captacion_id: $('Aplicar Clasificacion').first().json.captacion_id, campo: 'estado_whatsapp', valor_anterior: $('Aplicar Clasificacion').first().json.estado_wa_anterior, valor_nuevo: $('Aplicar Clasificacion').first().json.clasificacion, tipo_entidad: 'captacion' }].concat($('Aplicar Clasificacion').first().json.estado_crm_nuevo ? [{ captacion_id: $('Aplicar Clasificacion').first().json.captacion_id, campo: 'estado_crm', valor_anterior: $('Aplicar Clasificacion').first().json.estado_crm_anterior, valor_nuevo: $('Aplicar Clasificacion').first().json.estado_crm_nuevo, tipo_entidad: 'captacion' }] : [])) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        -340
+      ],
+      "id": "wf5-historial",
+      "name": "Registrar Historial",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Construido con JSON.stringify en vez de interpolar dentro de un JSON escrito a mano: un nombre o una clasificacion con comillas rompia el body. valor_anterior es el estado real que habia, no el literal \"Enviado\" que se escribia antes."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Respuesta WA": {
+      "main": [
+        [
+          {
+            "node": "Extraer Remitente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer Remitente": {
+      "main": [
+        [
+          {
+            "node": "Procesar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Procesar?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Buscar Captacion": {
+      "main": [
+        [
+          {
+            "node": "Elegir Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Elegir Captacion": {
+      "main": [
+        [
+          {
+            "node": "Hay Captacion?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hay Captacion?": {
+      "main": [
+        [
+          {
+            "node": "Historial WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Historial WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Montar Hilo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Hilo": {
+      "main": [
+        [
+          {
+            "node": "Clasificar Respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Modelo OpenAI": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Clasificar Respuesta",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar Respuesta": {
+      "main": [
+        [
+          {
+            "node": "Aplicar Clasificacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar Clasificacion": {
+      "main": [
+        [
+          {
+            "node": "Actualizar Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar Captacion": {
+      "main": [
+        [
+          {
+            "node": "Actualizar Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar Lead": {
+      "main": [
+        [
+          {
+            "node": "Lead Existe?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Existe?": {
+      "main": [
+        [
+          {
+            "node": "Registrar Historial",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Lead Nuevo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Lead Nuevo": {
+      "main": [
+        [
+          {
+            "node": "Crear Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear Lead": {
+      "main": [
+        [
+          {
+            "node": "Registrar Historial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "availableInMCP": false
+  },
+  "tags": []
+}

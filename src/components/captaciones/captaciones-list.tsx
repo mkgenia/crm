@@ -108,8 +108,18 @@ function CaptacionCard({ cap, onClick, selected, onSelect }: { cap: Captacion; o
             <Home className="h-8 w-8 text-muted-foreground/20" />
           </div>
         )}
-        <div className="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm rounded-md px-2 py-1">
-          <span className="text-white text-sm font-semibold">{fmt(cap.precio)}</span>
+        {/* Precio + operación. Sin el distintivo, "1.250 €" en un listado que mezcla
+            venta y alquiler no se sabe si es una ganga o una renta mensual. */}
+        <div className="absolute bottom-2 left-2 flex items-center gap-1.5">
+          <span className="bg-black/70 backdrop-blur-sm rounded-md px-2 py-1 text-white text-sm font-semibold">
+            {fmt(cap.precio)}
+            {cap.operacion === "rent" && <span className="font-normal opacity-75">/mes</span>}
+          </span>
+          {cap.operacion === "rent" && (
+            <span className="bg-sky-500/90 backdrop-blur-sm rounded-md px-1.5 py-1 text-[10px] font-bold tracking-wide text-white">
+              ALQUILER
+            </span>
+          )}
         </div>
         {/* Sin teléfono */}
         {!hasPhone(cap.telefono) && (
@@ -153,6 +163,8 @@ function CaptacionCard({ cap, onClick, selected, onSelect }: { cap: Captacion; o
             Interesado:    { dot: "bg-emerald-500", label: "Interesado",      text: "text-emerald-400" },
             Quiere_Llamada: { dot: "bg-orange-500",  label: "Quiere llamada",  text: "text-orange-400" },
             No_Interesado: { dot: "bg-red-500",     label: "No interesado",   text: "text-red-400" },
+            Sin_WhatsApp:  { dot: "bg-amber-500",   label: "Sin WhatsApp",    text: "text-amber-400" },
+            Duplicado:     { dot: "bg-slate-400",   label: "Duplicado",       text: "text-slate-400" },
           }
           const c = cfg[wa]
           if (!c) return null

@@ -224,6 +224,46 @@
   background: oklch(1 0 0 / 20%);
 }
 
+/* ── Informe de valoración: hoja A4 imprimible ─────────────────────────── */
+.informe {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 18mm;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+.informe > footer { margin-top: auto; }
+
+@media print {
+  @page { size: A4; margin: 0; }
+  html, body {
+    background: #fff !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .no-print, aside, nav { display: none !important; }
+  /* Neutraliza los contenedores con scroll/altura fija del dashboard */
+  body > div, main, main > div {
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .informe {
+    margin: 0 !important;
+    box-shadow: none !important;
+    break-after: page;
+    page-break-after: always;
+  }
+  .informe:last-of-type { break-after: auto; page-break-after: auto; }
+  .card-testigo { break-inside: avoid; page-break-inside: avoid; }
+  img { max-width: 100%; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+
 /* Quita el rectángulo de foco del navegador en los polígonos SVG de Leaflet */
 .leaflet-interactive:focus,
 .leaflet-container path:focus,

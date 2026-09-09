@@ -1,0 +1,641 @@
+{
+  "name": "2 · Captador — Ingesta y Fotos",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "captador-ingesta",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        0
+      ],
+      "id": "wf2-webhook",
+      "name": "Webhook Ingesta",
+      "webhookId": "90d3e771-0fe0-4147-9be4-df3ad1800f00",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      },
+      "notes": "Autenticado con cabecera x-webhook-secret. El anterior era publico: cualquiera podia insertar filas en Supabase con la service_role y disparar WhatsApps."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 20000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "resolution=ignore-duplicates,return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body.captacion) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -900,
+        0
+      ],
+      "id": "wf2-insertar",
+      "name": "Insertar Captacion",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "ignore-duplicates + return=representation devuelve fila SOLO si la captacion es nueva: es el deduplicado, atomico y en una unica llamada. Con merge-duplicates se habria pisado el trabajo del agente en cada pasada."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf2-es-nueva-c1",
+              "leftValue": "={{ $json.id != null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        0
+      ],
+      "id": "wf2-es-nueva",
+      "name": "Es Nueva?",
+      "notes": "Rama true = alta nueva (procesar fotos; el contacto lo decide la cola). Rama false = ya conocida (refrescar datos del anuncio)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $('Webhook Ingesta').first().json.body || {};\nconst capId = body.captacion && body.captacion.id;\nconst fotos = Array.isArray(body.fotos) ? body.fotos : [];\n\n// Sin fotos o sin id no hay nada que hacer: devolver [] corta la rama sin error.\n// (Antes se leia raw_data.multimedia.images y lanzaba TypeError si el anuncio no\n//  traia bloque multimedia, tumbando toda la rama de imagenes.)\nif (!capId || fotos.length === 0) return [];\n\nreturn fotos.map(function (url, index) {\n  return { json: { url: url, captacion_id: capId, index: index } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        180
+      ],
+      "id": "wf2-prep-fotos",
+      "name": "Preparar Fotos"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        },
+        "url": "={{ $json.url }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        180
+      ],
+      "id": "wf2-descargar",
+      "name": "Descargar Foto",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1500,
+      "onError": "continueErrorOutput",
+      "notes": "Salida de error sin conectar: una foto rota se descarta y el resto sigue."
+    },
+    {
+      "parameters": {
+        "operation": "resize",
+        "dataPropertyName": "data",
+        "width": 1400,
+        "height": 1400,
+        "resizeOption": "onlyIfLarger",
+        "options": {
+          "format": "webp",
+          "quality": 82
+        }
+      },
+      "type": "n8n-nodes-base.editImage",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        180
+      ],
+      "id": "wf2-optimizar",
+      "name": "Optimizar Foto (WebP)",
+      "onError": "continueErrorOutput",
+      "notes": "Antes solo convertia a WebP sin redimensionar. Idealista sirve originales de hasta 3000px: bajar a 1400 recorta ~70% del peso en Storage."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 30000
+        },
+        "method": "POST",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/storage/v1/object/captaciones/{{ $('Preparar Fotos').item.json.captacion_id }}/img_{{ $('Preparar Fotos').item.json.index }}.webp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "image/webp"
+            },
+            {
+              "name": "x-upsert",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        180
+      ],
+      "id": "wf2-subir",
+      "name": "Subir a Storage",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1500,
+      "onError": "continueErrorOutput",
+      "notes": "La ruta se lee de Preparar Fotos por item emparejado. Con $json.propertyId no funcionaba: al descargar un binario el nodo HTTP vacia el json, asi que las fotos acababan en captaciones/undefined/img_undefined.webp."
+    },
+    {
+      "parameters": {
+        "jsCode": "const BASE = 'https://anrivljsatpzwbwhaxsk.supabase.co/storage/v1/object/public/';\nconst capId = $('Preparar Fotos').first().json.captacion_id;\n\n// Supabase Storage responde { Key: 'captaciones/<id>/img_N.webp' } en cada subida.\n// Construir las URLs desde ahi garantiza que solo se guardan las que existen de\n// verdad. Antes se generaban a ciegas y apuntaban a captaciones/undefined/...\nconst keys = $input.all()\n  .map(function (i) { return i.json && i.json.Key; })\n  .filter(function (k) { return typeof k === 'string' && k.length > 0; });\n\nif (!keys.length) return [];\n\nfunction idx(k) {\n  const m = String(k).match(/img_(\\d+)\\.webp$/);\n  return m ? Number(m[1]) : 0;\n}\nkeys.sort(function (a, b) { return idx(a) - idx(b); });\n\nconst urls = keys.map(function (k) { return BASE + k; });\nreturn [{ json: { captacion_id: capId, imagenes: urls, imagen_url: urls[0] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        180
+      ],
+      "id": "wf2-recopilar",
+      "name": "Recopilar URLs"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $json.captacion_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ imagenes: $json.imagenes, imagen_url: $json.imagen_url, fotos_procesadas: true }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        180
+      ],
+      "id": "wf2-guardar-fotos",
+      "name": "Guardar Fotos en BD",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "fotos_procesadas evita que la siguiente pasada del scraper vuelva a descargar, convertir y subir las mismas imagenes. Era el mayor desperdicio de CPU y de Storage del sistema."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $('Webhook Ingesta').first().json.body.captacion.id }}&select=id,precio,fotos_procesadas",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        -180
+      ],
+      "id": "wf2-leer",
+      "name": "Leer Captacion",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const nueva = $('Webhook Ingesta').first().json.body.captacion;\nconst actual = $input.first().json || {};\n\n// La captacion ya existia. Solo se refrescan datos del anuncio: nunca estado_crm,\n// estado_whatsapp ni agente_id, para no pisar el trabajo del agente.\nif (actual.id == null) return [];\n\nconst antes = actual.precio == null ? null : Number(actual.precio);\nconst ahora = nueva.precio == null ? null : Number(nueva.precio);\nconst cambio = antes != null && ahora != null && antes !== ahora;\n\nconst patch = {\n  precio: ahora,\n  precio_m2: nueva.precio_m2,\n  descripcion: nueva.descripcion,\n  url: nueva.url,\n  raw_data: nueva.raw_data,\n};\n\nif (cambio) {\n  patch.precio_anterior = antes;\n  patch.precio_actualizado_en = new Date().toISOString();\n}\n\nreturn [{\n  json: {\n    id: actual.id,\n    patch: patch,\n    cambio_precio: cambio,\n    precio_antes: antes,\n    precio_ahora: ahora,\n    faltan_fotos: actual.fotos_procesadas !== true,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -180
+      ],
+      "id": "wf2-detectar",
+      "name": "Detectar Cambios"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?id=eq.{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.patch) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        -180
+      ],
+      "id": "wf2-actualizar",
+      "name": "Actualizar Captacion",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Solo datos del anuncio: precio, m2, descripcion, url y raw_data."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf2-if-precio-c1",
+              "leftValue": "={{ $('Detectar Cambios').first().json.cambio_precio === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -260
+      ],
+      "id": "wf2-if-precio",
+      "name": "Cambio de precio?"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/historial_cambios",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ captacion_id: $('Detectar Cambios').first().json.id, campo: 'precio', valor_anterior: String($('Detectar Cambios').first().json.precio_antes), valor_nuevo: String($('Detectar Cambios').first().json.precio_ahora), tipo_entidad: 'captacion' }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -260
+      ],
+      "id": "wf2-historial",
+      "name": "Registrar en Historial",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Se ve en la pestana de historial del panel de detalle, y el generador de IA lo usa como gancho (\"he visto que ha ajustado el precio\")."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf2-if-fotos-c1",
+              "leftValue": "={{ $('Detectar Cambios').first().json.faltan_fotos === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -100
+      ],
+      "id": "wf2-if-fotos",
+      "name": "Faltan fotos?",
+      "notes": "Repesca: las captaciones antiguas que se quedaron sin imagenes se reprocesan la proxima vez que el anuncio aparezca en el scraper."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Ingesta": {
+      "main": [
+        [
+          {
+            "node": "Insertar Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insertar Captacion": {
+      "main": [
+        [
+          {
+            "node": "Es Nueva?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Es Nueva?": {
+      "main": [
+        [
+          {
+            "node": "Preparar Fotos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Leer Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Fotos": {
+      "main": [
+        [
+          {
+            "node": "Descargar Foto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar Foto": {
+      "main": [
+        [
+          {
+            "node": "Optimizar Foto (WebP)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Optimizar Foto (WebP)": {
+      "main": [
+        [
+          {
+            "node": "Subir a Storage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Subir a Storage": {
+      "main": [
+        [
+          {
+            "node": "Recopilar URLs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Recopilar URLs": {
+      "main": [
+        [
+          {
+            "node": "Guardar Fotos en BD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Captacion": {
+      "main": [
+        [
+          {
+            "node": "Detectar Cambios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detectar Cambios": {
+      "main": [
+        [
+          {
+            "node": "Actualizar Captacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar Captacion": {
+      "main": [
+        [
+          {
+            "node": "Cambio de precio?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Faltan fotos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cambio de precio?": {
+      "main": [
+        [
+          {
+            "node": "Registrar en Historial",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Faltan fotos?": {
+      "main": [
+        [
+          {
+            "node": "Preparar Fotos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "availableInMCP": false
+  },
+  "tags": []
+}

@@ -1,13 +1,13 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone, UserPlus } from "lucide-react"
+import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone, UserPlus, RotateCcw } from "lucide-react"
 import { AgendaPanel } from "./agenda-panel"
-import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, marcarRespondido } from "@/lib/actions/captaciones"
+import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, marcarRespondido, reintentarAutoContacto } from "@/lib/actions/captaciones"
 import { crearLeadDesdeCaptacion } from "@/lib/actions/leads"
 import { getMensajesCaptacion, type Mensaje } from "@/lib/actions/mensajes"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ESTADO_COLORS, ESTADO_LABELS, AGENDA_COLORS, ESTADOS_CAPTACION, WA_CLASIFICACIONES, type EstadoAgenda } from "@/types/captaciones"
+import { ESTADO_COLORS, ESTADO_LABELS, AGENDA_COLORS, ESTADOS_CAPTACION, WA_CLASIFICACIONES, WA_REINTENTABLES, type EstadoAgenda } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -162,6 +162,7 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   const [generando, setGenerando] = useState(false)
   const [enviando, setEnviando] = useState(false)
   const [expandido, setExpandido] = useState(false)
+  const [reintentando, setReintentando] = useState(false)
   const chatRef = useRef<HTMLDivElement>(null)
 
   const tienePhone = hasPhone(captacion.telefono)
@@ -221,6 +222,23 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
     onUpdate()
   }
 
+  // Estados desde los que el captador ya no reintenta por su cuenta:
+  //  · Sin_WhatsApp / Duplicado → terminales, pero el agente puede querer forzarlo.
+  //  · reserva puesta y sin estado → el envío se quedó a medias (Evolution no
+  //    confirmó). Se deja fuera de la cola a propósito para no duplicar el mensaje,
+  //    así que reactivarlo tiene que ser una decisión humana.
+  const intentoAMedias = !estadoWA && !!captacion.contacto_lock_en
+  const puedeReintentar = (!!estadoWA && WA_REINTENTABLES.includes(estadoWA)) || intentoAMedias
+
+  async function handleReintentar() {
+    setReintentando(true)
+    const res = await reintentarAutoContacto(captacion.id)
+    setReintentando(false)
+    if (res?.error) { toast.error(res.error); return }
+    toast.success("Vuelve a la cola del captador")
+    onUpdate()
+  }
+
   const clasificacion = estadoWA ? WA_CLASIFICACIONES[estadoWA] : null
 
   // Agrupar mensajes por día
@@ -251,6 +269,21 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
             <span className={cn("h-1.5 w-1.5 rounded-full", clasificacion.dot)} />
             {estadoWA === "Enviado" ? "Enviado · sin respuesta" : clasificacion.label}
           </span>
+        )}
+        {puedeReintentar && (
+          <button
+            onClick={handleReintentar}
+            disabled={reintentando}
+            title={intentoAMedias
+              ? "El envío anterior no se confirmó. Devolver a la cola del captador."
+              : "Devolver a la cola del captador automático"}
+            className="flex items-center gap-1 text-xs font-medium text-violet-500 hover:text-violet-400 transition-colors disabled:opacity-50"
+          >
+            {reintentando
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <RotateCcw className="h-3 w-3" />}
+            {intentoAMedias ? "Envío sin confirmar · reintentar" : "Reintentar"}
+          </button>
         )}
         {tienePhone && (
           <button
@@ -566,12 +599,15 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                       Enviado:       "bg-violet-500/30 text-violet-300 border-violet-400/20",
                       Respondido:    "bg-cyan-500/30 text-cyan-300 border-cyan-400/20",
                       Interesado:    "bg-emerald-500/30 text-emerald-300 border-emerald-400/20",
-                      Callback:      "bg-orange-500/30 text-orange-300 border-orange-400/20",
+                      Quiere_Llamada: "bg-orange-500/30 text-orange-300 border-orange-400/20",
                       No_Interesado: "bg-red-500/30 text-red-300 border-red-400/20",
+                      Sin_WhatsApp:  "bg-amber-500/30 text-amber-300 border-amber-400/20",
+                      Duplicado:     "bg-slate-500/30 text-slate-300 border-slate-400/20",
                     }
                     const waLabels: Record<string, string> = {
                       Pendiente: "WA Pendiente", Enviado: "WA Enviado", Respondido: "WA Respondido",
-                      Interesado: "WA Interesado", Callback: "WA Llamada", No_Interesado: "WA No interesa",
+                      Interesado: "WA Interesado", Quiere_Llamada: "WA Llamada", No_Interesado: "WA No interesa",
+                      Sin_WhatsApp: "Sin WhatsApp", Duplicado: "Duplicado",
                     }
                     const key = (data as any).estado_whatsapp
                     return (

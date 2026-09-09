@@ -1,0 +1,545 @@
+{
+  "name": "1 · Captador — Scraper Idealista",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */30 9-21 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1120,
+        -120
+      ],
+      "id": "wf1-cron-rapido",
+      "name": "Cada 30 min (9-21h)",
+      "notes": "Deteccion rapida. En captacion de particulares llegar el primero es casi todo: a las pocas horas el propietario ya tiene 10 llamadas de agencias."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 7 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1120,
+        60
+      ],
+      "id": "wf1-cron-red",
+      "name": "Red de Seguridad (07:00)",
+      "notes": "Una pasada diaria sin monitoringMode, con la ventana propia de cada zona. Repesca cualquier anuncio que se perdiera por un fallo de ingesta."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "https://api.apify.com/v2/users/me/usage/monthly",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -900,
+        -30
+      ],
+      "id": "wf1-uso",
+      "name": "Uso Apify",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "APIFY_TOKEN",
+          "name": "Apify (Bearer)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Gasto real del ciclo de facturacion, directo de Apify."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Guardarraíl de gasto. La cuenta es plan STARTER con tope duro de 19 $/mes:\n// si se agota, Apify corta los runs a mitad de mes y el captador se queda mudo.\n// Aquí se reparte el presupuesto a lo largo del ciclo de facturación y se frena\n// solo (saltando pasadas) cuando el gasto va por delante del ritmo.\nconst LIMITE_CUENTA = 19;\nconst RESERVA = 2;            // colchón intocable para el resto del mes\nconst DISPONIBLE = LIMITE_CUENTA - RESERVA;\n\nconst raw = $input.first().json;\nconst uso = raw.data || raw;\n\n// El freno tiene que fallar CERRADO. El nodo de arriba lleva\n// onError:continueRegularOutput, asi que si la API de Apify da un 429, un 5xx o\n// se pasa del timeout, igualmente emite un item, y el item no trae el campo del\n// gasto. Con `Number(undefined || 0)` eso se convertia en 'has gastado 0 euros',\n// que es la lectura MAS PERMISIVA posible justo cuando se ha perdido la unica\n// medida real. Ademas escribia ese 0 en app_settings y el medidor del CRM se\n// ponia a cero mientras se seguia gastando. Ocurrio de verdad: ejecucion 56160\n// del 08/09 a las 16:00.\nconst bruto = uso.totalUsageCreditsUsdBeforeVolumeDiscount;\nconst lecturaOk = !raw.error && bruto != null && isFinite(Number(bruto));\nif (!lecturaOk) {\n  return [{\n    json: {\n      lectura_ok: false,\n      seguir: false,\n      motivo: 'no se pudo leer el gasto de Apify',\n      detalle: String((raw.error && (raw.error.message || raw.error)) || 'la respuesta no traia el consumo').slice(0, 200),\n      actualizado: new Date().toISOString(),\n    },\n  }];\n}\nconst gastado = Number(bruto);\n\nconst ciclo = uso.usageCycle || {};\nconst ini = new Date(ciclo.startAt || Date.now()).getTime();\nconst fin = new Date(ciclo.endAt || Date.now() + 2592000000).getTime();\nconst ahora = Date.now();\nconst progreso = Math.min(Math.max((ahora - ini) / Math.max(fin - ini, 1), 0), 1);\n\n// Presupuesto permitido a día de hoy = 2 días de margen + parte proporcional.\nconst unDia = DISPONIBLE / 30;\nconst permitido = unDia * 2 + DISPONIBLE * progreso;\n\nconst agotado = gastado >= DISPONIBLE;\nconst adelantado = gastado > permitido;\n\nreturn [{\n  json: {\n    lectura_ok: true,\n    gastado: Math.round(gastado * 1000) / 1000,\n    limite: LIMITE_CUENTA,\n    disponible: DISPONIBLE,\n    permitido_hoy: Math.round(permitido * 1000) / 1000,\n    progreso_ciclo: Math.round(progreso * 100),\n    ciclo_fin: ciclo.endAt || null,\n    seguir: !agotado && !adelantado,\n    motivo: agotado ? 'presupuesto agotado' : (adelantado ? 'por delante del ritmo de gasto' : 'ok'),\n    actualizado: new Date().toISOString(),\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        -30
+      ],
+      "id": "wf1-presupuesto",
+      "name": "Control de Presupuesto"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf1-if-lectura-c1",
+              "leftValue": "={{ $('Control de Presupuesto').first().json.lectura_ok === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -570,
+        -30
+      ],
+      "id": "wf1-if-lectura",
+      "name": "Lectura de Gasto OK?",
+      "notes": "Si no se pudo leer el consumo de Apify, se salta la publicacion: escribir el objeto de error en app_settings pondria el medidor del CRM a 0 y borraria el ultimo valor bueno. La pasada se detiene igual en el IF siguiente."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/app_settings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ key: 'apify_uso_mes', value: $json }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        -30
+      ],
+      "id": "wf1-pub-gasto",
+      "name": "Publicar Gasto en CRM",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Alimenta el medidor \"Presupuesto Apify\" del panel de Configuracion del captador."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf1-if-presupuesto-c1",
+              "leftValue": "={{ $('Control de Presupuesto').first().json.seguir === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -30
+      ],
+      "id": "wf1-if-presupuesto",
+      "name": "Hay presupuesto?",
+      "notes": "Si el gasto va por delante del ritmo, se salta la pasada. Mejor perder una ventana de 30 min que quedarse sin captador el dia 22."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/scraper_zonas?activa=eq.true&select=*&order=id",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        -30
+      ],
+      "id": "wf1-zonas",
+      "name": "Zonas Activas",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const zonas = $input.all().map(function (i) { return i.json; }).filter(function (z) { return z && z.url; });\nif (!zonas.length) {\n  throw new Error('No hay ninguna zona activa. Ve a Captaciones -> Configuracion del captador y activa al menos una.');\n}\n\n// Dos modos, distinguidos por el cron que ha disparado la ejecucion. Los dos usan\n// la ventana propia de cada zona; lo unico que cambia es si se reemite o no:\n//  - rapido (cada 30 min): monitoringMode ON. Solo emite anuncios nuevos, asi que\n//    casi todo el coste es el arranque del actor.\n//  - red de seguridad (07:00): monitoringMode OFF. Reemite todo lo que hay en la\n//    ventana y Supabase deduplica. Cubre el unico punto debil de monitoringMode:\n//    si una ingesta falla, ese anuncio no vuelve a emitirse jamas.\n//    Su ventana era fija de 48h y esa sola pasada costaba $0.33 (la mitad del mes\n//    en 375 filas); al heredar la de cada zona bajo a 24h donde no hacia falta.\nconst esRed = $('Red de Seguridad (07:00)').isExecuted;\n\n// La ventana de publicacion es una propiedad DE CADA ZONA, no una constante.\n// Vivienda en Valencia mueve ~375 anuncios en 48h y con 24h ya va sobrada; los\n// locales mueven 13 en 48h y con 24h no sale ni uno. Una sola cifra global deja\n// fuera a los mercados finos o dispara el gasto en los gruesos.\nfunction conVentana(url, horas) {\n  const token = 'publicado_ultimas-' + horas + '-horas';\n\n  // Con segmento /con-.../: se sustituye la ventana y se respetan los demas\n  // filtros que traiga la URL (precio, habitaciones, etc.).\n  if (/\\/con-/.test(url)) {\n    return url.replace(/\\/con-([^/?]*)/, function (_m, filtros) {\n      const lista = String(filtros)\n        .split(',')\n        .filter(Boolean)\n        .filter(function (f) { return f.indexOf('publicado_') !== 0; });\n      lista.unshift(token);\n      return '/con-' + lista.join(',');\n    });\n  }\n\n  // Sin segmento /con-.../: se INYECTA. Antes se devolvia la URL intacta, y una\n  // zona sin ventana pide todo el historico en cada pasada: en locales de Valencia\n  // son miles de filas cada 30 minutos, y la red de seguridad las recobraria\n  // enteras cada dia. Es la diferencia entre gastar centimos y fundir el mes.\n  const i = url.indexOf('?');\n  const camino = i === -1 ? url : url.slice(0, i);\n  const cola = i === -1 ? '' : url.slice(i);\n  return camino.replace(/\\/?$/, '/') + 'con-' + token + '/' + cola;\n}\n\n// TODAS las zonas activas van en un unico run: el arranque del actor ($0.007) se\n// paga una sola vez en lugar de una por zona. Cada URL lleva su propia ventana,\n// asi que mezclar vivienda a 24h y locales a 48h en la misma pasada es gratis.\n//\n// Si la zona no tiene ventana propia (fila creada antes de la migracion 004) se\n// respeta la que ya trae su URL en vez de imponerle 24h. Sin esto, una zona de\n// locales guardada a 48h se reescribiria a 24h y no captaria absolutamente nada,\n// y encima el sintoma seria \"no encuentra anuncios\" y no \"falta el SQL\".\nfunction ventanaDeLaUrl(url) {\n  const m = /publicado_ultimas-(\\d+)-horas/.exec(String(url));\n  return m ? Number(m[1]) : 0;\n}\nconst urls = zonas.map(function (z) {\n  const horas = Number(z.ventana_horas) > 0 ? Number(z.ventana_horas)\n    : (ventanaDeLaUrl(z.url) || 24);\n  return { url: conVentana(z.url, horas) };\n});\n\nreturn [{\n  json: {\n    modo: esRed ? 'red-de-seguridad' : 'rapido',\n    zonas: zonas.length,\n    detalle: zonas.map(function (z) {\n      return z.nombre + ' (' + (z.operacion || 'venta') + '/' + (z.tipo_inmueble || 'viviendas') + ', ' + (z.ventana_horas || 24) + 'h)';\n    }).join(' · '),\n    apify_input: {\n      startUrls: urls,\n      maxItems: esRed ? 400 : 150,\n      maxConcurrency: 8,\n      minConcurrency: 1,\n      monitoringMode: !esRed,\n    },\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -30
+      ],
+      "id": "wf1-input",
+      "name": "Preparar Input Apify"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 290000
+        },
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/OTe82JNUGa93aVcRc/run-sync-get-dataset-items?clean=true&format=json&timeout=260&maxTotalChargeUsd={{ $json.modo === \"red-de-seguridad\" ? \"1.00\" : \"0.35\" }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.apify_input) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -30
+      ],
+      "id": "wf1-apify",
+      "name": "Apify Scrapear Zonas",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "APIFY_TOKEN",
+          "name": "Apify (Bearer)"
+        }
+      },
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 10000,
+      "notes": "maxTotalChargeUsd corta el run por hardware si se dispara el coste. Token en cabecera Authorization: antes iba en la query string y quedaba escrito en los logs. timeout=260s en el actor y 290s en el nodo, por debajo del limite duro de 300s de run-sync."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rutas reales del actor memo23/idealista-scraper (build 0.0.164).\n// Casi todo lo util vive bajo moreCharacteristics, NO en la raiz del item.\nconst ESTADO_LEGIBLE = { good: 'Buen estado', renew: 'A reformar', newdevelopment: 'Obra nueva' };\n\n// Idealista devuelve el telefono en varios formatos segun el anuncio. Se normaliza\n// a 34XXXXXXXXX y se descarta lo que no sea un movil/fijo espanol valido, para que\n// ni Evolution ni el CRM reciban basura.\nfunction telefonoES(contacto) {\n  const p = (contacto && contacto.phone1) || {};\n  const num = String(p.phoneNumber == null ? '' : p.phoneNumber).replace(/\\D/g, '');\n  const pref = String(p.prefix == null ? '' : p.prefix).replace(/\\D/g, '');\n  let d = num ? (pref || '34') + num : '';\n  if (!d) {\n    d = String(p.formattedPhoneWithPrefix || p.formattedPhone || '').replace(/\\D/g, '');\n    if (d.startsWith('00')) d = d.slice(2);\n    if (d.length === 9) d = '34' + d;\n  }\n  return /^34[6-9]\\d{8}$/.test(d) ? d : null;\n}\n\nconst salida = [];\n\nfor (const item of $input.all()) {\n  const e = item.json || {};\n  const ci = e.contactInfo || {};\n\n  // Solo particulares: una agencia no es una captacion.\n  if (ci.userType !== 'private' || ci.professional === true) continue;\n  if (e.state && e.state !== 'active') continue;\n  if (!e.adid) continue;\n\n  const mc = e.moreCharacteristics || {};\n  const bi = e.basicInfo || {};\n  const ub = e.ubication || {};\n\n  const metros = mc.constructedArea != null ? mc.constructedArea\n    : (bi.constructedArea != null ? bi.constructedArea : null);\n  const precio = e.price != null ? e.price\n    : (e.priceInfo && e.priceInfo.amount != null ? e.priceInfo.amount : null);\n  const estadoRaw = mc.status || bi.status || null;\n  const planta = mc.floor != null ? mc.floor : (bi.floor != null ? bi.floor : null);\n  const ascensor = mc.lift != null ? mc.lift\n    : (mc.hasLift != null ? mc.hasLift : (bi.hasLift != null ? bi.hasLift : null));\n\n  // raw_data sin las descripciones multi-idioma: cuadruplican el peso y no se usan.\n  const rawSlim = Object.assign({}, e);\n  delete rawSlim.comments;\n  delete rawSlim.translatedTexts;\n\n  const fotos = ((e.multimedia && e.multimedia.images) || [])\n    .map(function (img) { return img && img.url; })\n    .filter(Boolean)\n    .slice(0, 12);\n\n  salida.push({\n    json: {\n      // captacion coincide 1:1 con las columnas de public.captaciones\n      captacion: {\n        id: Number(e.adid),\n        nombre: ci.contactName || 'Propietario',\n        telefono: telefonoES(ci),\n        precio: precio,\n        precio_m2: e.priceByArea != null ? e.priceByArea\n          : (precio && metros ? Math.round(precio / metros) : null),\n        barrio: ub.administrativeAreaLevel4 || ub.administrativeAreaLevel3 || null,\n        calle: ub.title || null,\n        metros: metros,\n        habitaciones: mc.roomNumber != null ? mc.roomNumber\n          : (bi.roomNumber != null ? bi.roomNumber : null),\n        banos: mc.bathNumber != null ? mc.bathNumber\n          : (bi.bathNumber != null ? bi.bathNumber : null),\n        planta: planta == null ? null : String(planta),\n        tiene_ascensor: typeof ascensor === 'boolean' ? ascensor : null,\n        estado: estadoRaw ? (ESTADO_LEGIBLE[estadoRaw] || estadoRaw) : null,\n        descripcion: e.propertyComment || null,\n        url: e.detailWebLink || null,\n        estado_whatsapp: null,\n        contacto_lock_en: null,\n        fotos_procesadas: false,\n        raw_data: rawSlim,\n      },\n      fotos: fotos,\n    },\n  });\n}\n\nreturn salida;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -130
+      ],
+      "id": "wf1-normalizar",
+      "name": "Normalizar Inmuebles"
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          }
+        },
+        "method": "POST",
+        "url": "https://test-n8n.pzkz6e.easypanel.host/webhook/captador-ingesta",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        -130
+      ],
+      "id": "wf1-enviar",
+      "name": "Enviar a Ingesta",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Una llamada por inmueble, espaciadas 1,5s. Si una falla no arrastra al resto. La ingesta NO envia WhatsApp: solo guarda. El envio lo gobierna la cola."
+    },
+    {
+      "parameters": {
+        "jsCode": "const zonas = $('Zonas Activas').all().map(function (i) { return i.json; });\n\n// De los valores del actor a los de scraper_zonas\nconst TIPO = { homes: 'viviendas', rooms: 'viviendas', premises: 'locales', offices: 'oficinas', garages: 'garajes', lands: 'terrenos', storageRooms: 'trasteros' };\nconst OPERACION = { sale: 'venta', rent: 'alquiler' };\n\n// Solo cuentan los particulares, que es lo que el panel llama 'N particulares'.\nconst captados = $('Normalizar Inmuebles').isExecuted\n  ? $('Normalizar Inmuebles').all().map(function (i) { return (i.json && i.json.captacion && i.json.captacion.raw_data) || {}; })\n  : [];\n\nconst cuando = new Date().toISOString();\nconst salida = [];\n\nfor (const z of zonas) {\n  const zTipo = z.tipo_inmueble || 'viviendas';\n  const zOper = z.operacion || 'venta';\n  const suyos = captados.filter(function (rd) {\n    const t = TIPO[rd.propertyType] || 'viviendas';\n    const o = OPERACION[rd.operation] || 'venta';\n    return t === zTipo && o === zOper;\n  });\n  salida.push({ json: { zona_id: z.id, zona: z.nombre, ultima_ejecucion: cuando, ultimo_resultado: suyos.length } });\n}\n\n// Si una zona tiene un tipo que no sabemos traducir, sus inmuebles no se\n// atribuirian a nadie y el total por zonas no cuadraria con el real. Se avisa en\n// la propia salida en vez de perderlo en silencio.\nconst repartidos = salida.reduce(function (a, s) { return a + s.json.ultimo_resultado; }, 0);\nif (repartidos !== captados.length && salida.length) {\n  salida[0].json.aviso = 'repartidos ' + repartidos + ' de ' + captados.length + ' captados';\n}\n\nreturn salida;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        70
+      ],
+      "id": "wf1-reparto",
+      "name": "Reparto por Zona",
+      "notes": "Reparte el resultado de la pasada entre las zonas activas, atribuyendo cada inmueble a la zona cuya operacion y tipo coinciden. Antes se escribia el mismo total en todas.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 15000
+        },
+        "method": "PATCH",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/scraper_zonas?id=eq.{{ $json.zona_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ultima_ejecucion: $json.ultima_ejecucion, ultimo_resultado: $json.ultimo_resultado }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        70
+      ],
+      "id": "wf1-marcar",
+      "name": "Marcar Zonas Ejecutadas",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Una llamada POR ZONA, con el recuento que le corresponde. Antes era un solo PATCH a activa=eq.true que escribia el mismo total en todas: con dos zonas, el panel mentia en las dos y una zona muda era indistinguible de una productiva."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cada 30 min (9-21h)": {
+      "main": [
+        [
+          {
+            "node": "Uso Apify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Red de Seguridad (07:00)": {
+      "main": [
+        [
+          {
+            "node": "Uso Apify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Uso Apify": {
+      "main": [
+        [
+          {
+            "node": "Control de Presupuesto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Control de Presupuesto": {
+      "main": [
+        [
+          {
+            "node": "Lectura de Gasto OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lectura de Gasto OK?": {
+      "main": [
+        [
+          {
+            "node": "Publicar Gasto en CRM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hay presupuesto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publicar Gasto en CRM": {
+      "main": [
+        [
+          {
+            "node": "Hay presupuesto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hay presupuesto?": {
+      "main": [
+        [
+          {
+            "node": "Zonas Activas",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Zonas Activas": {
+      "main": [
+        [
+          {
+            "node": "Preparar Input Apify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Input Apify": {
+      "main": [
+        [
+          {
+            "node": "Apify Scrapear Zonas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Scrapear Zonas": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Inmuebles",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Reparto por Zona",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reparto por Zona": {
+      "main": [
+        [
+          {
+            "node": "Marcar Zonas Ejecutadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar Inmuebles": {
+      "main": [
+        [
+          {
+            "node": "Enviar a Ingesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "availableInMCP": false
+  },
+  "tags": []
+}
