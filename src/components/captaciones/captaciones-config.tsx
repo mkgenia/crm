@@ -10,8 +10,8 @@ import {
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  toggleAutoContacto, agregarZona, toggleZona, eliminarZona, setLimiteDiario, reordenarZonas,
-  type ApifyUso, type Operacion, type TipoInmueble, type TipoZona,
+  toggleAutoContacto, agregarZona, toggleZona, eliminarZona, setLimiteDiario, reordenarZonas, setRitmo,
+  type ApifyUso, type Operacion, type TipoInmueble, type TipoZona, type Ritmo,
 } from "@/lib/actions/captaciones-config"
 import { encodePolyline } from "./polyline"
 
@@ -31,6 +31,12 @@ const TIPOS_INMUEBLE: { valor: TipoInmueble; etiqueta: string; enMensaje: string
   { valor: "garajes", etiqueta: "Garajes", enMensaje: "plaza de garaje" },
   { valor: "trasteros", etiqueta: "Trasteros", enMensaje: "trastero" },
   { valor: "terrenos", etiqueta: "Terrenos", enMensaje: "terreno" },
+]
+
+const RITMOS: { valor: Ritmo; etiqueta: string; cada: string; aviso: string }[] = [
+  { valor: "normal", etiqueta: "Normal", cada: "~12 min", aviso: "Ritmo normal: un mensaje cada ~12 min" },
+  { valor: "rapido", etiqueta: "Rápido", cada: "~7 min", aviso: "Ritmo rápido: un mensaje cada ~7 min" },
+  { valor: "turbo", etiqueta: "Turbo", cada: "6 min", aviso: "Turbo activado — acuérdate de volver a normal" },
 ]
 
 // Leaflet requires no SSR
@@ -77,6 +83,7 @@ interface Props {
   enabled: boolean
   zonas: Zona[]
   limiteDiario: number
+  ritmo: Ritmo
   uso: ApifyUso | null
   cola: { enCola: number; enviadasHoy: number }
 }
@@ -95,6 +102,7 @@ export function CaptacionesConfig({
   enabled: initialEnabled,
   zonas: initialZonas,
   limiteDiario: initialLimite,
+  ritmo: initialRitmo,
   uso,
   cola,
 }: Props) {
@@ -102,6 +110,7 @@ export function CaptacionesConfig({
   const [enabled, setEnabled] = useState(initialEnabled)
   const [zonas, setZonas] = useState<Zona[]>(initialZonas)
   const [limite, setLimite] = useState(initialLimite)
+  const [ritmo, setRitmoLocal] = useState<Ritmo>(initialRitmo)
   const [toggling, setToggling] = useState(false)
   const [loadingZona, setLoadingZona] = useState<string | null>(null)
 
@@ -179,6 +188,14 @@ export function CaptacionesConfig({
     const n = Math.max(1, Math.min(80, next))
     setLimite(n)
     await setLimiteDiario(n)
+  }
+
+  async function handleRitmo(r: Ritmo) {
+    const antes = ritmo
+    setRitmoLocal(r)
+    const res = await setRitmo(r)
+    if (res.error) { setRitmoLocal(antes); toast.error(res.error); return }
+    toast.success(RITMOS.find(x => x.valor === r)!.aviso)
   }
 
   async function handleToggle() {
@@ -365,6 +382,38 @@ export function CaptacionesConfig({
                   className="flex-1 accent-violet-500"
                 />
                 <span className="text-sm font-semibold tabular-nums w-14 text-right">{limite}/día</span>
+              </div>
+
+              {/* Velocidad de la cola */}
+              <div className="space-y-1.5 pt-1">
+                <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Velocidad de envío</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {RITMOS.map(r => (
+                    <button
+                      key={r.valor}
+                      onClick={() => handleRitmo(r.valor)}
+                      className={cn(
+                        "py-2 rounded-lg border text-sm font-medium transition-all",
+                        ritmo === r.valor
+                          ? r.valor === "turbo"
+                            ? "border-amber-500/60 bg-amber-500/10 text-amber-500"
+                            : "border-violet-500/50 bg-violet-500/10 text-violet-400"
+                          : "border-border bg-muted/20 text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {r.etiqueta}
+                      <span className="block text-[10px] font-normal opacity-70">{r.cada}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className={cn(
+                  "text-[11px] leading-relaxed",
+                  ritmo === "turbo" ? "text-amber-500" : "text-muted-foreground/70",
+                )}>
+                  {ritmo === "turbo"
+                    ? "Turbo quita el salto aleatorio, así que los mensajes salen a intervalos casi idénticos — es la firma que delata un automatismo. Úsalo para vaciar una cola acumulada y vuelve a normal."
+                    : "Cuánto se espera entre un mensaje y el siguiente. El hueco es irregular a propósito: la regularidad milimétrica es de lo primero que mira WhatsApp para marcar una cuenta."}
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-2">

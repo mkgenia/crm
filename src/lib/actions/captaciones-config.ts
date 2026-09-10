@@ -15,6 +15,7 @@ export interface ApifyUso {
   actualizado: string
 }
 
+export type Ritmo = "normal" | "rapido" | "turbo"
 export type Operacion = "venta" | "alquiler"
 export type TipoInmueble = "viviendas" | "locales" | "oficinas" | "garajes" | "trasteros" | "terrenos"
 // "nombre" era el buscador por texto de Idealista. Ya no se ofrece (generaba URLs
@@ -55,7 +56,7 @@ export async function getAutoContactoConfig() {
     supabase
       .from("app_settings")
       .select("key, value")
-      .in("key", ["auto_contact_enabled", "wa_limite_diario", "apify_uso_mes"]),
+      .in("key", ["auto_contact_enabled", "wa_limite_diario", "wa_ritmo", "apify_uso_mes"]),
     // `*` y no una lista de columnas: si se pidieran por nombre, la página entera
     // reventaría con un 400 en el hueco entre desplegar esto y ejecutar la
     // migración 004, que es justo cuando más se mira.
@@ -78,6 +79,7 @@ export async function getAutoContactoConfig() {
   return {
     enabled: comoBool(valor("auto_contact_enabled")),
     limiteDiario: comoNum(valor("wa_limite_diario"), 25),
+    ritmo: (String(valor("wa_ritmo") ?? "normal").replace(/"/g, "") as Ritmo),
     uso,
     zonas: (zonas ?? []) as ZonaScraper[],
   }
@@ -236,6 +238,27 @@ export async function reordenarZonas(ids: string[]) {
   const fallo = resultados.find((r) => r.error)
   if (fallo?.error) return { error: fallo.error.message }
 
+  revalidatePath("/captaciones")
+  return { success: true }
+}
+
+/**
+ * Velocidad de la cola de WhatsApp. Cambia cuántos turnos se saltan y cuánto se
+ * espera antes de enviar:
+ *   normal → salta el 45 % de los turnos, espera 20-90 s  (~1 envío cada 12 min)
+ *   rapido → salta el 15 %, espera 8-25 s                 (~1 envío cada 7 min)
+ *   turbo  → no salta ninguno, espera 3-10 s              (1 envío cada 6 min)
+ *
+ * Turbo quita el salto aleatorio, así que los mensajes salen a intervalos casi
+ * idénticos: es la firma que delata un automatismo ante WhatsApp. Está para
+ * vaciar una cola acumulada un día concreto, no para dejarlo puesto.
+ */
+export async function setRitmo(ritmo: Ritmo) {
+  const supabase = await createAdminClient()
+  const { error } = await supabase
+    .from("app_settings")
+    .upsert({ key: "wa_ritmo", value: ritmo }, { onConflict: "key" })
+  if (error) return { error: error.message }
   revalidatePath("/captaciones")
   return { success: true }
 }

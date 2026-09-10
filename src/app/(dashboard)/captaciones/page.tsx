@@ -53,6 +53,7 @@ export default async function CaptacionesPage() {
             enabled={config.enabled}
             zonas={config.zonas}
             limiteDiario={config.limiteDiario}
+            ritmo={config.ritmo}
             uso={config.uso}
             cola={cola}
           />
