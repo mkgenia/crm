@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server"
 import { Sidebar } from "@/components/shared/sidebar"
 import { OnboardingTour } from "@/components/shared/onboarding-tour"
 import { NotificacionesAsignacion } from "@/components/shared/notificaciones-asignacion"
-import { PERMISOS_DEFAULT } from "@/types/database"
+import { resolverPermisos } from "@/types/database"
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
@@ -25,7 +25,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar
         rol={perfil.rol}
-        permisos={perfil.permisos ?? PERMISOS_DEFAULT}
+        permisos={resolverPermisos(perfil.permisos)}
         nombre={perfil.nombre}
         avatar_url={perfil.avatar_url}
       />

@@ -45,12 +45,15 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
   const initials = `${member.nombre.charAt(0)}${member.apellidos?.charAt(0) ?? ""}`.toUpperCase()
   const joined = new Date(member.created_at).toLocaleDateString("es-ES", { month: "short", year: "numeric" })
 
-  async function togglePermiso(key: keyof Permisos) {
-    const next = { ...permisos, [key]: !permisos[key] }
+  async function aplicar(next: Permisos) {
+    const previo = permisos
     setPermisos(next)
     const res = await actualizarPermisos(member.id, next)
-    if (res.error) { setPermisos(permisos); toast.error("Error al actualizar permisos") }
+    if (res.error) { setPermisos(previo); toast.error("Error al actualizar permisos") }
   }
+
+  const concedidos = MODULOS.filter((m) => permisos[m.key]).length
+  const grupos = Array.from(new Set(MODULOS.map((m) => m.grupo)))
 
   async function handleToggleRol() {
     setShowMenu(false)
@@ -146,29 +149,56 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
               className="flex items-center gap-2 px-5 py-3 border-t border-border text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/20 transition-colors"
             >
               <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
-              {expanded ? "Ocultar permisos" : "Gestionar permisos"}
-              <div className="ml-auto flex gap-1">
-                {MODULOS.map((m) => (
-                  <span
-                    key={m.key}
-                    className={cn("text-[10px] px-1.5 py-0.5 rounded", permisos[m.key] ? "bg-violet-500/15 text-violet-400" : "bg-muted text-muted-foreground/40 line-through")}
-                  >
-                    {m.label}
-                  </span>
-                ))}
-              </div>
+              {expanded ? "Ocultar acceso" : "Qué puede ver"}
+              {/* Doce etiquetas no caben en la cabecera de la tarjeta: el
+                  recuento dice lo mismo y se lee de un vistazo. */}
+              <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
+                {concedidos} de {MODULOS.length} secciones
+              </span>
             </button>
             {expanded && (
-              <div className="border-t border-border bg-muted/20 px-5 py-4 grid grid-cols-2 gap-3">
-                {MODULOS.map((m) => (
-                  <div key={m.key} className="flex items-center justify-between gap-3 bg-card rounded-md px-3 py-2.5 border border-border">
-                    <div>
-                      <p className="text-sm font-medium">{m.label}</p>
-                      <p className="text-xs text-muted-foreground leading-tight">{m.descripcion}</p>
+              <div className="border-t border-border bg-muted/20 px-5 py-4 space-y-4">
+                {grupos.map((grupo) => {
+                  const mods = MODULOS.filter((m) => m.grupo === grupo)
+                  const todos = mods.every((m) => permisos[m.key])
+                  return (
+                    <div key={grupo} className="space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                          {grupo}
+                        </p>
+                        <button
+                          onClick={() => aplicar({
+                            ...permisos,
+                            ...Object.fromEntries(mods.map((m) => [m.key, !todos])),
+                          } as Permisos)}
+                          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          {todos ? "Quitar todo" : "Dar todo"}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {mods.map((m) => (
+                          <div key={m.key} className="flex items-center justify-between gap-3 bg-card rounded-md px-3 py-2.5 border border-border">
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium">{m.label}</p>
+                              <p className="text-xs text-muted-foreground leading-tight">{m.descripcion}</p>
+                            </div>
+                            <Switch
+                              checked={permisos[m.key]}
+                              onCheckedChange={() => aplicar({ ...permisos, [m.key]: !permisos[m.key] })}
+                              className="shrink-0"
+                            />
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <Switch checked={permisos[m.key]} onCheckedChange={() => togglePermiso(m.key)} className="shrink-0" />
-                  </div>
-                ))}
+                  )
+                })}
+                <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+                  Mi día y Configuración las ve todo el mundo. Equipo, Agentes IA y
+                  Workflows son sólo de administración y no se conceden.
+                </p>
               </div>
             )}
           </>

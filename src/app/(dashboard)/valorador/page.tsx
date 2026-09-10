@@ -1,14 +1,11 @@
-import { redirect } from "next/navigation"
-import { createClient } from "@/lib/supabase/server"
+import { exigirModulo } from "@/lib/auth/acceso"
 import { getZonasStats, getValoraciones, getFactoresMercado } from "@/lib/actions/valorador"
 import { ValoradorShell } from "@/components/valorador/valorador-shell"
 
 export const metadata = { title: "Valorador — mkgenia" }
 
 export default async function ValoradorPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect("/login")
+  await exigirModulo("valorador")
 
   const [statsVenta, statsAlquiler, valoraciones, factores] = await Promise.all([
     getZonasStats("venta"),

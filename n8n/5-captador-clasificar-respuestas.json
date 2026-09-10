@@ -188,7 +188,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const webhook = $('Webhook Respuesta WA').first().json;\nconst wBody = webhook.body || webhook;\nconst wData = wBody.data || wBody;\n\n// Los envoltorios de WhatsApp ANIDAN: en un chat con mensajes temporales, una foto\n// de un solo uso llega como ephemeralMessage.message.viewOnceMessageV2.message.\n// Por eso se desenvuelve en bucle y no con una cadena de ?? de un nivel.\nfunction desenvolver(m) {\n  let cur = m || {};\n  for (let i = 0; i < 5; i++) {\n    const w = cur.ephemeralMessage || cur.viewOnceMessage || cur.viewOnceMessageV2\n      || cur.viewOnceMessageV2Extension || cur.documentWithCaptionMessage;\n    if (!w || !w.message) break;\n    cur = w.message;\n  }\n  return cur;\n}\n\nfunction texto(msg) {\n  const m = desenvolver(msg);\n  if (!m) return null;\n  if (m.conversation) return m.conversation;\n  if (m.extendedTextMessage && m.extendedTextMessage.text) return m.extendedTextMessage.text;\n  if (m.imageMessage && m.imageMessage.caption) return m.imageMessage.caption;\n  if (m.videoMessage && m.videoMessage.caption) return m.videoMessage.caption;\n  if (m.documentMessage && m.documentMessage.caption) return m.documentMessage.caption;\n  // La reaccion lleva el emoji en .text: un pulgar arriba es un 'si' que no hay que perder.\n  if (m.reactionMessage && m.reactionMessage.text) return m.reactionMessage.text;\n  if (m.buttonsResponseMessage && m.buttonsResponseMessage.selectedDisplayText) return m.buttonsResponseMessage.selectedDisplayText;\n  if (m.listResponseMessage && m.listResponseMessage.title) return m.listResponseMessage.title;\n  if (m.audioMessage) return '[nota de voz]';\n  if (m.imageMessage) return '[foto]';\n  if (m.videoMessage) return '[video]';\n  if (m.documentMessage) return '[documento]';\n  if (m.locationMessage) return '[ubicacion]';\n  if (m.contactMessage || m.contactsArrayMessage) return '[contacto]';\n  if (m.stickerMessage) return '[sticker]';\n  return null;\n}\n\nconst entrante = texto(wData.message);\n\n// Historial de la conversacion. Si Evolution falla no se aborta: se clasifica el\n// mensaje suelto, que es lo unico que hacia el flujo anterior de todas formas.\nconst registros = [];\nfor (const it of $input.all()) {\n  const j = it.json || {};\n  const lista = (j.messages && j.messages.records) || j.records || (Array.isArray(j) ? j : []);\n  if (Array.isArray(lista)) for (const m of lista) registros.push(m);\n}\n\nconst hilo = registros\n  .filter(function (m) { return m && m.key; })\n  .map(function (m) {\n    return {\n      ts: Number(m.messageTimestamp || 0),\n      quien: m.key.fromMe ? 'Agente' : 'Propietario',\n      txt: texto(m.message),\n    };\n  })\n  .filter(function (m) { return m.txt; })\n  .sort(function (a, b) { return a.ts - b.ts; })\n  .slice(-8);\n\nconst lineas = hilo.map(function (m) { return m.quien + ': ' + m.txt; });\nconst ultimo = entrante || (hilo.length ? hilo[hilo.length - 1].txt : null);\n\n// Nunca se lanza un throw: perder la respuesta de un propietario por un tipo de\n// mensaje raro es mucho peor que clasificarla como 'Respondido'.\nif (!ultimo) {\n  return [{ json: { conversacion: 'Propietario: [mensaje no textual]', ultimo: '[mensaje no textual]' } }];\n}\n\nif (!lineas.length || lineas[lineas.length - 1] !== 'Propietario: ' + ultimo) {\n  lineas.push('Propietario: ' + ultimo);\n}\n\nreturn [{ json: { conversacion: lineas.join('\\n'), ultimo: ultimo } }];"
+        "jsCode": "const webhook = $('Webhook Respuesta WA').first().json;\nconst wBody = webhook.body || webhook;\nconst wData = wBody.data || wBody;\n\n// Los envoltorios de WhatsApp ANIDAN: en un chat con mensajes temporales, una foto\n// de un solo uso llega como ephemeralMessage.message.viewOnceMessageV2.message.\n// Por eso se desenvuelve en bucle y no con una cadena de ?? de un nivel.\nfunction desenvolver(m) {\n  let cur = m || {};\n  for (let i = 0; i < 5; i++) {\n    const w = cur.ephemeralMessage || cur.viewOnceMessage || cur.viewOnceMessageV2\n      || cur.viewOnceMessageV2Extension || cur.documentWithCaptionMessage;\n    if (!w || !w.message) break;\n    cur = w.message;\n  }\n  return cur;\n}\n\nfunction texto(msg) {\n  const m = desenvolver(msg);\n  if (!m) return null;\n  if (m.conversation) return m.conversation;\n  if (m.extendedTextMessage && m.extendedTextMessage.text) return m.extendedTextMessage.text;\n  if (m.imageMessage && m.imageMessage.caption) return m.imageMessage.caption;\n  if (m.videoMessage && m.videoMessage.caption) return m.videoMessage.caption;\n  if (m.documentMessage && m.documentMessage.caption) return m.documentMessage.caption;\n  // La reaccion lleva el emoji en .text: un pulgar arriba es un 'si' que no hay que perder.\n  if (m.reactionMessage && m.reactionMessage.text) return m.reactionMessage.text;\n  if (m.buttonsResponseMessage && m.buttonsResponseMessage.selectedDisplayText) return m.buttonsResponseMessage.selectedDisplayText;\n  if (m.listResponseMessage && m.listResponseMessage.title) return m.listResponseMessage.title;\n  if (m.audioMessage) return '[nota de voz]';\n  if (m.imageMessage) return '[foto]';\n  if (m.videoMessage) return '[video]';\n  if (m.documentMessage) return '[documento]';\n  if (m.locationMessage) return '[ubicacion]';\n  if (m.contactMessage || m.contactsArrayMessage) return '[contacto]';\n  if (m.stickerMessage) return '[sticker]';\n  return null;\n}\n\nconst entrante = texto(wData.message);\n\n// Historial de la conversacion. Si Evolution falla no se aborta: se clasifica el\n// mensaje suelto, que es lo unico que hacia el flujo anterior de todas formas.\nconst registros = [];\nfor (const it of $input.all()) {\n  const j = it.json || {};\n  const lista = (j.messages && j.messages.records) || j.records || (Array.isArray(j) ? j : []);\n  if (Array.isArray(lista)) for (const m of lista) registros.push(m);\n}\n\nconst hilo = registros\n  .filter(function (m) { return m && m.key; })\n  .map(function (m) {\n    return {\n      ts: Number(m.messageTimestamp || 0),\n      quien: m.key.fromMe ? 'Agente' : 'Propietario',\n      txt: texto(m.message),\n    };\n  })\n  .filter(function (m) { return m.txt; })\n  .sort(function (a, b) { return a.ts - b.ts; })\n  .slice(-8);\n\nconst lineas = hilo.map(function (m) { return m.quien + ': ' + m.txt; });\nconst ultimo = entrante || (hilo.length ? hilo[hilo.length - 1].txt : null);\n\n// Nunca se lanza un throw: perder la respuesta de un propietario por un tipo de\n// mensaje raro es mucho peor que clasificarla como 'Respondido'.\nif (!ultimo) {\n  return [{ json: { conversacion: 'Propietario: [mensaje no textual]', ultimo: '[mensaje no textual]', hilo: [] } }];\n}\n\nif (!lineas.length || lineas[lineas.length - 1] !== 'Propietario: ' + ultimo) {\n  lineas.push('Propietario: ' + ultimo);\n  // El mensaje que acaba de entrar suele llegar antes de que Evolution lo guarde,\n  // asi que no viene en el historial. Se anade tambien al hilo estructurado: es\n  // justo el mensaje por el que se dispara el aviso, no puede faltar en la imagen.\n  hilo.push({ ts: Math.floor(Date.now() / 1000), quien: 'Propietario', txt: ultimo });\n}\n\nreturn [{ json: { conversacion: lineas.join('\\n'), ultimo: ultimo, hilo: hilo } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -248,7 +248,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const salida = $input.first().json || {};\nconst bruto = String(salida.text || salida.output || '').trim();\n\nconst validos = ['No_Interesado', 'Interesado', 'Quiere_Llamada', 'Respondido'];\nconst clasificacion = validos.find(function (v) { return bruto === v; })\n  || validos.find(function (v) { return bruto.indexOf(v) !== -1; })\n  || 'Respondido';\n\nconst cap = $('Elegir Captacion').first().json;\n\n// Un clasificador automatico no puede deshacer el trabajo del agente. Si la captacion\n// ya avanzo mas alla de Contactado/Interesado (Propuesta, Negociacion, Ganado), solo\n// se registra la senal de WhatsApp y se deja el estado del CRM como esta: un\n// 'no, el jueves no puedo' en mitad de una negociacion no es una captacion perdida.\nconst WA_A_CRM = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido' };\nconst EDITABLES = ['Nuevo', 'Contactado', 'Interesado', 'Perdido'];\nconst actual = cap.estado_crm || 'Nuevo';\n\nconst update = { estado_whatsapp: clasificacion };\nlet crmNuevo = null;\nif (WA_A_CRM[clasificacion] && EDITABLES.indexOf(actual) !== -1) {\n  crmNuevo = WA_A_CRM[clasificacion];\n  update.estado_crm = crmNuevo;\n}\n\nconst WA_A_LEAD = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido', Respondido: 'Contactado' };\n\nreturn [{\n  json: {\n    captacion_id: cap.captacion_id,\n    nombre: cap.nombre || 'Propietario',\n    telefono: cap.telefono,\n    clasificacion: clasificacion,\n    update: update,\n    estado_crm_anterior: actual,\n    estado_crm_nuevo: crmNuevo,\n    estado_wa_anterior: cap.estado_whatsapp || null,\n    lead_estado: WA_A_LEAD[clasificacion] || 'Contactado',\n    ambigua: cap.ambigua === true,\n  },\n}];"
+        "jsCode": "const salida = $input.first().json || {};\nconst bruto = String(salida.text || salida.output || '').trim();\n\nconst validos = ['No_Interesado', 'Interesado', 'Quiere_Llamada', 'Respondido'];\nconst clasificacion = validos.find(function (v) { return bruto === v; })\n  || validos.find(function (v) { return bruto.indexOf(v) !== -1; })\n  || 'Respondido';\n\nconst cap = $('Elegir Captacion').first().json;\n\n// Un clasificador automatico no puede deshacer el trabajo del agente. Si la captacion\n// ya avanzo mas alla de Contactado/Interesado (Propuesta, Negociacion, Ganado), solo\n// se registra la senal de WhatsApp y se deja el estado del CRM como esta: un\n// 'no, el jueves no puedo' en mitad de una negociacion no es una captacion perdida.\nconst WA_A_CRM = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido' };\nconst EDITABLES = ['Nuevo', 'Contactado', 'Interesado', 'Perdido'];\nconst actual = cap.estado_crm || 'Nuevo';\n\nconst update = { estado_whatsapp: clasificacion };\nlet crmNuevo = null;\nif (WA_A_CRM[clasificacion] && EDITABLES.indexOf(actual) !== -1) {\n  crmNuevo = WA_A_CRM[clasificacion];\n  update.estado_crm = crmNuevo;\n}\n\nconst WA_A_LEAD = { Interesado: 'Interesado', Quiere_Llamada: 'Interesado', No_Interesado: 'Perdido', Respondido: 'Contactado' };\n\n// Se avisa cuando la captacion SE VUELVE caliente, no en cada mensaje posterior.\n// Un propietario ya marcado Interesado que escribe tres veces mas generaria tres\n// avisos identicos, y a partir del segundo se dejan de mirar.\nconst CALIENTES = ['Interesado', 'Quiere_Llamada'];\nconst antes = cap.estado_whatsapp || null;\n// La escalada si vuelve a avisar: pasar de 'me interesa' a 'llamame' es una\n// peticion nueva que alguien tiene que atender hoy, no un mensaje mas del hilo.\nconst escalada = clasificacion === 'Quiere_Llamada' && antes === 'Interesado';\nconst avisar = CALIENTES.indexOf(clasificacion) !== -1 &&\n  (CALIENTES.indexOf(antes) === -1 || escalada);\n\nreturn [{\n  json: {\n    captacion_id: cap.captacion_id,\n    nombre: cap.nombre || 'Propietario',\n    telefono: cap.telefono,\n    clasificacion: clasificacion,\n    update: update,\n    estado_crm_anterior: actual,\n    estado_crm_nuevo: crmNuevo,\n    estado_wa_anterior: cap.estado_whatsapp || null,\n    avisar: avisar,\n    lead_estado: WA_A_LEAD[clasificacion] || 'Contactado',\n    ambigua: cap.ambigua === true,\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -444,7 +444,7 @@
           "conditions": [
             {
               "id": "wf5-if-caliente-c1",
-              "leftValue": "={{ ['Interesado', 'Quiere_Llamada'].indexOf($('Aplicar Clasificacion').first().json.clasificacion) !== -1 }}",
+              "leftValue": "={{ $('Aplicar Clasificacion').first().json.avisar === true }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -466,7 +466,54 @@
       ],
       "id": "wf5-if-caliente",
       "name": "Lead Caliente?",
-      "notes": "Solo los dos estados que exigen que alguien coja el telefono. Un \"Respondido\" o un \"No_Interesado\" no avisan: si el correo llega por todo, se deja de leer."
+      "notes": "La decision se calcula en \"Aplicar Clasificacion\" y aqui solo se lee. Avisa cuando la captacion SE VUELVE Interesado o Quiere_Llamada, no en cada mensaje posterior: antes miraba solo la clasificacion nueva, asi que un propietario ya marcado Interesado que escribiera cuatro veces generaba cuatro avisos identicos. La subida de Interesado a Quiere_Llamada si vuelve a avisar."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monta las dos versiones del aviso: el pie corto que acompana a la imagen de la\n// conversacion y el mensaje largo con la conversacion escrita, que es lo que se\n// manda mientras el CRM no este desplegado o si el dibujo falla.\nconst a = $('Aplicar Clasificacion').first().json;\nconst c = $('Elegir Captacion').first().json;\nlet h = { hilo: [], ultimo: '' };\ntry { h = $('Montar Hilo').first().json || h; } catch (e) { /* sin historial */ }\n\nconst DESTINO = '34673298925';\nconst CRM = '';\n\n// Sin expresiones regulares donde se pueda: este codigo se genera desde otro\n// JavaScript y cada barra invertida hay que doblarla; ya se han perdido tres veces.\nfunction soloDigitos(v) {\n  const t = String(v == null ? '' : v);\n  let o = '';\n  for (let i = 0; i < t.length; i++) { const ch = t.charAt(i); if (ch >= '0' && ch <= '9') o += ch; }\n  return o;\n}\nfunction telBonito(t) {\n  if (t.length === 11 && t.indexOf('34') === 0) return '+34 ' + t.slice(2, 5) + ' ' + t.slice(5, 8) + ' ' + t.slice(8);\n  return t ? '+' + t : '';\n}\nfunction eur(n) { return n == null || n === '' ? null : Number(n).toLocaleString('es-ES'); }\nfunction hora(ts) {\n  if (!ts) return '';\n  try {\n    return new Intl.DateTimeFormat('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit' })\n      .format(new Date(Number(ts) * 1000));\n  } catch (e) { return ''; }\n}\n\nconst TIPO = { homes: 'Vivienda', premises: 'Local', offices: 'Oficina', garages: 'Plaza de garaje', lands: 'Terreno', storageRooms: 'Trastero', rooms: 'Habitacion' };\nconst tipo = TIPO[c.tipo] || 'Inmueble';\nconst enAlquiler = c.operacion === 'rent';\nconst operacion = enAlquiler ? 'en alquiler' : 'en venta';\nconst zona = String(c.barrio || '').replace(/^(Sub)?[Dd]istrict /, '').trim();\nconst urgente = a.clasificacion === 'Quiere_Llamada';\nconst ETIQUETA = urgente ? 'PIDE QUE LE LLAMEN' : 'PROPIETARIO INTERESADO';\nconst TITULAR = (urgente ? '\\u260E ' : '\\u2605 ') + '*' + ETIQUETA + '*';\n\nconst tel = soloDigitos(a.telefono);\n\n// Lo primero, a quien hay que llamar y por que. La ficha del inmueble, debajo.\nconst ficha = ['*' + (a.nombre || 'Propietario') + '*'];\nif (tel) ficha.push(telBonito(tel));\nficha.push(tipo + ' ' + operacion + (zona ? ' \\u00b7 ' + zona : ''));\nconst detalle = [];\nif (eur(c.precio)) detalle.push(eur(c.precio) + ' \\u20ac' + (enAlquiler ? '/mes' : ''));\nif (c.metros) detalle.push(c.metros + ' m²');\nif (c.habitaciones) detalle.push(c.habitaciones + ' hab.');\nif (detalle.length) ficha.push(detalle.join(' \\u00b7 '));\nif (c.calle) ficha.push(c.calle);\n\nconst pie = [];\nif (c.url) pie.push(c.url);\npie.push('_Captacion ' + (a.captacion_id || '') + ' \\u00b7 bot de captacion de Idealista_');\n\n// Con imagen el pie va corto: WhatsApp esconde los pies largos tras un 'Leer mas'\n// y el telefono es lo primero que hay que poder tocar.\nconst caption = [TITULAR, '', ficha.join('\\n'), '', pie.join('\\n')].join('\\n');\n\n// Quien habla, en negrita. En un hilo de cuatro o cinco mensajes citados el ojo\n// necesita un ancla para saber de quien es cada linea sin releerla entera.\nconst lineasChat = (h.hilo || []).map(function (m) {\n  return '> *' + (m.quien === 'Agente' ? 'Nosotros:' : 'El propietario:') + '* ' +\n    String(m.txt || '').split('\\n').join(' ');\n});\nconst bloques = [TITULAR, '', ficha.join('\\n')];\nif (lineasChat.length) bloques.push('', '*La conversacion*', lineasChat.join('\\n'));\nbloques.push('', pie.join('\\n'));\nconst texto = bloques.join('\\n');\n\nconst mensajes = (h.hilo || []).map(function (m) {\n  return { quien: m.quien, txt: String(m.txt || ''), hora: hora(m.ts) };\n});\n\nreturn [{ json: {\n  numero: DESTINO,\n  caption: caption,\n  texto: texto,\n  // La imagen lleva SOLO la conversacion. El nombre, el telefono, el inmueble y\n  // el enlace van en el pie, donde el telefono se puede pulsar para llamar y el\n  // enlace se abre; dentro de la foto serian pixeles.\n  imagen: { mensajes: mensajes },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        -560
+      ],
+      "id": "wf5-prep-wa",
+      "name": "Preparar Aviso WA",
+      "notes": "Arma el aviso y prepara la conversacion para dibujarla. El destino y la URL del CRM son constantes del generador: cambiarlas es una linea y volver a subir el workflow."
+    },
+    {
+      "parameters": {
+        "options": {
+          "timeout": 30000
+        },
+        "method": "POST",
+        "url": "https://test-evolution-api.pzkz6e.easypanel.host/message/sendText/demo",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('Preparar Aviso WA').first().json.numero, text: $('Preparar Aviso WA').first().json.texto }) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3520,
+        -560
+      ],
+      "id": "wf5-wa-texto",
+      "name": "Aviso WhatsApp",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "EVOLUTION_API",
+          "name": "Evolution API (apikey)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Lee de \"Preparar Aviso WA\" por nombre y no de $json: el nodo anterior devuelve binario y $json llega vacio. onError continua: que falle el aviso no puede tumbar la clasificacion, que ya esta guardada."
     },
     {
       "parameters": {
@@ -766,6 +813,22 @@
         [
           {
             "node": "Aviso Lead Caliente",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Preparar Aviso WA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Aviso WA": {
+      "main": [
+        [
+          {
+            "node": "Aviso WhatsApp",
             "type": "main",
             "index": 0
           }

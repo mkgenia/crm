@@ -2,7 +2,8 @@
 
 import Link from "next/link"
 import { useState } from "react"
-import { Users, Building2, UserCircle, TrendingUp } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { Users, Building2, UserCircle, TrendingUp, Globe, Radar, Share2, QrCode, Inbox, Heart } from "lucide-react"
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
@@ -33,6 +34,14 @@ function timeAgo(date: string) {
 }
 
 export interface AdminData {
+  origenes: {
+    web: { total: number; mes: number }
+    scraper: { total: number; mes: number }
+    rrss: { total: number; mes: number }
+    qr: { total: number; mes: number }
+    otros: number
+  }
+  demandas: { total: number; sinVer: number; esteMes: number; cualificadas: number }
   leads: number
   leadsEsteMes: number
   captaciones: number
@@ -85,6 +94,53 @@ export default function AdminDashboard({ nombre, saludo, data }: {
           sub={`${data.tasaGlobal}% tasa de respuesta`} />
         <KpiCard href="/equipo" icon={Users} label="Agentes" value={data.usuarios}
           sub="en el sistema" />
+      </div>
+
+      {/* De dónde entra cada lead. Una tarjeta por canal, incluidos los que aún no
+          producen nada: ver el hueco es la mitad de la información. */}
+      <div>
+        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
+          De dónde entran los leads
+        </h2>
+        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+          <OrigenCard
+            href="/leads" icon={Globe} label="Formularios web"
+            total={data.origenes.web.total} mes={data.origenes.web.mes}
+            color="text-cyan-500" borde="border-cyan-500/25"
+          />
+          <OrigenCard
+            href="/captaciones" icon={Radar} label="Scraper"
+            total={data.origenes.scraper.total} mes={data.origenes.scraper.mes}
+            color="text-violet-500" borde="border-violet-500/25"
+          />
+          <OrigenCard
+            href="/galeria-rrss" icon={Share2} label="Redes sociales"
+            total={data.origenes.rrss.total} mes={data.origenes.rrss.mes}
+            color="text-pink-500" borde="border-pink-500/25" pendiente
+          />
+          <OrigenCard
+            href="/galeria-qr" icon={QrCode} label="Códigos QR"
+            total={data.origenes.qr.total} mes={data.origenes.qr.mes}
+            color="text-amber-500" borde="border-amber-500/25" pendiente
+          />
+          <OrigenCard
+            href="/demandas" icon={Inbox} label="Demandas"
+            total={data.demandas.total} mes={data.demandas.esteMes}
+            color="text-emerald-500" borde="border-emerald-500/25"
+            extra={data.demandas.sinVer > 0 ? `${data.demandas.sinVer} sin ver` : undefined}
+          />
+          <OrigenCard
+            href="/matches" icon={Heart} label="Matches"
+            total={null} mes={0}
+            color="text-rose-500" borde="border-rose-500/25" pendiente
+          />
+        </div>
+        {data.origenes.otros > 0 && (
+          <p className="text-[11px] text-muted-foreground/70 mt-2">
+            {data.origenes.otros} lead{data.origenes.otros > 1 ? "s" : ""} con un origen que no encaja en
+            ninguno de estos canales.
+          </p>
+        )}
       </div>
 
       <div>
@@ -154,6 +210,56 @@ export default function AdminDashboard({ nombre, saludo, data }: {
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * Tarjeta de canal. Un canal que todavía no produce nada se pinta igual pero
+ * apagado y con la etiqueta: saber que RRSS está a cero es tan útil como saber que
+ * el scraper trae 838, y esconderlo daría la impresión de que no existe.
+ */
+function OrigenCard({ href, icon: Icon, label, total, mes, color, borde, pendiente, extra }: {
+  href: string
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  total: number | null
+  mes: number
+  color: string
+  borde: string
+  pendiente?: boolean
+  extra?: string
+}) {
+  return (
+    <Link
+      href={href}
+      className={cn(
+        "rounded-xl border bg-card p-4 flex flex-col gap-2 transition-all hover:bg-muted/30",
+        pendiente ? "border-border" : borde,
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <Icon className={cn("h-4 w-4 shrink-0", pendiente ? "text-muted-foreground/40" : color)} />
+        <span className="text-xs font-medium text-muted-foreground truncate">{label}</span>
+      </div>
+
+      {total === null ? (
+        <p className="text-[11px] text-muted-foreground/60 leading-snug">En desarrollo</p>
+      ) : (
+        <>
+          <p className={cn(
+            "text-2xl font-semibold tabular-nums leading-none",
+            total === 0 ? "text-muted-foreground/40" : "text-foreground",
+          )}>
+            {total}
+          </p>
+          <p className="text-[11px] text-muted-foreground/70 leading-snug">
+            {extra ?? (total === 0
+              ? (pendiente ? "Aún sin usar" : "Sin registros")
+              : mes > 0 ? `+${mes} este mes` : "sin altas este mes")}
+          </p>
+        </>
+      )}
+    </Link>
   )
 }
 

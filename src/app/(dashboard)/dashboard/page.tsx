@@ -13,14 +13,15 @@ async function getAdminData(): Promise<AdminData> {
 
   const hace30dias = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
-  const [leadsRes, capsRes, usuariosRes, recientesRes, capsHistRes, leadsHistRes] = await Promise.all([
-    supabase.from("leads").select("id, estado, fecha_creacion, captado_por", { count: "exact" }),
+  const [leadsRes, capsRes, usuariosRes, recientesRes, capsHistRes, leadsHistRes, demandasRes] = await Promise.all([
+    supabase.from("leads").select("id, estado, fecha_creacion, captado_por, fuente", { count: "exact" }),
     supabase.from("captaciones").select("id, activo, agente_id, estado_whatsapp", { count: "exact" }),
     supabase.from("perfiles").select("id, nombre, apellidos, rol"),
     supabase.from("leads").select("id, nombre, apellidos, fuente, estado, fecha_creacion")
       .order("fecha_creacion", { ascending: false }).limit(6),
     supabase.from("captaciones").select("created_at").gte("created_at", hace30dias),
     supabase.from("leads").select("fecha_creacion").gte("fecha_creacion", hace30dias),
+    supabase.from("demandas").select("id, estado, visto, fecha_creacion", { count: "exact" }),
   ])
 
   const allLeads = leadsRes.data ?? []
@@ -47,7 +48,41 @@ async function getAdminData(): Promise<AdminData> {
 
   const interesadosTotal = allCaps.filter((c) => ["Interesado", "Quiere_Llamada"].includes(c.estado_whatsapp ?? "")).length
 
+  // De dónde entra cada lead. Los nombres de `fuente` los escriben workflows
+  // distintos y no hay CHECK que los sujete, así que se agrupan por familias y no
+  // por igualdad exacta: hoy conviven 'Captaciones', 'Web' y 'Propiedades', y
+  // mañana aparecerá otro. Lo que no encaje en ninguna familia cae en "otros" en
+  // vez de desaparecer de la suma.
+  const FAMILIAS: Record<string, string[]> = {
+    web: ["Web", "Propiedades", "Formulario", "Landing"],
+    scraper: ["Captaciones", "Captacion", "Captación"],
+    rrss: ["Instagram", "Facebook", "RRSS", "Redes"],
+    qr: ["QR", "Galeria QR", "Trasteros WhatsApp"],
+  }
+  const deFamilia = (fam: string) =>
+    allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "")).length
+  const deFamiliaMes = (fam: string) =>
+    allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "") && (l.fecha_creacion ?? "") >= inicioMes).length
+
+  const conocidas = Object.values(FAMILIAS).flat()
+  const otros = allLeads.filter((l) => !conocidas.includes(l.fuente ?? "")).length
+
+  const demandas = demandasRes.data ?? []
+
   return {
+    origenes: {
+      web: { total: deFamilia("web"), mes: deFamiliaMes("web") },
+      scraper: { total: deFamilia("scraper"), mes: deFamiliaMes("scraper") },
+      rrss: { total: deFamilia("rrss"), mes: deFamiliaMes("rrss") },
+      qr: { total: deFamilia("qr"), mes: deFamiliaMes("qr") },
+      otros,
+    },
+    demandas: {
+      total: demandasRes.count ?? 0,
+      sinVer: demandas.filter((d) => d.visto === false).length,
+      esteMes: demandas.filter((d) => (d.fecha_creacion ?? "") >= inicioMes).length,
+      cualificadas: demandas.filter((d) => d.estado === "Cualificado" || d.estado === "cualificado").length,
+    },
     leads: leadsRes.count ?? 0,
     leadsEsteMes: allLeads.filter((l) => l.fecha_creacion >= inicioMes).length,
     captaciones: capsRes.count ?? 0,

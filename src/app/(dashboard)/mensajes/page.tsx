@@ -1,5 +1,4 @@
-import { createClient } from "@/lib/supabase/server"
-import { redirect } from "next/navigation"
+import { exigirModulo } from "@/lib/auth/acceso"
 import { getConversaciones, getTelefonosAgente } from "@/lib/actions/mensajes"
 import { INSTANCIAS } from "@/lib/instancias"
 import { MensajesShell } from "@/components/mensajes/mensajes-shell"
@@ -8,17 +7,7 @@ import { MessageSquare } from "lucide-react"
 export const metadata = { title: "Mensajes — mkgenia" }
 
 export default async function MensajesPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect("/login")
-
-  const { data: perfil } = await supabase
-    .from("perfiles")
-    .select("rol")
-    .eq("id", user.id)
-    .single()
-
-  const isAdmin = perfil?.rol === "Admin"
+  const { userId, isAdmin } = await exigirModulo("mensajes")
 
   const chatsPorInstancia: Record<string, Awaited<ReturnType<typeof getConversaciones>>> = {}
   const errores: string[] = []
@@ -29,7 +18,7 @@ export default async function MensajesPage() {
         if (isAdmin) {
           chatsPorInstancia[id] = await getConversaciones(id)
         } else {
-          const telefonos = await getTelefonosAgente(user.id)
+          const telefonos = await getTelefonosAgente(userId)
           chatsPorInstancia[id] = await getConversaciones(id, telefonos)
         }
       } catch (e) {

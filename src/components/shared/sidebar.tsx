@@ -5,30 +5,87 @@ import Image from "next/image"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 import {
-  Home,
+  Sun,
+  Radar,
+  RefreshCw,
+  Share2,
+  QrCode,
+  LayoutTemplate,
   UserCircle,
-  MessageSquare,
   Building2,
+  Target,
+  Inbox,
+  Heart,
+  MessageSquare,
+  Calculator,
+  Bot,
+  Workflow,
+  UsersRound,
   Settings,
   LogOut,
-  UsersRound,
-  Inbox,
-  Calculator,
+  ChevronRight,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { useRouter } from "next/navigation"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { Permisos } from "@/types/database"
 
-const NAV_ITEMS = [
-  { href: "/dashboard",   icon: Home,          label: "Inicio",      permiso: "all" },
-  { href: "/captaciones", icon: Building2,     label: "Captaciones", permiso: "captaciones" as keyof Permisos },
-  { href: "/valorador",   icon: Calculator,    label: "Valorador",   permiso: "all" },
-  { href: "/leads",       icon: UserCircle,    label: "Leads",       permiso: "leads" as keyof Permisos },
-  { href: "/mensajes",    icon: MessageSquare, label: "Mensajes",    permiso: "mensajes" as keyof Permisos },
-  { href: "/demandas",    icon: Inbox,         label: "Demandas",    permiso: "all" },
-  { href: "/equipo",      icon: UsersRound,    label: "Equipo",      permiso: "admin" },
+/**
+ * El menú va agrupado por lo que el negocio hace, no por lo que el CRM tiene
+ * montado: primero de dónde salen los leads, luego el trabajo inmobiliario, y por
+ * último las tuercas. Varias entradas apuntan todavía a páginas en desarrollo; se
+ * dejan a la vista a propósito, para que el mapa completo se entienda desde el
+ * primer día en vez de ir apareciendo a trozos.
+ */
+type Item = {
+  href: string
+  icon: typeof Sun
+  label: string
+  permiso: "all" | "admin" | keyof Permisos
+  enDesarrollo?: boolean
+}
+
+/** Ocultar el enlace no protege la página: la puerta real está en
+ *  `exigirModulo()`, dentro de cada page.tsx. Esto sólo evita enseñar a un
+ *  agente una sección a la que no va a poder entrar. */
+
+const GRUPOS: Array<{ titulo: string | null; items: Item[] }> = [
+  {
+    titulo: null,
+    items: [
+      { href: "/dashboard", icon: Sun, label: "Mi día", permiso: "all" },
+    ],
+  },
+  {
+    titulo: "Generador de leads",
+    items: [
+      { href: "/captaciones", icon: Radar, label: "Scraper", permiso: "captaciones" },
+      { href: "/reactivacion", icon: RefreshCw, label: "Reactivación", permiso: "reactivacion", enDesarrollo: true },
+      { href: "/galeria-rrss", icon: Share2, label: "Galería RRSS", permiso: "galeria_rrss", enDesarrollo: true },
+      { href: "/galeria-qr", icon: QrCode, label: "Galería QR", permiso: "galeria_qr", enDesarrollo: true },
+      { href: "/landings", icon: LayoutTemplate, label: "Landings", permiso: "landings", enDesarrollo: true },
+    ],
+  },
+  {
+    titulo: "Inmobiliaria",
+    items: [
+      { href: "/contactos", icon: UserCircle, label: "Contactos", permiso: "leads", enDesarrollo: true },
+      { href: "/propiedades", icon: Building2, label: "Propiedades", permiso: "propiedades", enDesarrollo: true },
+      { href: "/prospectos", icon: Target, label: "Prospectos", permiso: "prospectos", enDesarrollo: true },
+      { href: "/demandas", icon: Inbox, label: "Demandas", permiso: "demandas" },
+      { href: "/matches", icon: Heart, label: "Matches", permiso: "matches", enDesarrollo: true },
+      { href: "/mensajes", icon: MessageSquare, label: "Mensajes", permiso: "mensajes" },
+      { href: "/valorador", icon: Calculator, label: "Valorador", permiso: "valorador" },
+    ],
+  },
+  {
+    titulo: "Automatización & IA",
+    items: [
+      { href: "/agentes-ia", icon: Bot, label: "Agentes IA", permiso: "admin", enDesarrollo: true },
+      { href: "/workflows", icon: Workflow, label: "Workflows", permiso: "admin", enDesarrollo: true },
+    ],
+  },
 ]
 
 interface SidebarProps {
@@ -38,6 +95,8 @@ interface SidebarProps {
   avatar_url?: string | null
 }
 
+const CLAVE_PLEGADOS = "mkgenia:menu-plegado"
+
 export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
@@ -45,6 +104,50 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   const [alertasWA, setAlertasWA] = useState(0)
   const [nuevasCaptaciones, setNuevasCaptaciones] = useState(0)
   const [nuevasDemandas, setNuevasDemandas] = useState(0)
+  const [plegados, setPlegados] = useState<Record<string, boolean>>({})
+  const [sombra, setSombra] = useState({ arriba: false, abajo: false })
+  const navRef = useRef<HTMLElement>(null)
+
+  // Se restaura en un efecto y no en el estado inicial: localStorage no existe
+  // en el servidor, y devolver un menú distinto al del HTML rompe la hidratación.
+  useEffect(() => {
+    try {
+      const guardado = localStorage.getItem(CLAVE_PLEGADOS)
+      if (guardado) setPlegados(JSON.parse(guardado) as Record<string, boolean>)
+    } catch {
+      /* modo incógnito o storage lleno: el menú se abre entero y ya está */
+    }
+  }, [])
+
+  function plegar(titulo: string) {
+    setPlegados((prev) => {
+      const siguiente = { ...prev, [titulo]: !prev[titulo] }
+      try { localStorage.setItem(CLAVE_PLEGADOS, JSON.stringify(siguiente)) } catch { /* idem */ }
+      return siguiente
+    })
+  }
+
+  // Los degradados de arriba y abajo sólo se pintan cuando hay algo escondido
+  // por ese lado. Un velo permanente sobre el primer o el último enlace los
+  // apagaría sin motivo en las pantallas donde el menú cabe entero.
+  const medirSombras = useCallback(() => {
+    const el = navRef.current
+    if (!el) return
+    setSombra({
+      arriba: el.scrollTop > 4,
+      abajo: el.scrollTop + el.clientHeight < el.scrollHeight - 4,
+    })
+  }, [])
+
+  useEffect(() => {
+    const el = navRef.current
+    if (!el) return
+    medirSombras()
+    const ro = new ResizeObserver(medirSombras)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [medirSombras, plegados])
 
   // Realtime badge: respuestas WA + detección de nuevas asignaciones (solo agentes)
   useEffect(() => {
@@ -75,12 +178,12 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
           await fetchCount()
 
           if (!isAdmin && uid) {
-            const newAgente = (payload.new as any)?.agente_id
-            const oldAgente = (payload.old as any)?.agente_id
+            const newAgente = (payload.new as { agente_id?: string })?.agente_id
+            const oldAgente = (payload.old as { agente_id?: string })?.agente_id
             if (newAgente === uid && oldAgente !== uid) {
               setNuevasCaptaciones((n) => n + 1)
               toast("Nueva captación asignada", {
-                description: (payload.new as any).calle ?? "El admin te ha asignado una propiedad",
+                description: (payload.new as { calle?: string }).calle ?? "El admin te ha asignado una propiedad",
                 action: {
                   label: "Ver",
                   onClick: () => router.push("/captaciones"),
@@ -126,12 +229,12 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
-  const visibleItems = NAV_ITEMS.filter((item) => {
+  const puedeVer = (item: Item) => {
     if (item.permiso === "all") return true
     if (item.permiso === "admin") return isAdmin
     if (isAdmin) return true
     return permisos[item.permiso as keyof Permisos]
-  })
+  }
 
   async function handleLogout() {
     const supabase = createClient()
@@ -147,60 +250,164 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-        {visibleItems.map(({ href, icon: Icon, label }) => {
-          const active = pathname === href || pathname.startsWith(href + "/")
-          const showBadge = href === "/captaciones" && alertasWA > 0
-          const showNuevas = href === "/captaciones" && !isAdmin && nuevasCaptaciones > 0 && alertasWA === 0
-          const showDemandas = href === "/demandas" && nuevasDemandas > 0
+      <div className="relative flex-1 min-h-0">
+        <nav
+          ref={navRef}
+          onScroll={medirSombras}
+          className="h-full px-3 py-4 overflow-y-auto overscroll-contain scrollbar-nav"
+        >
+        <div>
+        {GRUPOS.map((grupo, gi) => {
+          const items = grupo.items.filter(puedeVer)
+          if (!items.length) return null
+
+          const abierto = !grupo.titulo || !plegados[grupo.titulo]
+          const contieneActivo = items.some(
+            (i) => pathname === i.href || pathname.startsWith(i.href + "/")
+          )
+          const pendientes = items.reduce((n, i) => {
+            if (i.href === "/captaciones") return n + alertasWA
+            if (i.href === "/demandas") return n + nuevasDemandas
+            return n
+          }, 0)
 
           return (
-            <Link
-              key={href}
-              href={href}
-              className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-150",
-                active
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-                  : "text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60"
-              )}
-            >
-              <Icon className={cn("h-4 w-4 shrink-0", active && "holo-icon")} />
-              {label}
-              {showBadge && (
-                <span className="ml-auto flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="text-[10px] font-semibold text-emerald-400 tabular-nums">
-                    {alertasWA}
-                  </span>
-                </span>
-              )}
-              {showNuevas && (
-                <span
-                  className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-400 cursor-pointer"
-                  onClick={() => setNuevasCaptaciones(0)}
+            <div key={grupo.titulo ?? "inicio"} className={cn(gi > 0 && "mt-4")}>
+              {grupo.titulo && (
+                <button
+                  onClick={() => plegar(grupo.titulo!)}
+                  aria-expanded={abierto}
+                  className="w-full flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/40 hover:text-sidebar-foreground/70 hover:bg-sidebar-accent/40 transition-colors"
                 >
-                  {nuevasCaptaciones} nueva{nuevasCaptaciones > 1 ? "s" : ""}
-                </span>
+                  <ChevronRight
+                    className={cn(
+                      "h-3 w-3 shrink-0 transition-transform duration-200",
+                      abierto && "rotate-90"
+                    )}
+                  />
+                  <span className="truncate">{grupo.titulo}</span>
+
+                  {/* Plegado, el grupo tiene que seguir contando lo que pasa
+                      dentro: si no, cerrar "Generador de leads" apagaría el
+                      aviso de los 88 interesados sin que nadie lo decida. */}
+                  {!abierto && pendientes > 0 && (
+                    <span className="ml-auto text-[10px] font-semibold text-emerald-400 tabular-nums">
+                      {pendientes}
+                    </span>
+                  )}
+                  {!abierto && pendientes === 0 && contieneActivo && (
+                    <span className="ml-auto h-1.5 w-1.5 rounded-full bg-gradient-to-br from-[oklch(0.65_0.22_295)] to-[oklch(0.80_0.15_200)]" />
+                  )}
+                </button>
               )}
-              {showDemandas && (
-                <span className="ml-auto flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
-                  <span className="text-[10px] font-semibold text-violet-400 tabular-nums">
-                    {nuevasDemandas}
-                  </span>
-                </span>
-              )}
-              {!showBadge && !showNuevas && !showDemandas && active && (
-                <span className="ml-auto w-1 h-4 rounded-full bg-gradient-to-b from-[oklch(0.65_0.22_295)] via-[oklch(0.80_0.15_200)] to-[oklch(0.80_0.18_145)]" />
-              )}
-            </Link>
+              <div
+                className={cn(
+                  "grid transition-[grid-template-rows] duration-200 ease-out",
+                  abierto ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                )}
+              >
+              <div className="overflow-hidden">
+              {/* inert y no aria-hidden: un grupo plegado no puede seguir
+                  recibiendo el foco con el tabulador. */}
+              <div className="space-y-0.5 pt-0.5" inert={!abierto}>
+                {items.map(({ href, icon: Icon, label, enDesarrollo }) => {
+                  const active = pathname === href || pathname.startsWith(href + "/")
+                  const showBadge = href === "/captaciones" && alertasWA > 0
+                  const showNuevas = href === "/captaciones" && !isAdmin && nuevasCaptaciones > 0 && alertasWA === 0
+                  const showDemandas = href === "/demandas" && nuevasDemandas > 0
+
+                  return (
+                    <Link
+                      key={href}
+                      href={href}
+                      className={cn(
+                        "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-150",
+                        active
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                          : "text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60",
+                        enDesarrollo && !active && "text-sidebar-foreground/45",
+                      )}
+                    >
+                      <Icon className={cn("h-4 w-4 shrink-0", active && "holo-icon")} />
+                      <span className="truncate">{label}</span>
+
+                      {showBadge && (
+                        <span className="ml-auto flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[10px] font-semibold text-emerald-400 tabular-nums">
+                            {alertasWA}
+                          </span>
+                        </span>
+                      )}
+                      {showNuevas && (
+                        <span
+                          className="ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-400 cursor-pointer"
+                          onClick={() => setNuevasCaptaciones(0)}
+                        >
+                          {nuevasCaptaciones} nueva{nuevasCaptaciones > 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {showDemandas && (
+                        <span className="ml-auto flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
+                          <span className="text-[10px] font-semibold text-violet-400 tabular-nums">
+                            {nuevasDemandas}
+                          </span>
+                        </span>
+                      )}
+                      {/* Un punto, no la palabra: en un menú de quince entradas el texto
+                          "en desarrollo" repetido nueve veces se come la lectura. */}
+                      {enDesarrollo && !showBadge && !showNuevas && !showDemandas && (
+                        <span
+                          className="ml-auto h-1.5 w-1.5 rounded-full bg-sidebar-foreground/30 shrink-0"
+                          title="En desarrollo"
+                        />
+                      )}
+                      {!enDesarrollo && !showBadge && !showNuevas && !showDemandas && active && (
+                        <span className="ml-auto w-1 h-4 rounded-full bg-gradient-to-b from-[oklch(0.65_0.22_295)] via-[oklch(0.80_0.15_200)] to-[oklch(0.80_0.18_145)]" />
+                      )}
+                    </Link>
+                  )
+                })}
+              </div>
+              </div>
+              </div>
+            </div>
           )
         })}
-      </nav>
+        </div>
+        </nav>
+
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-sidebar to-transparent transition-opacity duration-200",
+            sombra.arriba ? "opacity-100" : "opacity-0"
+          )}
+        />
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-sidebar to-transparent transition-opacity duration-200",
+            sombra.abajo ? "opacity-100" : "opacity-0"
+          )}
+        />
+      </div>
 
       {/* Footer */}
       <div className="border-t border-sidebar-border px-3 py-3 space-y-0.5">
+        {isAdmin && (
+          <Link
+            href="/equipo"
+            className={cn(
+              "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all",
+              pathname.startsWith("/equipo")
+                ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                : "text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60",
+            )}
+          >
+            <UsersRound className="h-4 w-4 shrink-0" />
+            Equipo
+          </Link>
+        )}
         <Link
           href="/configuracion"
           className="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60 transition-all"

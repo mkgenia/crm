@@ -3,29 +3,18 @@ import { getAutoContactoConfig, getEstadoCola } from "@/lib/actions/captaciones-
 import { CaptacionesList } from "@/components/captaciones/captaciones-list"
 import { PapeleraList } from "@/components/captaciones/papelera-list"
 import { CaptacionesConfig } from "@/components/captaciones/captaciones-config"
-import { createClient } from "@/lib/supabase/server"
-import { redirect } from "next/navigation"
+import { exigirModulo } from "@/lib/auth/acceso"
 
 export const metadata = { title: "Captaciones — mkgenia" }
 
 export default async function CaptacionesPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect("/login")
-
-  const { data: perfil } = await supabase
-    .from("perfiles")
-    .select("rol")
-    .eq("id", user.id)
-    .single()
-
-  const isAdmin = perfil?.rol === "Admin"
+  const { userId, isAdmin } = await exigirModulo("captaciones")
 
   const [captaciones, eliminadas, config, agentes, cola] = await Promise.all([
     isAdmin
       ? getCaptaciones(undefined, undefined, undefined, true)
-      : getCaptaciones(undefined, undefined, user.id),
-    isAdmin ? getCaptacionesEliminadas() : getCaptacionesEliminadasPorAgente(user.id),
+      : getCaptaciones(undefined, undefined, userId),
+    isAdmin ? getCaptacionesEliminadas() : getCaptacionesEliminadasPorAgente(userId),
     isAdmin ? getAutoContactoConfig() : null,
     isAdmin ? getAgentes() : [],
     isAdmin ? getEstadoCola() : { enCola: 0, enviadasHoy: 0 },

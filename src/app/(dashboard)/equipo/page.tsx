@@ -1,5 +1,6 @@
 import { createClient, createAdminClient } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
+import { resolverPermisos } from "@/types/database"
 import { InvitarUsuarioDialog } from "./invitar-usuario-dialog"
 import { MemberCard } from "./member-card"
 
@@ -19,6 +20,7 @@ async function getEquipo() {
     const misLeads = (leads ?? []).filter((l) => l.captado_por === p.id)
     return {
       ...p,
+      permisos: resolverPermisos(p.permisos),
       captaciones_total:       misCaptaciones.length,
       captaciones_pendientes:  misCaptaciones.filter((c) => c.estado_agenda === "pendiente").length,
       captaciones_completadas: misCaptaciones.filter((c) => c.estado_agenda === "completado").length,

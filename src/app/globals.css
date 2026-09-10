@@ -293,3 +293,37 @@ svg.leaflet-zoom-animated:focus {
   background: oklch(1 0 0 / 40%);
   background-clip: padding-box;
 }
+
+/* ── Scroll del menú lateral ────────────────────────────────────────────────
+   El ancho no cambia nunca (6px reservados siempre que haya scroll): lo que
+   aparece al pasar el ratón es sólo el color del pulgar. Así el menú no se
+   reajusta lateralmente cada vez que el cursor entra o sale, que era justo lo
+   que hacía la barra por defecto del navegador. */
+.scrollbar-nav {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-nav:hover,
+.scrollbar-nav:focus-within {
+  scrollbar-color: oklch(1 0 0 / 16%) transparent;
+}
+.scrollbar-nav::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-nav::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+.scrollbar-nav:hover::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 16%);
+  background-clip: padding-box;
+}
+.scrollbar-nav::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 32%);
+  background-clip: padding-box;
+}

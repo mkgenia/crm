@@ -2,7 +2,7 @@
 
 import { createClient, createAdminClient } from "@/lib/supabase/server"
 import { revalidatePath } from "next/cache"
-import type { Permisos } from "@/types/database"
+import { PERMISOS_DEFAULT, resolverPermisos, type Permisos } from "@/types/database"
 
 export async function completarOnboarding() {
   const supabase = await createClient()
@@ -64,7 +64,7 @@ export async function actualizarPermisos(userId: string, permisos: Permisos) {
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("perfiles")
-    .update({ permisos })
+    .update({ permisos: resolverPermisos(permisos) })
     .eq("id", userId)
 
   if (error) return { error: error.message }
@@ -116,7 +116,7 @@ export async function invitarUsuario(formData: FormData) {
     nombre,
     apellidos,
     rol,
-    permisos: { leads: true, mensajes: true, captaciones: true },
+    permisos: PERMISOS_DEFAULT,
   })
 
   revalidatePath("/equipo")
