@@ -12,6 +12,7 @@ import {
   QrCode,
   LayoutTemplate,
   UserCircle,
+  Contact,
   Building2,
   Target,
   Inbox,
@@ -70,7 +71,11 @@ const GRUPOS: Array<{ titulo: string | null; items: Item[] }> = [
   {
     titulo: "Inmobiliaria",
     items: [
-      { href: "/contactos", icon: UserCircle, label: "Contactos", permiso: "leads", enDesarrollo: true },
+      { href: "/leads", icon: UserCircle, label: "Leads", permiso: "leads" },
+      // Contactos es a donde va a ir Leads cuando exista: la ficha única de cada
+      // persona. Conviven a propósito — la atenuada es la que viene, la otra es
+      // donde se trabaja hoy.
+      { href: "/contactos", icon: Contact, label: "Contactos", permiso: "leads", enDesarrollo: true },
       { href: "/propiedades", icon: Building2, label: "Propiedades", permiso: "propiedades", enDesarrollo: true },
       { href: "/prospectos", icon: Target, label: "Prospectos", permiso: "prospectos", enDesarrollo: true },
       { href: "/demandas", icon: Inbox, label: "Demandas", permiso: "demandas" },

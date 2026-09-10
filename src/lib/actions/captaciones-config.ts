@@ -2,6 +2,13 @@
 
 import { createAdminClient } from "@/lib/supabase/server"
 import { revalidatePath } from "next/cache"
+import {
+  AVISO_EMAILS_DEFECTO,
+  AVISO_TELEFONOS_DEFECTO,
+  comoLista,
+  normalizarEmail,
+  normalizarTelefono,
+} from "@/lib/avisos"
 
 export interface ApifyUso {
   gastado: number
@@ -56,7 +63,14 @@ export async function getAutoContactoConfig() {
     supabase
       .from("app_settings")
       .select("key, value")
-      .in("key", ["auto_contact_enabled", "wa_limite_diario", "wa_ritmo", "apify_uso_mes"]),
+      .in("key", [
+        "auto_contact_enabled",
+        "wa_limite_diario",
+        "wa_ritmo",
+        "apify_uso_mes",
+        "aviso_emails",
+        "aviso_telefonos",
+      ]),
     // `*` y no una lista de columnas: si se pidieran por nombre, la página entera
     // reventaría con un 400 en el hueco entre desplegar esto y ejecutar la
     // migración 004, que es justo cuando más se mira.
@@ -81,6 +95,10 @@ export async function getAutoContactoConfig() {
     limiteDiario: comoNum(valor("wa_limite_diario"), 25),
     ritmo: (String(valor("wa_ritmo") ?? "normal").replace(/"/g, "") as Ritmo),
     uso,
+    avisos: {
+      emails: comoLista(valor("aviso_emails"), AVISO_EMAILS_DEFECTO),
+      telefonos: comoLista(valor("aviso_telefonos"), AVISO_TELEFONOS_DEFECTO),
+    },
     zonas: (zonas ?? []) as ZonaScraper[],
   }
 }
@@ -261,4 +279,30 @@ export async function setRitmo(ritmo: Ritmo) {
   if (error) return { error: error.message }
   revalidatePath("/captaciones")
   return { success: true }
+}
+
+/* A quién se avisa cuando un propietario se interesa. Los validadores y los
+ * valores por defecto viven en @/lib/avisos: este fichero es "use server" y sólo
+ * puede exportar funciones async. */
+
+export async function setAvisoEmails(emails: string[]) {
+  const limpios = [...new Set(emails.map(normalizarEmail).filter((x): x is string => !!x))].slice(0, 10)
+  const supabase = await createAdminClient()
+  const { error } = await supabase
+    .from("app_settings")
+    .upsert({ key: "aviso_emails", value: limpios }, { onConflict: "key" })
+  if (error) return { error: error.message }
+  revalidatePath("/captaciones")
+  return { success: true, emails: limpios }
+}
+
+export async function setAvisoTelefonos(telefonos: string[]) {
+  const limpios = [...new Set(telefonos.map(normalizarTelefono).filter((x): x is string => !!x))].slice(0, 10)
+  const supabase = await createAdminClient()
+  const { error } = await supabase
+    .from("app_settings")
+    .upsert({ key: "aviso_telefonos", value: limpios }, { onConflict: "key" })
+  if (error) return { error: error.message }
+  revalidatePath("/captaciones")
+  return { success: true, telefonos: limpios }
 }

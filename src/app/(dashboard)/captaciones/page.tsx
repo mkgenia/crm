@@ -45,6 +45,7 @@ export default async function CaptacionesPage() {
             ritmo={config.ritmo}
             uso={config.uso}
             cola={cola}
+            avisos={config.avisos}
           />
         )}
       </div>

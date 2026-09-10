@@ -14,6 +14,7 @@ import {
   type ApifyUso, type Operacion, type TipoInmueble, type TipoZona, type Ritmo,
 } from "@/lib/actions/captaciones-config"
 import { encodePolyline } from "./polyline"
+import { AvisosDestinos } from "./avisos-destinos"
 
 // Estas dos listas son las que hacen que una zona nueva se pueda crear desde aquí
 // sin tocar n8n: de ellas salen el segmento de la URL de Idealista y el
@@ -86,6 +87,7 @@ interface Props {
   ritmo: Ritmo
   uso: ApifyUso | null
   cola: { enCola: number; enviadasHoy: number }
+  avisos: { emails: string[]; telefonos: string[] }
 }
 
 function fmtHace(iso?: string | null) {
@@ -105,6 +107,7 @@ export function CaptacionesConfig({
   ritmo: initialRitmo,
   uso,
   cola,
+  avisos,
 }: Props) {
   const [open, setOpen] = useState(false)
   const [enabled, setEnabled] = useState(initialEnabled)
@@ -432,6 +435,8 @@ export function CaptacionesConfig({
                 </div>
               </div>
             </section>
+
+            <AvisosDestinos emails={avisos.emails} telefonos={avisos.telefonos} />
 
             {/* Presupuesto Apify */}
             <section className="space-y-3">
