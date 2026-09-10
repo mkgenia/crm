@@ -80,7 +80,7 @@
         "options": {
           "timeout": 15000
         },
-        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?telefono=ilike.*{{ $json.sufijo }}&or=(estado_whatsapp.not.is.null,ultimo_contacto_en.not.is.null)&activo=eq.true&select=id,nombre,telefono,estado_crm,estado_whatsapp&order=ultimo_contacto_en.desc.nullslast,created_at.desc&limit=2",
+        "url": "=https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/captaciones?telefono=ilike.*{{ $json.sufijo }}&or=(estado_whatsapp.not.is.null,ultimo_contacto_en.not.is.null)&activo=eq.true&select=id,nombre,telefono,estado_crm,estado_whatsapp,barrio,calle,precio,metros,habitaciones,url,operacion:raw_data->>operation,tipo:raw_data->>propertyType&order=ultimo_contacto_en.desc.nullslast,created_at.desc&limit=2",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpCustomAuth"
       },
@@ -106,7 +106,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const filas = $input.all().map(function (i) { return i.json; })\n  .filter(function (r) { return r && r.id != null; });\n\nif (!filas.length) return [{ json: { encontrada: false } }];\n\n// Se piden 2 filas a proposito. Si un particular tiene dos anuncios con el mismo\n// telefono no hay forma de saber por cual responde; el order de la consulta pone\n// primera la contactada mas recientemente, que es la que provoco la respuesta.\nconst cap = filas[0];\n\nreturn [{\n  json: {\n    encontrada: true,\n    captacion_id: cap.id,\n    nombre: cap.nombre,\n    telefono: cap.telefono,\n    estado_crm: cap.estado_crm,\n    estado_whatsapp: cap.estado_whatsapp,\n    ambigua: filas.length > 1,\n  },\n}];"
+        "jsCode": "const filas = $input.all().map(function (i) { return i.json; })\n  .filter(function (r) { return r && r.id != null; });\n\nif (!filas.length) return [{ json: { encontrada: false } }];\n\n// Se piden 2 filas a proposito. Si un particular tiene dos anuncios con el mismo\n// telefono no hay forma de saber por cual responde; el order de la consulta pone\n// primera la contactada mas recientemente, que es la que provoco la respuesta.\nconst cap = filas[0];\n\nreturn [{\n  json: {\n    encontrada: true,\n    captacion_id: cap.id,\n    nombre: cap.nombre,\n    telefono: cap.telefono,\n    estado_crm: cap.estado_crm,\n    estado_whatsapp: cap.estado_whatsapp,\n    ambigua: filas.length > 1,\n    // Datos del inmueble, para el aviso por correo cuando hay interes\n    barrio: cap.barrio || null,\n    calle: cap.calle || null,\n    precio: cap.precio || null,\n    metros: cap.metros || null,\n    habitaciones: cap.habitaciones || null,\n    url: cap.url || null,\n    operacion: cap.operacion || null,\n    tipo: cap.tipo || null,\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -434,6 +434,82 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "wf5-if-caliente-c1",
+              "leftValue": "={{ ['Interesado', 'Quiere_Llamada'].indexOf($('Aplicar Clasificacion').first().json.clasificacion) !== -1 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        -340
+      ],
+      "id": "wf5-if-caliente",
+      "name": "Lead Caliente?",
+      "notes": "Solo los dos estados que exigen que alguien coja el telefono. Un \"Respondido\" o un \"No_Interesado\" no avisan: si el correo llega por todo, se deja de leer."
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $('Aplicar Clasificacion').first().json;\nconst c = $('Elegir Captacion').first().json;\nlet dijo = '';\ntry { dijo = String($('Montar Hilo').first().json.ultimo || '').trim(); } catch (e) { dijo = ''; }\n\n// Escapar SIEMPRE: el nombre y sobre todo la respuesta son texto de un tercero.\nfunction esc(v) {\n  return String(v == null ? '' : v)\n    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\n}\nfunction eur(n) { return n == null ? null : Number(n).toLocaleString('es-ES') + ' EUR'; }\n\nconst TIPO = { homes: 'Vivienda', premises: 'Local', offices: 'Oficina', garages: 'Garaje', lands: 'Terreno', storageRooms: 'Trastero', rooms: 'Habitacion' };\nconst tipo = TIPO[c.tipo] || 'Inmueble';\nconst operacion = c.operacion === 'rent' ? 'alquiler' : 'venta';\nconst zona = String(c.barrio || '').replace(/^(Sub)?[Dd]istrict /, '');\nconst urgente = a.clasificacion === 'Quiere_Llamada';\n\nconst asunto = (urgente ? 'PIDE QUE LE LLAMEN' : 'Propietario interesado') +\n  ': ' + (a.nombre || 'sin nombre') + (zona ? ' (' + zona + ')' : '') +\n  ' - ' + tipo + ' en ' + operacion;\n\n// El telefono va como enlace tel: y como enlace de WhatsApp: desde el movil se\n// llama o se escribe de un toque, sin copiar el numero a mano.\nconst filas = [\n  ['Telefono', a.telefono ? '<a href=\"tel:+' + esc(a.telefono) + '\">+' + esc(a.telefono) + '</a> &nbsp; <a href=\"https://wa.me/' + esc(a.telefono) + '\">abrir WhatsApp</a>' : 'no consta'],\n  ['Inmueble', tipo + ' en ' + operacion],\n  ['Direccion', c.calle ? esc(c.calle) : 'no publicada en el anuncio'],\n  ['Zona', zona ? esc(zona) : 'no especificada'],\n  ['Precio', eur(c.precio) ? esc(eur(c.precio)) + (c.operacion === 'rent' ? '/mes' : '') : 'no especificado'],\n  ['Superficie', c.metros ? esc(c.metros) + ' m2' : null],\n  ['Habitaciones', c.habitaciones ? esc(c.habitaciones) : null],\n  ['Anuncio', c.url ? '<a href=\"' + esc(c.url) + '\">ver en Idealista</a>' : null],\n  // Sin enlace al CRM a proposito: hoy corre en localhost, asi que un enlace\n  // seria un enlace muerto desde el movil. Se deja la referencia para buscarla.\n  ['Referencia', esc(a.captacion_id)],\n].filter(function (f) { return f[1]; });\n\nconst html = [\n  '<div style=\"font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;max-width:560px;color:#111\">',\n  '<p style=\"margin:0 0 4px;font-size:13px;color:#666\">Captador automatico</p>',\n  '<h2 style=\"margin:0 0 16px;font-size:20px\">' + (urgente ? 'Ha pedido que le llamen' : 'Un propietario se ha interesado') + '</h2>',\n  '<p style=\"margin:0 0 6px;font-size:17px\"><strong>' + esc(a.nombre || 'Propietario') + '</strong></p>',\n  dijo ? '<blockquote style=\"margin:0 0 18px;padding:10px 14px;border-left:3px solid #ccc;background:#fafafa;font-size:15px\">' + esc(dijo) + '</blockquote>' : '',\n  '<table style=\"border-collapse:collapse;font-size:14px;width:100%\">',\n  filas.map(function (f) {\n    return '<tr><td style=\"padding:5px 12px 5px 0;color:#666;white-space:nowrap;vertical-align:top\">' + f[0] + '</td>' +\n           '<td style=\"padding:5px 0\">' + f[1] + '</td></tr>';\n  }).join(''),\n  '</table>',\n  '<p style=\"margin:18px 0 0;font-size:12px;color:#888\">Este aviso se envia solo cuando la respuesta se clasifica como Interesado o Quiere_Llamada.</p>',\n  '</div>',\n].join('');\n\nreturn [{ json: { asunto: asunto, html: html, captacion_id: a.captacion_id, clasificacion: a.clasificacion } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        -340
+      ],
+      "id": "wf5-prep-aviso",
+      "name": "Preparar Aviso",
+      "notes": "El cuerpo se arma aqui y no dentro del nodo de correo: un nombre con comillas rompia el HTML, y asi las lineas sin dato se omiten en vez de escribir \"null\"."
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@grupohogares.es",
+        "toEmail": "notificaciones@grupohogares.es",
+        "subject": "={{ $json.asunto }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        3520,
+        -340
+      ],
+      "id": "wf5-email",
+      "name": "Aviso Lead Caliente",
+      "credentials": {
+        "smtp": {
+          "id": "Ao5FKd0LE9QxuPzX",
+          "name": "SMTP [noreply]"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Misma credencial y mismo remitente que el resto de avisos internos. onError: que falle el correo no puede tumbar la clasificacion, que ya esta guardada."
+    },
+    {
+      "parameters": {
         "options": {
           "timeout": 15000
         },
@@ -656,6 +732,40 @@
         [
           {
             "node": "Registrar Historial",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar Historial": {
+      "main": [
+        [
+          {
+            "node": "Lead Caliente?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Caliente?": {
+      "main": [
+        [
+          {
+            "node": "Preparar Aviso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Preparar Aviso": {
+      "main": [
+        [
+          {
+            "node": "Aviso Lead Caliente",
             "type": "main",
             "index": 0
           }
