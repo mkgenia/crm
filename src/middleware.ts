@@ -23,7 +23,26 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  // Una cookie de sesión caducada, o de un despliegue anterior, hace que Supabase
+  // lance "Invalid Refresh Token: Refresh Token Not Found". Sin capturarla, la
+  // excepción sube hasta el runtime y llena el log del contenedor, aunque para el
+  // usuario el efecto correcto sea simplemente volver a /login. Se trata como
+  // "no hay sesión", que es lo que significa.
+  let user = null
+  try {
+    const { data } = await supabase.auth.getUser()
+    user = data.user
+  } catch {
+    user = null
+    // Y se tira la cookie que ha fallado. Sin esto el navegador la vuelve a mandar
+    // en cada petición y el error se repite indefinidamente: el log seguiría igual
+    // de sucio y el usuario no saldría nunca del bucle de /login.
+    for (const c of request.cookies.getAll()) {
+      if (c.name.startsWith("sb-") && c.name.includes("auth-token")) {
+        supabaseResponse.cookies.delete(c.name)
+      }
+    }
+  }
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login")
   const isDashboardRoute = !isAuthRoute && request.nextUrl.pathname !== "/"

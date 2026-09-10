@@ -74,14 +74,15 @@
         }
       },
       "alwaysOutputData": true,
+      "executeOnce": true,
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 2000,
-      "notes": "Cuenta tambien los envios manuales del CRM, asi que el tope diario es global y no solo del automatismo."
+      "notes": "Cuenta tambien los envios manuales del CRM, asi que el tope diario es global y no solo del automatismo. executeOnce es imprescindible: \"Leer Ajustes\" devuelve DOS filas (auto_contact_enabled y wa_limite_diario) y sin esto la consulta se lanzaba una vez por fila, de modo que el recuento del dia salia MULTIPLICADO POR DOS. Con 15 envios reales y el tope en 30 el sistema se creyo en el limite y dejo de escribir a media tarde."
     },
     {
       "parameters": {
-        "jsCode": "// Un unico punto de control del ritmo de envio. Nada mas manda WhatsApps.\nconst ajustes = {};\nfor (const it of $('Leer Ajustes').all()) {\n  const r = it.json || {};\n  if (r.key) ajustes[r.key] = r.value;\n}\n\nif (String(ajustes.auto_contact_enabled) !== 'true') return [];\n\nconst limite = Number(ajustes.wa_limite_diario != null ? ajustes.wa_limite_diario : 25);\nconst enviadosHoy = $('Enviados Hoy').all()\n  .filter(function (i) { return i.json && i.json.id != null; }).length;\n\nif (enviadosHoy >= limite) return [];\n\n// Salto aleatorio del 45% de los turnos. Sin esto los mensajes saldrian clavados\n// cada 6 minutos, y esa regularidad milimetrica es de los primeros patrones que\n// usa WhatsApp para marcar una cuenta como automatizada. Con el salto, el hueco\n// entre envios queda entre 6 y ~30 min de forma irregular.\nif (Math.random() < 0.45) return [];\n\nreturn [{ json: { enviados_hoy: enviadosHoy, limite: limite } }];"
+        "jsCode": "// Un unico punto de control del ritmo de envio. Nada mas manda WhatsApps.\nconst ajustes = {};\nfor (const it of $('Leer Ajustes').all()) {\n  const r = it.json || {};\n  if (r.key) ajustes[r.key] = r.value;\n}\n\nif (String(ajustes.auto_contact_enabled) !== 'true') return [];\n\nconst limite = Number(ajustes.wa_limite_diario != null ? ajustes.wa_limite_diario : 25);\n// Se cuentan IDS DISTINTOS, no items. Si el nodo de arriba llega a ejecutarse mas\n// de una vez por lo que sea, sus resultados se concatenan y el mismo envio se\n// contaria dos veces. Eso paso de verdad: 15 envios reales contados como 30, tope\n// en 30, y el captador dejo de escribir a media tarde creyendose en el limite.\nconst idsHoy = new Set();\nfor (const i of $('Enviados Hoy').all()) {\n  if (i.json && i.json.id != null) idsHoy.add(String(i.json.id));\n}\nconst enviadosHoy = idsHoy.size;\n\nif (enviadosHoy >= limite) return [];\n\n// Salto aleatorio del 45% de los turnos. Sin esto los mensajes saldrian clavados\n// cada 6 minutos, y esa regularidad milimetrica es de los primeros patrones que\n// usa WhatsApp para marcar una cuenta como automatizada. Con el salto, el hueco\n// entre envios queda entre 6 y ~30 min de forma irregular.\nif (Math.random() < 0.45) return [];\n\nreturn [{ json: { enviados_hoy: enviadosHoy, limite: limite } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
