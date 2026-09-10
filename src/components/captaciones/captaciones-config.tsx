@@ -4,13 +4,13 @@ import { useState, useMemo } from "react"
 import dynamic from "next/dynamic"
 import {
   Settings, X, Plus, Trash2, Loader2, Check, MapPin, Zap, ZapOff, Globe,
-  Map as MapIcon, ChevronLeft, AlertCircle, Save, ExternalLink,
+  Map as MapIcon, ChevronLeft, AlertCircle, Save, ExternalLink, GripVertical,
   Wallet, Send, Clock,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import {
-  toggleAutoContacto, agregarZona, toggleZona, eliminarZona, setLimiteDiario,
+  toggleAutoContacto, agregarZona, toggleZona, eliminarZona, setLimiteDiario, reordenarZonas,
   type ApifyUso, type Operacion, type TipoInmueble, type TipoZona,
 } from "@/lib/actions/captaciones-config"
 import { encodePolyline } from "./polyline"
@@ -70,6 +70,7 @@ interface Zona {
   operacion?: Operacion | null
   tipo_inmueble?: TipoInmueble | null
   ventana_horas?: number | null
+  prioridad?: number | null
 }
 
 interface Props {
@@ -107,14 +108,36 @@ export function CaptacionesConfig({
   // View: list | create
   const [view, setView] = useState<"list" | "create">("list")
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  // Arrastre para reordenar zonas. Se usa el arrastre nativo del navegador en vez
+  // de una librería: son cuatro filas en un panel de escritorio y no compensa
+  // meter una dependencia. En táctil no funciona, pero este panel se usa desde el
+  // ordenador.
+  const [arrastrando, setArrastrando] = useState<number | null>(null)
+  const [encima, setEncima] = useState<number | null>(null)
 
   // Create-form state
   const [nombre, setNombre] = useState("")
   const [tipo, setTipo] = useState<TipoZona>("zona")
   const [urlPegada, setUrlPegada] = useState("")
+
+  // Al pegar una URL, la ventana la manda LA URL, no el selector. Antes se
+  // guardaba lo que marcara el selector y el scraper reescribía la URL con ese
+  // valor: pegabas una de 48 h, el selector estaba en otra cosa, y la zona salía
+  // pidiendo algo distinto de lo que habías comprobado en Idealista.
+  function pegarUrl(v: string) {
+    setUrlPegada(v)
+    const m = /publicado_ultimas-(\d+)-horas/.exec(v)
+    if (m) {
+      const h = Number(m[1])
+      if (h === 24 || h === 48) setVentanaHoras(h)
+    } else if (v.trim().startsWith("https://www.idealista.com/")) {
+      // Sin filtro de fecha en la URL: es un barrido.
+      setVentanaHoras(0)
+    }
+  }
   const [operacion, setOperacion] = useState<Operacion>("venta")
   const [tipoInmueble, setTipoInmueble] = useState<TipoInmueble>("viviendas")
-  const [ventanaHoras, setVentanaHoras] = useState<24 | 48>(24)
+  const [ventanaHoras, setVentanaHoras] = useState<0 | 24 | 48>(0)
   const [polygonCoords, setPolygonCoords] = useState<[number, number][]>([])
   const [clearSignal, setClearSignal] = useState(0)
   const [saving, setSaving] = useState(false)
@@ -128,12 +151,12 @@ export function CaptacionesConfig({
     // se ignora en silencio y siguen saliendo todas las agencias. El filtrado por
     // particular lo hace el scraper con contactInfo.userType, después de Apify.
     const seccion = `${operacion}-${tipoInmueble}`
-    const filtros = `publicado_ultimas-${ventanaHoras}-horas`
+    const filtros = ventanaHoras === 0 ? "" : `publicado_ultimas-${ventanaHoras}-horas`
     // URL pegada a mano: se respeta tal cual. Es la opción que cubre cualquier
     // búsqueda que Idealista sepa hacer y el formulario no.
     if (tipo === "url") return urlPegada.trim()
     if (tipo === "zona" && polygonCoords.length > 2)
-      return `https://www.idealista.com/areas/${seccion}/con-${filtros}/?shape=((${encodePolyline(polygonCoords)}))&ordenado-por=fecha-publicacion-desc`
+      return `https://www.idealista.com/areas/${seccion}/${filtros ? `con-${filtros}/` : ""}?shape=((${encodePolyline(polygonCoords)}))&ordenado-por=fecha-publicacion-desc`
     return ""
   }, [tipo, urlPegada, polygonCoords, operacion, tipoInmueble, ventanaHoras])
 
@@ -147,7 +170,7 @@ export function CaptacionesConfig({
     setUrlPegada("")
     setOperacion("venta")
     setTipoInmueble("viviendas")
-    setVentanaHoras(24)
+    setVentanaHoras(0)
     setPolygonCoords([])
     setClearSignal(s => s + 1)
   }
@@ -205,6 +228,26 @@ export function CaptacionesConfig({
     await toggleZona(id, activa)
     setZonas(z => z.map(zona => (zona.id === id ? { ...zona, activa } : zona)))
     setLoadingZona(null)
+  }
+
+  // Al soltar: se pinta el orden nuevo al momento y se guarda detrás. Si el
+  // guardado falla se vuelve al orden anterior, para que la lista nunca enseñe
+  // algo distinto de lo que el captador va a hacer.
+  async function soltarEn(destino: number) {
+    const origen = arrastrando
+    setArrastrando(null)
+    setEncima(null)
+    if (origen === null || origen === destino) return
+
+    const antes = zonas
+    const copia = [...zonas]
+    const [movida] = copia.splice(origen, 1)
+    copia.splice(destino, 0, movida)
+    setZonas(copia.map((z, k) => ({ ...z, prioridad: k + 1 })))
+
+    const res = await reordenarZonas(copia.map(z => z.id))
+    if (res.error) { setZonas(antes); toast.error(res.error); return }
+    toast.success(`Ahora manda "${copia[0].nombre}"`)
   }
 
   async function handleEliminarZona(id: string) {
@@ -402,6 +445,13 @@ export function CaptacionesConfig({
                 </button>
               </div>
 
+              {zonas.length > 1 && (
+                <p className="text-[11px] text-muted-foreground/70 leading-relaxed pb-1">
+                  Arrastra para cambiar el orden. La primera se lleva el doble de pasadas que la
+                  segunda, ésta el doble que la tercera, y así — ninguna se queda sin atender.
+                </p>
+              )}
+
               <div className="space-y-2">
                 {zonas.length === 0 && (
                   <div className="text-center py-6 text-xs text-muted-foreground">
@@ -409,16 +459,30 @@ export function CaptacionesConfig({
                     No hay zonas configuradas
                   </div>
                 )}
-                {zonas.map((zona) => (
+                {zonas.map((zona, i) => (
                   <div
                     key={zona.id}
+                    draggable
+                    onDragStart={() => setArrastrando(i)}
+                    onDragEnd={() => { setArrastrando(null); setEncima(null) }}
+                    onDragOver={e => { e.preventDefault(); setEncima(i) }}
+                    onDrop={e => { e.preventDefault(); soltarEn(i) }}
                     onMouseEnter={() => setHoveredId(zona.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     className={cn(
                       "flex items-start gap-3 p-3 rounded-lg border transition-colors",
-                      zona.activa ? "border-emerald-500/30 bg-emerald-500/5" : "border-border bg-muted/20"
+                      zona.activa ? "border-emerald-500/30 bg-emerald-500/5" : "border-border bg-muted/20",
+                      arrastrando === i && "opacity-40",
+                      encima === i && arrastrando !== null && arrastrando !== i && "border-violet-500 border-dashed",
                     )}
                   >
+                    <div
+                      className="flex items-center gap-1 shrink-0 pt-0.5 cursor-grab active:cursor-grabbing text-muted-foreground"
+                      title="Arrastra para cambiar el orden de atención"
+                    >
+                      <GripVertical className="h-4 w-4" />
+                      <span className="text-[10px] font-bold w-3 text-center">{i + 1}</span>
+                    </div>
                     <MapPin className={cn("h-4 w-4 mt-0.5 shrink-0", zona.activa ? "text-emerald-500" : "text-muted-foreground")} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 mb-0.5">
@@ -550,7 +614,7 @@ export function CaptacionesConfig({
                   <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">URL de Idealista</label>
                   <textarea
                     value={urlPegada}
-                    onChange={e => setUrlPegada(e.target.value)}
+                    onChange={e => pegarUrl(e.target.value)}
                     rows={3}
                     placeholder="https://www.idealista.com/venta-locales/valencia/valencia/con-publicado_ultimas-48-horas/"
                     className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
@@ -599,7 +663,7 @@ export function CaptacionesConfig({
                       onClick={() => {
                         setOperacion(o.valor)
                         // En alquiler la ventana de 48 h no existe en Idealista.
-                        if (o.valor === "alquiler") setVentanaHoras(24)
+                        if (o.valor === "alquiler" && ventanaHoras === 48) setVentanaHoras(24)
                       }}
                       className={cn(
                         "py-2 rounded-lg border text-sm font-medium transition-all",
@@ -645,9 +709,9 @@ export function CaptacionesConfig({
 
               {/* Ventana */}
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Antigüedad máxima del anuncio</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {([24, 48] as const).map(h => {
+                <label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Qué anuncios mira</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([0, 24, 48] as const).map(h => {
                     // Idealista no tiene la ventana de 48 h en la sección de
                     // alquiler: probado dos veces, /alquiler-viviendas/…/con-
                     // publicado_ultimas-48-horas/ devuelve cero mientras la de
@@ -668,18 +732,27 @@ export function CaptacionesConfig({
                               : "border-border bg-muted/20 text-muted-foreground hover:text-foreground",
                         )}
                       >
-                        {h} horas
+                        {h === 0 ? "Barrido" : `${h} h`}
                       </button>
                     )
                   })}
                 </div>
                 <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-                  {operacion === "alquiler"
-                    ? "En alquiler Idealista no ofrece la ventana de 48 h: esa URL devuelve cero anuncios."
-                    : tipoInmueble === "viviendas"
-                      ? "En vivienda 24 h ya da de sobra: Valencia mueve unos 375 anuncios en 48 h y ampliar sólo duplica el gasto en Apify."
-                      : "Mercado fino: en locales salieron 13 anuncios en 48 h y ninguno en 24 h. Aquí 48 h es lo razonable."}
+                  {ventanaHoras === 0
+                    ? "Sin filtro de fecha: recorre el catálogo entero poco a poco, descartando lo que ya captó. Lo recién publicado entra primero. Es lo que más capta, y el gasto lo va frenando el guardarraíl de presupuesto."
+                    : operacion === "alquiler"
+                      ? "En alquiler Idealista no ofrece la ventana de 48 h: esa URL devuelve cero anuncios."
+                      : tipoInmueble === "viviendas"
+                        ? "Sólo lo publicado en esa ventana. En vivienda 24 h da de sobra, pero se queda muy corto frente al barrido."
+                        : "Mercado fino: en locales salieron 13 anuncios en 48 h y ninguno en 24 h."}
                 </p>
+                {ventanaHoras === 0 && tipo === "url" && (
+                  <p className="text-[11px] text-muted-foreground/70 leading-relaxed pt-1">
+                    Si tu URL lleva <code className="text-[10px]">ordenado-por=fecha-publicacion-asc</code>, el
+                    barrido empieza por los <strong>más antiguos</strong> — los propietarios que llevan meses
+                    sin vender. Sin ese parámetro empieza por los más recientes.
+                  </p>
+                )}
               </div>
 
               {/* Por qué ya no hay filtro de particulares */}

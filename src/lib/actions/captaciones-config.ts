@@ -62,8 +62,10 @@ export async function getAutoContactoConfig() {
     supabase
       .from("scraper_zonas")
       .select("*")
-      .order("activa", { ascending: false })
-      .order("id"),
+      // Por prioridad: es el orden en que el scraper las atiende, asi que la
+      // lista del panel tiene que enseñar lo mismo que hace el captador.
+      .order("prioridad", { ascending: true, nullsFirst: false })
+      .order("nombre"),
   ])
 
   const valor = (k: string) => settings?.find((s) => s.key === k)?.value
@@ -159,7 +161,7 @@ export async function agregarZona(z: NuevaZona) {
  * un mercado fino (locales, garajes) con 24 h no devuelve nada, y uno grueso
  * (vivienda en Valencia) con 48 h duplica el gasto de Apify sin captar más.
  */
-export async function setVentanaZona(id: string, horas: 24 | 48) {
+export async function setVentanaZona(id: string, horas: 0 | 24 | 48) {
   const supabase = await createAdminClient()
   const { error } = await supabase.from("scraper_zonas").update({ ventana_horas: horas }).eq("id", id)
   if (error) return { error: error.message }
@@ -209,4 +211,31 @@ export async function getEstadoCola() {
   ])
 
   return { enCola: enCola ?? 0, enviadasHoy: enviadasHoy ?? 0 }
+}
+
+/**
+ * Guarda el orden completo de las zonas tras arrastrar una.
+ *
+ * Recibe la lista entera de ids ya ordenada y reescribe las prioridades como
+ * 1..n. Se hace así, y no intercambiando dos valores, porque en cuanto alguien
+ * toca la tabla a mano aparecen prioridades repetidas, y con empates el orden se
+ * vuelve arbitrario y arrastrar deja de tener efecto visible.
+ *
+ * La prioridad decide cuántas pasadas del día se lleva cada zona: la primera el
+ * doble que la segunda, ésta el doble que la tercera, y así.
+ */
+export async function reordenarZonas(ids: string[]) {
+  if (!ids?.length) return { error: "Lista vacía" }
+  const supabase = await createAdminClient()
+
+  const resultados = await Promise.all(
+    ids.map((id, i) =>
+      supabase.from("scraper_zonas").update({ prioridad: i + 1 }).eq("id", id)
+    )
+  )
+  const fallo = resultados.find((r) => r.error)
+  if (fallo?.error) return { error: fallo.error.message }
+
+  revalidatePath("/captaciones")
+  return { success: true }
 }

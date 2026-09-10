@@ -27,7 +27,7 @@
         "options": {
           "timeout": 15000
         },
-        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/app_settings?key=in.(auto_contact_enabled,wa_limite_diario)&select=key,value",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/app_settings?key=in.(auto_contact_enabled,wa_limite_diario,wa_ritmo)&select=key,value",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpCustomAuth"
       },
@@ -82,7 +82,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Un unico punto de control del ritmo de envio. Nada mas manda WhatsApps.\nconst ajustes = {};\nfor (const it of $('Leer Ajustes').all()) {\n  const r = it.json || {};\n  if (r.key) ajustes[r.key] = r.value;\n}\n\nif (String(ajustes.auto_contact_enabled) !== 'true') return [];\n\nconst limite = Number(ajustes.wa_limite_diario != null ? ajustes.wa_limite_diario : 25);\n// Se cuentan IDS DISTINTOS, no items. Si el nodo de arriba llega a ejecutarse mas\n// de una vez por lo que sea, sus resultados se concatenan y el mismo envio se\n// contaria dos veces. Eso paso de verdad: 15 envios reales contados como 30, tope\n// en 30, y el captador dejo de escribir a media tarde creyendose en el limite.\nconst idsHoy = new Set();\nfor (const i of $('Enviados Hoy').all()) {\n  if (i.json && i.json.id != null) idsHoy.add(String(i.json.id));\n}\nconst enviadosHoy = idsHoy.size;\n\nif (enviadosHoy >= limite) return [];\n\n// Salto aleatorio del 45% de los turnos. Sin esto los mensajes saldrian clavados\n// cada 6 minutos, y esa regularidad milimetrica es de los primeros patrones que\n// usa WhatsApp para marcar una cuenta como automatizada. Con el salto, el hueco\n// entre envios queda entre 6 y ~30 min de forma irregular.\nif (Math.random() < 0.45) return [];\n\nreturn [{ json: { enviados_hoy: enviadosHoy, limite: limite } }];"
+        "jsCode": "// Un unico punto de control del ritmo de envio. Nada mas manda WhatsApps.\nconst ajustes = {};\nfor (const it of $('Leer Ajustes').all()) {\n  const r = it.json || {};\n  if (r.key) ajustes[r.key] = r.value;\n}\n\nif (String(ajustes.auto_contact_enabled) !== 'true') return [];\n\nconst limite = Number(ajustes.wa_limite_diario != null ? ajustes.wa_limite_diario : 25);\n// Se cuentan IDS DISTINTOS, no items. Si el nodo de arriba llega a ejecutarse mas\n// de una vez por lo que sea, sus resultados se concatenan y el mismo envio se\n// contaria dos veces. Eso paso de verdad: 15 envios reales contados como 30, tope\n// en 30, y el captador dejo de escribir a media tarde creyendose en el limite.\nconst idsHoy = new Set();\nfor (const i of $('Enviados Hoy').all()) {\n  if (i.json && i.json.id != null) idsHoy.add(String(i.json.id));\n}\nconst enviadosHoy = idsHoy.size;\n\nif (enviadosHoy >= limite) return [];\n\n// Salto aleatorio de una parte de los turnos. Sin esto los mensajes saldrian\n// clavados cada 6 minutos, y esa regularidad milimetrica es de los primeros\n// patrones que usa WhatsApp para marcar una cuenta como automatizada.\n//\n// wa_ritmo elige cuanto se salta y cuanto se espera antes de enviar:\n//   normal  -> salta el 45% de los turnos y espera 20-90 s   (~1 envio cada 11 min)\n//   rapido  -> salta el 15% y espera 8-25 s                  (~1 envio cada 7 min)\n//   turbo   -> no salta ninguno y espera 3-10 s              (1 envio cada 6 min)\n// 'turbo' existe para vaciar una cola acumulada un dia concreto, no para dejarlo\n// puesto: sin salto, los envios salen a intervalos identicos, que es justo la\n// firma que delata un automatismo.\nconst RITMOS = {\n  normal: { salto: 0.45, minEspera: 20, maxEspera: 90 },\n  rapido: { salto: 0.15, minEspera: 8, maxEspera: 25 },\n  turbo: { salto: 0, minEspera: 3, maxEspera: 10 },\n};\nconst ritmo = RITMOS[String(ajustes.wa_ritmo || 'normal')] || RITMOS.normal;\n\nif (ritmo.salto > 0 && Math.random() < ritmo.salto) return [];\n\nreturn [{\n  json: {\n    enviados_hoy: enviadosHoy,\n    limite: limite,\n    ritmo: String(ajustes.wa_ritmo || 'normal'),\n    // La pausa la calcula este nodo y no el de espera: asi el ritmo se decide en\n    // un unico sitio y queda registrado en la ejecucion.\n    espera_s: ritmo.minEspera + Math.floor(Math.random() * (ritmo.maxEspera - ritmo.minEspera + 1)),\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -490,7 +490,7 @@
     },
     {
       "parameters": {
-        "amount": "={{ 20 + Math.floor(Math.random() * 70) }}",
+        "amount": "={{ $('Decidir Turno').first().json.espera_s }}",
         "unit": "seconds"
       },
       "type": "n8n-nodes-base.wait",
@@ -502,7 +502,7 @@
       "id": "wf3-wait",
       "name": "Pausa Humana",
       "webhookId": "c1a4f2e8-7b30-4c11-9f52-1d8a6b3e0c77",
-      "notes": "Espera 20-90s tras generar el mensaje. Desacopla la hora de envio del tic del cron: aunque dos turnos seguidos pasen el filtro, los mensajes no salen sincronizados."
+      "notes": "Espera lo que diga \"Decidir Turno\" segun el ajuste wa_ritmo (normal 20-90s, rapido 8-25s, turbo 3-10s). Desacopla la hora de envio del tic del cron: aunque dos turnos seguidos pasen el filtro, los mensajes no salen sincronizados. El calculo vive en un solo sitio para que el ritmo quede registrado en la ejecucion."
     },
     {
       "parameters": {
