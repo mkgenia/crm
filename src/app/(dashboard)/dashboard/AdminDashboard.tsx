@@ -3,11 +3,14 @@
 import Link from "next/link"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
-import { Users, Building2, UserCircle, TrendingUp, Globe, Radar, Share2, QrCode, Inbox, Heart } from "lucide-react"
+import { Globe, Radar, Share2, QrCode, Inbox, Heart } from "lucide-react"
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
 } from "recharts"
+import { AgendaPanel } from "@/components/agenda/agenda-panel"
+import { SeccionesOrdenables, SeccionOrdenable } from "@/components/shared/secciones-ordenables"
+import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
 
 const PIPELINE_COLORS = ["#7F77DD", "#378ADD", "#1D9E75", "#EF9F27", "#D85A30", "#639922", "#888780"]
 const ESTADO_LABEL: Record<string, string> = {
@@ -33,15 +36,58 @@ function timeAgo(date: string) {
   return `${Math.floor(hrs / 24)}d`
 }
 
+export interface Periodos {
+  hoy: number; semana: number; mes: number; total: number
+  serie: number[]
+}
+
+export type ClavePeriodo = "hoy" | "semana" | "mes" | "total"
+
+export const PERIODOS: Array<{ valor: ClavePeriodo; etiqueta: string; frase: string }> = [
+  { valor: "hoy", etiqueta: "Hoy", frase: "Entrados hoy" },
+  { valor: "semana", etiqueta: "7 días", frase: "En los últimos 7 días" },
+  { valor: "mes", etiqueta: "30 días", frase: "En los últimos 30 días" },
+  { valor: "total", etiqueta: "Todo", frase: "Desde el principio" },
+]
+
+/**
+ * Barras de los últimos catorce días. SVG a mano y no una librería: son
+ * catorce rectángulos, y meter recharts en una tarjeta de este tamaño cuesta
+ * más de lo que aporta.
+ */
+function Barras({ serie, color }: { serie: number[]; color: string }) {
+  const max = Math.max(...serie, 1)
+  return (
+    <svg viewBox="0 0 100 28" preserveAspectRatio="none" className="w-full h-8" aria-hidden="true">
+      {serie.map((v, i) => {
+        const ancho = 100 / serie.length
+        const alto = v === 0 ? 1.5 : Math.max(2.5, (v / max) * 26)
+        return (
+          <rect
+            key={i}
+            x={i * ancho + ancho * 0.18}
+            y={28 - alto}
+            width={ancho * 0.64}
+            height={alto}
+            rx={1}
+            className={color}
+            opacity={v === 0 ? 0.18 : 0.45 + (v / max) * 0.55}
+          />
+        )
+      })}
+    </svg>
+  )
+}
+
 export interface AdminData {
   origenes: {
-    web: { total: number; mes: number }
-    scraper: { total: number; mes: number }
-    rrss: { total: number; mes: number }
-    qr: { total: number; mes: number }
+    web: Periodos
+    scraper: Periodos
+    rrss: Periodos
+    qr: Periodos
     otros: number
   }
-  demandas: { total: number; sinVer: number; esteMes: number; cualificadas: number }
+  demandas: Periodos & { sinVer: number; cualificadas: number }
   leads: number
   leadsEsteMes: number
   captaciones: number
@@ -62,77 +108,101 @@ export interface AdminData {
   historialLeads: Array<{ date: string; count: number }>
 }
 
-export default function AdminDashboard({ nombre, saludo, data }: {
+export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoId }: {
   nombre: string
   saludo: string
   data: AdminData
+  agendaEquipo: { entradas: EntradaAgenda[]; personas: PersonaAgenda[]; disponible: boolean }
+  yoId: string
 }) {
   const totalPipeline = data.pipeline.reduce((s, p) => s + p.count, 0)
+  const [periodo, setPeriodo] = useState<ClavePeriodo>("hoy")
 
   return (
     <div className="p-8 space-y-8">
 
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">
-            {saludo}, <span className="holo-text">{nombre}</span>
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">Vista global del equipo</p>
-        </div>
-        <span className="text-xs border border-border rounded-full px-3 py-1 text-muted-foreground bg-card flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
-          Admin
-        </span>
-      </div>
+      <SeccionesOrdenables
+        claveGuardado="mkgenia:orden-portada"
+        encabezado={
+          <div className="flex flex-col gap-1">
+            <h1 className="text-2xl font-semibold text-foreground">
+              {saludo}, <span className="holo-text">{nombre}</span>
+            </h1>
+            <p className="text-sm text-muted-foreground">Vista global del equipo</p>
+          </div>
+        }
+        acciones={
+          <span className="text-xs border border-border rounded-full px-3 py-1 text-muted-foreground bg-card flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+            Admin
+          </span>
+        }
+      >
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <KpiCard href="/leads" icon={UserCircle} label="Leads totales" value={data.leads}
-          sub={`+${data.leadsEsteMes} este mes`} holo />
-        <KpiCard href="/captaciones" icon={Building2} label="Captaciones" value={data.captaciones}
-          sub={`${data.captacionesActivas} activas`} />
-        <KpiCard href="/captaciones" icon={TrendingUp} label="Interesados" value={data.interesadosTotal}
-          sub={`${data.tasaGlobal}% tasa de respuesta`} />
-        <KpiCard href="/equipo" icon={Users} label="Agentes" value={data.usuarios}
-          sub="en el sistema" />
-      </div>
-
-      {/* De dónde entra cada lead. Una tarjeta por canal, incluidos los que aún no
-          producen nada: ver el hueco es la mitad de la información. */}
+      <SeccionOrdenable id="origenes" titulo="De dónde entran los leads">
+      {/* De dónde entra cada lead: es la pregunta que se hace uno al abrir el CRM,
+          así que va primero y a tamaño grande. Los canales que aún no producen
+          nada se pintan igual — ver el hueco es la mitad de la información. */}
       <div>
-        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
-          De dónde entran los leads
-        </h2>
-        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+        <div className="flex items-end justify-between gap-4 mb-4 flex-wrap">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">De dónde entran los leads</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {PERIODOS.find((p) => p.valor === periodo)!.frase}
+            </p>
+          </div>
+
+          {/* El selector no consulta nada: los cuatro periodos vienen calculados
+              del servidor, así que el cambio es instantáneo. */}
+          <div className="flex rounded-lg border border-border bg-card p-0.5">
+            {PERIODOS.map((p) => (
+              <button
+                key={p.valor}
+                onClick={() => setPeriodo(p.valor)}
+                className={cn(
+                  "px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+                  periodo === p.valor
+                    ? "bg-violet-500/15 text-violet-600 dark:text-violet-300"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {p.etiqueta}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           <OrigenCard
             href="/leads" icon={Globe} label="Formularios web"
-            total={data.origenes.web.total} mes={data.origenes.web.mes}
-            color="text-cyan-500" borde="border-cyan-500/25"
+            datos={data.origenes.web} periodo={periodo}
+            tono="cyan"
           />
           <OrigenCard
             href="/captaciones" icon={Radar} label="Scraper"
-            total={data.origenes.scraper.total} mes={data.origenes.scraper.mes}
-            color="text-violet-500" borde="border-violet-500/25"
-          />
-          <OrigenCard
-            href="/galeria-rrss" icon={Share2} label="Redes sociales"
-            total={data.origenes.rrss.total} mes={data.origenes.rrss.mes}
-            color="text-pink-500" borde="border-pink-500/25" pendiente
-          />
-          <OrigenCard
-            href="/galeria-qr" icon={QrCode} label="Códigos QR"
-            total={data.origenes.qr.total} mes={data.origenes.qr.mes}
-            color="text-amber-500" borde="border-amber-500/25" pendiente
+            datos={data.origenes.scraper} periodo={periodo}
+            tono="violeta"
           />
           <OrigenCard
             href="/demandas" icon={Inbox} label="Demandas"
-            total={data.demandas.total} mes={data.demandas.esteMes}
-            color="text-emerald-500" borde="border-emerald-500/25"
+            datos={data.demandas} periodo={periodo}
+            tono="verde"
             extra={data.demandas.sinVer > 0 ? `${data.demandas.sinVer} sin ver` : undefined}
           />
           <OrigenCard
+            href="/leads" icon={Share2} label="Redes sociales"
+            datos={data.origenes.rrss} periodo={periodo}
+            tono="rosa"
+          />
+          <OrigenCard
+            href="/galeria-qr" icon={QrCode} label="Códigos QR"
+            datos={data.origenes.qr} periodo={periodo}
+            tono="ambar"
+          />
+          <OrigenCard
             href="/matches" icon={Heart} label="Matches"
-            total={null} mes={0}
-            color="text-rose-500" borde="border-rose-500/25" pendiente
+            datos={null} periodo={periodo}
+            tono="granate"
           />
         </div>
         {data.origenes.otros > 0 && (
@@ -143,6 +213,26 @@ export default function AdminDashboard({ nombre, saludo, data }: {
         )}
       </div>
 
+      </SeccionOrdenable>
+
+      <SeccionOrdenable id="agenda" titulo="Agenda del equipo">
+      {agendaEquipo.disponible ? (
+        <AgendaPanel
+          entradasIniciales={agendaEquipo.entradas}
+          personas={agendaEquipo.personas}
+          yoId={yoId}
+          isAdmin
+        />
+      ) : (
+        <div className="rounded-xl border border-dashed border-border p-5 text-xs text-muted-foreground">
+          La agenda necesita la migración <code className="text-foreground">009_agenda.sql</code>.
+          En cuanto la ejecutes aparece aquí.
+        </div>
+      )}
+
+      </SeccionOrdenable>
+
+      <SeccionOrdenable id="pipeline" titulo="Pipeline de leads">
       <div>
         <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
           Pipeline de leads · todos los agentes
@@ -172,9 +262,15 @@ export default function AdminDashboard({ nombre, saludo, data }: {
         </div>
       </div>
 
+      </SeccionOrdenable>
+
+      <SeccionOrdenable id="agentes" titulo="Rendimiento y actividad">
       {/* Rendimiento por agente + Historial side by side */}
       <AgentesYHistorial porAgente={data.porAgente} historialCaptaciones={data.historialCaptaciones} historialLeads={data.historialLeads} />
 
+      </SeccionOrdenable>
+
+      <SeccionOrdenable id="ultimos" titulo="Últimos leads">
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">Últimos leads</h2>
@@ -209,6 +305,9 @@ export default function AdminDashboard({ nombre, saludo, data }: {
           </div>
         )}
       </div>
+      </SeccionOrdenable>
+
+      </SeccionesOrdenables>
     </div>
   )
 }
@@ -218,46 +317,87 @@ export default function AdminDashboard({ nombre, saludo, data }: {
  * apagado y con la etiqueta: saber que RRSS está a cero es tan útil como saber que
  * el scraper trae 838, y esconderlo daría la impresión de que no existe.
  */
-function OrigenCard({ href, icon: Icon, label, total, mes, color, borde, pendiente, extra }: {
+/**
+ * Cada canal con su tono completo: el icono metido en una pastilla de color, el
+ * borde con presencia y un lavado muy suave de fondo. Un borde al 25 % y un
+ * número fino no sostienen una tarjeta de este tamaño — se quedan flotando.
+ */
+const TONOS = {
+  cyan:    { chip: "bg-cyan-500/15 text-cyan-500",       borde: "border-cyan-500/40",    wash: "from-cyan-500/[0.08]",    barra: "fill-cyan-500" },
+  violeta: { chip: "bg-violet-500/15 text-violet-500",   borde: "border-violet-500/40",  wash: "from-violet-500/[0.08]",  barra: "fill-violet-500" },
+  verde:   { chip: "bg-emerald-500/15 text-emerald-500", borde: "border-emerald-500/40", wash: "from-emerald-500/[0.08]", barra: "fill-emerald-500" },
+  rosa:    { chip: "bg-pink-500/15 text-pink-500",       borde: "border-pink-500/40",    wash: "from-pink-500/[0.08]",    barra: "fill-pink-500" },
+  ambar:   { chip: "bg-amber-500/15 text-amber-500",     borde: "border-amber-500/40",   wash: "from-amber-500/[0.08]",   barra: "fill-amber-500" },
+  granate: { chip: "bg-rose-500/15 text-rose-500",       borde: "border-rose-500/40",    wash: "from-rose-500/[0.08]",    barra: "fill-rose-500" },
+} as const
+
+function OrigenCard({ href, icon: Icon, label, datos, periodo, tono, extra }: {
   href: string
   icon: React.ComponentType<{ className?: string }>
   label: string
-  total: number | null
-  mes: number
-  color: string
-  borde: string
-  pendiente?: boolean
+  datos: Periodos | null
+  periodo: ClavePeriodo
+  tono: keyof typeof TONOS
   extra?: string
 }) {
+  // `datos` a null significa "esta sección todavía no existe", que no es lo
+  // mismo que un canal montado y a cero. Se distinguen a propósito.
+  const enDesarrollo = datos === null
+  const valor = datos ? datos[periodo] : 0
+  const sinUsar = !enDesarrollo && datos!.total === 0
+  const apagado = enDesarrollo || sinUsar
+  const t = TONOS[tono]
+
   return (
     <Link
       href={href}
       className={cn(
-        "rounded-xl border bg-card p-4 flex flex-col gap-2 transition-all hover:bg-muted/30",
-        pendiente ? "border-border" : borde,
+        "group relative overflow-hidden rounded-xl border bg-card px-4 py-4 flex flex-col gap-3 transition-all",
+        apagado ? "border-border hover:border-border" : `${t.borde} hover:bg-muted/20`,
       )}
     >
-      <div className="flex items-center gap-2">
-        <Icon className={cn("h-4 w-4 shrink-0", pendiente ? "text-muted-foreground/40" : color)} />
-        <span className="text-xs font-medium text-muted-foreground truncate">{label}</span>
+      {/* Lavado de color muy tenue: da cuerpo a la tarjeta sin gritar. */}
+      {!apagado && (
+        <div className={cn("absolute inset-0 bg-gradient-to-br to-transparent pointer-events-none", t.wash)} />
+      )}
+
+      <div className="relative flex items-center gap-2.5">
+        <span className={cn(
+          "h-8 w-8 rounded-lg flex items-center justify-center shrink-0",
+          apagado ? "bg-muted text-muted-foreground/50" : t.chip,
+        )}>
+          <Icon className="h-4 w-4" />
+        </span>
+        <span className="text-[13px] font-medium text-foreground/90 truncate">{label}</span>
       </div>
 
-      {total === null ? (
-        <p className="text-[11px] text-muted-foreground/60 leading-snug">En desarrollo</p>
+      {enDesarrollo ? (
+        <p className="relative text-xs text-muted-foreground/50 leading-snug pb-1">En desarrollo</p>
       ) : (
-        <>
-          <p className={cn(
-            "text-2xl font-semibold tabular-nums leading-none",
-            total === 0 ? "text-muted-foreground/40" : "text-foreground",
-          )}>
-            {total}
-          </p>
-          <p className="text-[11px] text-muted-foreground/70 leading-snug">
-            {extra ?? (total === 0
-              ? (pendiente ? "Aún sin usar" : "Sin registros")
-              : mes > 0 ? `+${mes} este mes` : "sin altas este mes")}
-          </p>
-        </>
+        // El número a la izquierda y los catorce días a la derecha: la tarjeta
+        // es ancha, y dejar ese hueco vacío es lo que la hacía parecer pobre.
+        <div className="relative flex items-end justify-between gap-4">
+          <div className="shrink-0">
+            <p className={cn(
+              "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
+              valor === 0 ? "text-muted-foreground/35" : "text-foreground",
+            )}>
+              {valor}
+            </p>
+            <p className="text-[11px] text-muted-foreground leading-snug mt-2">
+              {extra ?? (sinUsar
+                ? "Aún sin usar"
+                : periodo === "total"
+                  ? "desde el principio"
+                  : `${datos!.total.toLocaleString("es")} en total`)}
+            </p>
+          </div>
+
+          <div className="flex-1 min-w-0 max-w-[13rem] flex flex-col items-end gap-1">
+            <Barras serie={datos!.serie} color={t.barra} />
+            <span className="text-[10px] text-muted-foreground/50">últimos 14 días</span>
+          </div>
+        </div>
       )}
     </Link>
   )
@@ -509,28 +649,4 @@ function HistorialChart({
       </div>
     </div>
   )
-}
-
-function KpiCard({ href, icon: Icon, label, value, sub, holo }: {
-  href?: string; icon: React.ElementType; label: string; value: number; sub: string; holo?: boolean
-}) {
-  const inner = (
-    <div className={`relative rounded-lg border p-5 flex flex-col gap-3 bg-card overflow-hidden transition-all ${holo ? "holo-border holo-glow border-transparent" : "border-border"} ${href ? "hover:bg-muted/40 cursor-pointer" : ""}`}>
-      {holo && (
-        <div className="absolute inset-0 bg-gradient-to-br from-[oklch(0.65_0.22_295/0.06)] via-[oklch(0.80_0.15_200/0.04)] to-transparent pointer-events-none" />
-      )}
-      <div className="flex items-center justify-between relative">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-widest">{label}</span>
-        <Icon className="h-3.5 w-3.5 text-muted-foreground/40" />
-      </div>
-      <div className="relative">
-        <p className={`text-3xl font-semibold tracking-tight ${holo ? "holo-text" : "text-foreground"}`}>
-          {value.toLocaleString("es")}
-        </p>
-        <p className="text-xs mt-0.5 text-muted-foreground">{sub}</p>
-      </div>
-    </div>
-  )
-  if (href) return <Link href={href}>{inner}</Link>
-  return inner
 }

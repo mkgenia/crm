@@ -2,6 +2,7 @@ import { createClient, createAdminClient } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
 import AdminDashboard, { type AdminData } from "./AdminDashboard"
 import AgentDashboard from "./AgentDashboard"
+import { getAgendaMes } from "@/lib/actions/agenda"
 
 export const metadata = { title: "Inicio — mkgenia" }
 
@@ -59,28 +60,59 @@ async function getAdminData(): Promise<AdminData> {
     rrss: ["Instagram", "Facebook", "RRSS", "Redes"],
     qr: ["QR", "Galeria QR", "Trasteros WhatsApp"],
   }
-  const deFamilia = (fam: string) =>
-    allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "")).length
-  const deFamiliaMes = (fam: string) =>
-    allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "") && (l.fecha_creacion ?? "") >= inicioMes).length
-
   const conocidas = Object.values(FAMILIAS).flat()
   const otros = allLeads.filter((l) => !conocidas.includes(l.fuente ?? "")).length
 
   const demandas = demandasRes.data ?? []
 
+  // Los cuatro periodos se calculan de una pasada aquí y viajan juntos al
+  // cliente. Cuesta lo mismo que calcular uno —las filas ya están cargadas para
+  // el pipeline— y a cambio cambiar de "hoy" a "30 días" es instantáneo, sin
+  // consulta ni spinner.
+  const hoy0 = new Date(); hoy0.setHours(0, 0, 0, 0)
+  const LIMITES = {
+    hoy: hoy0.toISOString(),
+    semana: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    mes: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  }
+  // Catorce días, uno por barra. Va en la tarjeta y es lo que convierte un
+  // número suelto en algo que se puede leer: 42 no dice nada, 42 después de
+  // catorce días planos sí.
+  const DIAS_SERIE = 14
+  const serieDe = (filas: Array<{ fecha_creacion?: string | null }>) => {
+    const cubos: Record<string, number> = {}
+    for (let i = DIAS_SERIE - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000)
+      cubos[d.toISOString().slice(0, 10)] = 0
+    }
+    for (const f of filas) {
+      const dia = (f.fecha_creacion ?? "").slice(0, 10)
+      if (dia in cubos) cubos[dia]++
+    }
+    return Object.values(cubos)
+  }
+
+  const porPeriodo = (filas: Array<{ fecha_creacion?: string | null }>) => ({
+    hoy: filas.filter((f) => (f.fecha_creacion ?? "") >= LIMITES.hoy).length,
+    semana: filas.filter((f) => (f.fecha_creacion ?? "") >= LIMITES.semana).length,
+    mes: filas.filter((f) => (f.fecha_creacion ?? "") >= LIMITES.mes).length,
+    total: filas.length,
+    serie: serieDe(filas),
+  })
+  const familia = (fam: string) =>
+    porPeriodo(allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "")))
+
   return {
     origenes: {
-      web: { total: deFamilia("web"), mes: deFamiliaMes("web") },
-      scraper: { total: deFamilia("scraper"), mes: deFamiliaMes("scraper") },
-      rrss: { total: deFamilia("rrss"), mes: deFamiliaMes("rrss") },
-      qr: { total: deFamilia("qr"), mes: deFamiliaMes("qr") },
+      web: familia("web"),
+      scraper: familia("scraper"),
+      rrss: familia("rrss"),
+      qr: familia("qr"),
       otros,
     },
     demandas: {
-      total: demandasRes.count ?? 0,
+      ...porPeriodo(demandas),
       sinVer: demandas.filter((d) => d.visto === false).length,
-      esteMes: demandas.filter((d) => (d.fecha_creacion ?? "") >= inicioMes).length,
       cualificadas: demandas.filter((d) => d.estado === "Cualificado" || d.estado === "cualificado").length,
     },
     leads: leadsRes.count ?? 0,
@@ -178,12 +210,30 @@ export default async function DashboardPage() {
 
   const hora = new Date().getHours()
   const saludo = hora < 13 ? "Buenos días" : hora < 20 ? "Buenas tardes" : "Buenas noches"
+  const isAdmin = perfil?.rol === "Admin"
 
-  if (perfil?.rol === "Admin") {
+  const agenda = await getAgendaMes()
+
+  if (isAdmin) {
     const data = await getAdminData()
-    return <AdminDashboard nombre={perfil.nombre} saludo={saludo} data={data} />
+    return (
+      <AdminDashboard
+        nombre={perfil!.nombre}
+        saludo={saludo}
+        data={data}
+        agendaEquipo={agenda}
+        yoId={user.id}
+      />
+    )
   }
 
   const data = await getAgentData(user.id)
-  return <AgentDashboard nombre={perfil?.nombre ?? "—"} data={data} />
+  return (
+    <AgentDashboard
+      nombre={perfil?.nombre ?? "—"}
+      data={data}
+      agendaEquipo={agenda}
+      yoId={user.id}
+    />
+  )
 }

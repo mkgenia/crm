@@ -11,6 +11,7 @@ import {
   Share2,
   QrCode,
   LayoutTemplate,
+  CalendarDays,
   UserCircle,
   Contact,
   Building2,
@@ -89,6 +90,16 @@ const GRUPOS: Array<{ titulo: string | null; items: Item[] }> = [
     items: [
       { href: "/agentes-ia", icon: Bot, label: "Agentes IA", permiso: "admin", enDesarrollo: true },
       { href: "/workflows", icon: Workflow, label: "Workflows", permiso: "admin", enDesarrollo: true },
+    ],
+  },
+  // Las dos secciones que van de personas y de tiempo, no de negocio. El
+  // calendario lo ve todo el mundo: la agenda de uno mismo no es algo que tenga
+  // sentido conceder o denegar. Equipo sigue siendo sólo de administración.
+  {
+    titulo: "Organización",
+    items: [
+      { href: "/calendario", icon: CalendarDays, label: "Calendario", permiso: "all" },
+      { href: "/equipo", icon: UsersRound, label: "Equipo", permiso: "admin" },
     ],
   },
 ]
@@ -399,20 +410,6 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
 
       {/* Footer */}
       <div className="border-t border-sidebar-border px-3 py-3 space-y-0.5">
-        {isAdmin && (
-          <Link
-            href="/equipo"
-            className={cn(
-              "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all",
-              pathname.startsWith("/equipo")
-                ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-                : "text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60",
-            )}
-          >
-            <UsersRound className="h-4 w-4 shrink-0" />
-            Equipo
-          </Link>
-        )}
         <Link
           href="/configuracion"
           className="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent/60 transition-all"

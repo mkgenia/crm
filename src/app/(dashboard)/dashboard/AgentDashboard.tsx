@@ -2,6 +2,8 @@
 
 import Link from "next/link"
 import { Building2, UserCircle, TrendingUp, MessageSquare, CalendarClock } from "lucide-react"
+import { AgendaPanel } from "@/components/agenda/agenda-panel"
+import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
 
 const PIPELINE_COLORS = ["#7F77DD", "#378ADD", "#1D9E75", "#EF9F27", "#D85A30", "#639922", "#888780"]
 const ESTADO_LABEL: Record<string, string> = {
@@ -65,7 +67,12 @@ interface AgentData {
   agenda: Array<{ id: number; nombre: string | null; telefono: string | null; direccion: string | null; estado_whatsapp: string; fecha_agenda: string | null; notas_agenda: string | null }>
 }
 
-export default function AgentDashboard({ nombre, data }: { nombre: string; data: AgentData }) {
+export default function AgentDashboard({ nombre, data, agendaEquipo, yoId }: {
+  nombre: string
+  data: AgentData
+  agendaEquipo: { entradas: EntradaAgenda[]; personas: PersonaAgenda[]; disponible: boolean }
+  yoId: string
+}) {
   const hora = new Date().getHours()
   const saludo = hora < 13 ? "Buenos días" : hora < 20 ? "Buenas tardes" : "Buenas noches"
   const totalPipeline = data.pipeline.reduce((s, p) => s + p.count, 0)
@@ -167,7 +174,16 @@ export default function AgentDashboard({ nombre, data }: { nombre: string; data:
         </div>
       </div>
 
-      {/* Agenda */}
+      {agendaEquipo.disponible ? (
+        <AgendaPanel
+          entradasIniciales={agendaEquipo.entradas}
+          personas={agendaEquipo.personas}
+          yoId={yoId}
+          isAdmin={false}
+        />
+      ) : null}
+
+      {/* Visitas ya agendadas sobre captaciones, que es otra cosa que el calendario */}
       {data.agenda.length > 0 ? (
         <div>
           <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
