@@ -22,7 +22,7 @@ import {
   Calculator,
   Bot,
   Workflow,
-  UsersRound,
+  UsersRound, Tags,
   Settings,
   LogOut,
   ChevronRight,
@@ -99,6 +99,7 @@ const GRUPOS: Array<{ titulo: string | null; items: Item[] }> = [
     titulo: "Organización",
     items: [
       { href: "/calendario", icon: CalendarDays, label: "Calendario", permiso: "all" },
+      { href: "/configuracion/catalogos", icon: Tags, label: "Catálogos", permiso: "catalogos" },
       { href: "/equipo", icon: UsersRound, label: "Equipo", permiso: "admin" },
     ],
   },

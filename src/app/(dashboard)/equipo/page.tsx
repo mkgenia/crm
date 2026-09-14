@@ -1,4 +1,5 @@
 import { createClient, createAdminClient } from "@/lib/supabase/server"
+import { traerTodo } from "@/lib/supabase/paginar"
 import { redirect } from "next/navigation"
 import { resolverPermisos } from "@/types/database"
 import { InvitarUsuarioDialog } from "./invitar-usuario-dialog"
@@ -9,10 +10,14 @@ export const metadata = { title: "Equipo — mkgenia" }
 async function getEquipo() {
   const supabase = await createAdminClient()
 
-  const [{ data: perfiles }, { data: captaciones }, { data: leads }] = await Promise.all([
+  const [{ data: perfiles }, captaciones, leads] = await Promise.all([
     supabase.from("perfiles").select("id, nombre, apellidos, rol, avatar_url, telefono, usuario, permisos, created_at").order("rol", { ascending: false }).order("nombre"),
-    supabase.from("captaciones").select("agente_id, estado_agenda").eq("activo", true),
-    supabase.from("leads").select("captado_por"),
+    // Paginadas: con 1.031 captaciones y 1.042 leads, una consulta suelta se
+    // queda en 1.000 y las estadisticas por agente salen cortas sin avisar.
+    traerTodo<{ agente_id: string | null; estado_agenda: string | null }>(() =>
+      supabase.from("captaciones").select("agente_id, estado_agenda").eq("activo", true).order("id", { ascending: true })),
+    traerTodo<{ captado_por: string | null }>(() =>
+      supabase.from("leads").select("captado_por").order("id", { ascending: true })),
   ])
 
   return (perfiles ?? []).map((p) => {

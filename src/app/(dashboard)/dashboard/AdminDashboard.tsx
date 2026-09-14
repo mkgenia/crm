@@ -179,9 +179,10 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
             tono="cyan"
           />
           <OrigenCard
-            href="/captaciones" icon={Radar} label="Scraper"
+            href="/captaciones" icon={Radar} label="Scraper · interesados"
             datos={data.origenes.scraper} periodo={periodo}
             tono="violeta"
+            extra={`${data.interesadosTotal.toLocaleString("es")} interesados ahora mismo`}
           />
           <OrigenCard
             href="/demandas" icon={Inbox} label="Demandas"

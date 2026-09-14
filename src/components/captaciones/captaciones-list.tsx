@@ -1,21 +1,18 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { DetailPanel } from "./detail-panel"
 import { PapeleraList } from "./papelera-list"
-import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, MessageCircle, Trash2, Loader2, CheckSquare, Square, Trash, ChevronLeft, ChevronRight } from "lucide-react"
+import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, Trash2, Loader2, CheckSquare, Square, Trash } from "lucide-react"
 import { CaptacionesPipeline } from "./captaciones-pipeline"
+import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { ESTADO_COLORS, AGENDA_COLORS, WA_CLASIFICACIONES, type EstadoAgenda } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { darDeBajaMasivo, asignarAgentesMasivo } from "@/lib/actions/captaciones"
-import type { getCaptaciones } from "@/lib/actions/captaciones"
+import { darDeBajaMasivo, asignarAgentesMasivo, getCaptaciones } from "@/lib/actions/captaciones"
 
-type Captacion = Awaited<ReturnType<typeof getCaptaciones>>[number]
+type Captacion = Awaited<ReturnType<typeof getCaptaciones>>["filas"][number]
 type AgenteInfo = { id: string; nombre: string; apellidos: string | null; avatar_url: string | null }
-
-// Captaciones renderizadas por página en vistas grid/lista (evita volcar cientos de nodos)
-const PAGE_SIZE = 48
 
 const FILTROS = [
   { key: "todas",       label: "Todas" },
@@ -313,7 +310,10 @@ function ListHeader() {
 }
 
 interface Props {
+  /** Primera página, ya renderizada en el servidor. */
   initialData: Captacion[]
+  /** Total real de esa primera consulta, contado en la base de datos. */
+  initialTotal: number
   eliminadas?: Captacion[]
   total: number
   totalSinAgente: number
@@ -322,12 +322,12 @@ interface Props {
   agentes?: AgenteInfo[]
 }
 
-export function CaptacionesList({ initialData, eliminadas = [], total, totalSinAgente, totalAgendadas, isAdmin = true, agentes = [] }: Props) {
+export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalSinAgente, totalAgendadas, isAdmin = true, agentes = [] }: Props) {
   const [selected, setSelected] = useState<number | null>(null)
+  const [texto, setTexto] = useState("")
   const [search, setSearch] = useState("")
   const [filtro, setFiltro] = useState("todas")
   const [vista, setVista] = useState<"grid" | "list" | "pipeline">("grid")
-  const [page, setPage] = useState(1)
   const [tab, setTab] = useState<"activas" | "papelera">("activas" as "activas" | "papelera")
   const [seleccionados, setSeleccionados] = useState<Set<number>>(new Set())
   const [bajaLoading, setBajaLoading] = useState(false)
@@ -336,45 +336,83 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
   const [confirmBaja, setConfirmBaja] = useState(false)
   const [pendingAgente, setPendingAgente] = useState<AgenteInfo | null>(null)
 
-  const filtered = initialData
-    .filter((c) => {
-      if (!search) return true
-      const q = search.toLowerCase()
-      return (
-        (c.calle ?? "").toLowerCase().includes(q) ||
-        (c.barrio ?? "").toLowerCase().includes(q) ||
-        (c.nombre ?? "").toLowerCase().includes(q)
-      )
-    })
-    .filter((c) => {
-      if (filtro === "sin_agente")  return !c.agente_id
-      if (filtro === "agendadas")   return !!c.agente_id
-      if (filtro === "pendientes")  return !!c.agente_id && c.estado_agenda === "pendiente"
-      if (filtro === "completadas") return c.estado_agenda === "completado"
-      return true
-    })
+  // La página que se ve y su total, las dos cosas traídas del servidor. Filtrar
+  // y buscar también se hacen allí: con 50 filas en memoria, filtrar en el
+  // cliente sólo miraría esas 50 y el resto de las 1.031 no existiría.
+  const [filas, setFilas] = useState<Captacion[]>(initialData)
+  const [totalFiltrado, setTotalFiltrado] = useState(initialTotal)
+  const [pagina, setPagina] = useState(1)
+  const [cargando, setCargando] = useState(false)
+  const [recarga, setRecarga] = useState(0)
 
-  // Reset a la primera página cuando cambian los filtros o la búsqueda
-  useEffect(() => { setPage(1) }, [search, filtro])
+  // Contadores de las pestañas. Los tres primeros vienen contados en la base de
+  // datos; de "pendientes" y "completadas" no hay contador propio, así que se
+  // rellenan con el total real de la consulta la primera vez que se abre ese
+  // filtro. Contarlos sobre las filas cargadas daría 50 siempre.
+  const [totalesFiltro, setTotalesFiltro] = useState<Record<string, number>>({
+    todas: total,
+    sin_agente: totalSinAgente,
+    agendadas: totalAgendadas,
+  })
 
-  // Solo paginamos grid/lista; el pipeline gestiona su propia paginación por columna
-  const paginado = vista === "pipeline"
-  const totalPages = paginado ? 1 : Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const pageSafe = Math.min(page, totalPages)
-  const visibles = useMemo(
-    () => (paginado ? filtered : filtered.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE)),
-    [filtered, paginado, pageSafe]
-  )
+  // El buscador escribe en `texto` y sólo consulta cuando el agente para de
+  // teclear: si no, "Ruzafa" son seis consultas y seis repintados de la lista.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(texto.trim()), 300)
+    return () => clearTimeout(t)
+  }, [texto])
 
-  const counts: Record<string, number> = {
-    todas:       total,
-    sin_agente:  totalSinAgente,
-    agendadas:   totalAgendadas,
-    pendientes:  initialData.filter((c) => c.agente_id && c.estado_agenda === "pendiente").length,
-    completadas: initialData.filter((c) => c.estado_agenda === "completado").length,
+  const primeraCarga = useRef(true)
+  useEffect(() => {
+    // La primera página ya llega renderizada desde el servidor: volver a pedirla
+    // al montar sería una consulta de más en cada visita a la pantalla.
+    if (primeraCarga.current) {
+      primeraCarga.current = false
+      return
+    }
+
+    let cancelado = false
+    setCargando(true)
+    getCaptaciones({ filtro, search, pagina, porPagina: POR_PAGINA })
+      .then((res) => {
+        if (cancelado) return
+        setFilas(res.filas)
+        setTotalFiltrado(res.total)
+        // Con búsqueda el total es el de la búsqueda, no el del filtro.
+        if (!search) setTotalesFiltro((prev) => ({ ...prev, [filtro]: res.total }))
+      })
+      .catch((e: unknown) => {
+        if (!cancelado) toast.error(e instanceof Error ? e.message : "No se pudieron cargar las captaciones")
+      })
+      .finally(() => { if (!cancelado) setCargando(false) })
+
+    // Da por obsoleta la respuesta anterior: tecleando o pasando páginas deprisa
+    // llegan desordenadas, y la última en llegar no tiene por qué ser la buena.
+    return () => { cancelado = true }
+  }, [filtro, search, pagina, recarga])
+
+  // Si la página en la que estás deja de existir —das de baja media lista, o el
+  // filtro tiene menos páginas— el servidor devolvería un tramo vacío.
+  useEffect(() => {
+    const ultima = Math.max(1, Math.ceil(totalFiltrado / POR_PAGINA))
+    if (pagina > ultima) setPagina(ultima)
+  }, [totalFiltrado, pagina])
+
+  // Volver a la página 1 se hace aquí y no en un efecto sobre [filtro, search]:
+  // ese efecto correría con la página vieja todavía puesta y dispararía una
+  // consulta tirada antes de la buena. Si estás en la 9 y filtras por algo con
+  // 20 resultados, sin esto te quedas mirando una página vacía.
+  function cambiarFiltro(key: string) {
+    setFiltro(key)
+    setPagina(1)
   }
 
-  const todosSeleccionados = filtered.length > 0 && filtered.every((c) => seleccionados.has(c.id))
+  function cambiarTexto(valor: string) {
+    setTexto(valor)
+    setPagina(1)
+  }
+
+  const todosSeleccionados = filas.length > 0 && filas.every((c) => seleccionados.has(c.id))
 
   function toggleSeleccion(id: number) {
     setSeleccionados((prev) => {
@@ -388,7 +426,7 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
     if (todosSeleccionados) {
       setSeleccionados(new Set())
     } else {
-      setSeleccionados(new Set(filtered.map((c) => c.id)))
+      setSeleccionados(new Set(filas.map((c) => c.id)))
     }
   }
 
@@ -401,6 +439,9 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
     if (res.error) { toast.error(res.error); return }
     toast.success(`${seleccionados.size} captaciones dadas de baja`)
     setSeleccionados(new Set())
+    // La lista vive ahora en el cliente: sin volver a pedirla, las bajas
+    // seguirían en pantalla hasta recargar la página entera.
+    setRecarga((n) => n + 1)
   }
 
   async function handleAsignarAgente(agente: AgenteInfo) {
@@ -418,11 +459,12 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
     if (res.error) { toast.error(res.error); return }
     toast.success(`${seleccionados.size} captaciones asignadas a ${pendingAgente.nombre}`)
     setSeleccionados(new Set())
+    setRecarga((n) => n + 1)
   }
 
   function seleccionarSinTelefono() {
-    const sinTel = filtered.filter((c) => !hasPhone(c.telefono)).map((c) => c.id)
-    if (!sinTel.length) { toast("No hay captaciones sin teléfono en la vista actual"); return }
+    const sinTel = filas.filter((c) => !hasPhone(c.telefono)).map((c) => c.id)
+    if (!sinTel.length) { toast("No hay captaciones sin teléfono en esta página"); return }
     setSeleccionados(new Set(sinTel))
   }
 
@@ -480,7 +522,7 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
           {FILTROS.filter((f) => isAdmin || f.key !== "sin_agente").map((f) => (
             <button
               key={f.key}
-              onClick={() => setFiltro(f.key)}
+              onClick={() => cambiarFiltro(f.key)}
               className={cn(
                 "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
                 filtro === f.key
@@ -489,9 +531,11 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
               )}
             >
               {f.label}
-              <span className={cn("text-xs px-1.5 py-0.5 rounded-full", filtro === f.key ? "bg-violet-500/20" : "bg-muted")}>
-                {counts[f.key] ?? 0}
-              </span>
+              {totalesFiltro[f.key] !== undefined && (
+                <span className={cn("text-xs px-1.5 py-0.5 rounded-full tabular-nums", filtro === f.key ? "bg-violet-500/20" : "bg-muted")}>
+                  {totalesFiltro[f.key]}
+                </span>
+              )}
             </button>
           ))}
 
@@ -551,8 +595,8 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
               <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                value={texto}
+                onChange={(e) => cambiarTexto(e.target.value)}
                 placeholder="Buscar calle, barrio..."
                 className="pl-8 pr-4 py-1.5 rounded-lg border border-input bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-52"
               />
@@ -583,15 +627,19 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Checkbox seleccionar todos */}
+          {/* Dice "esta página" a propósito: la selección alimenta la baja
+              masiva y sólo alcanza a las filas cargadas. */}
           <button onClick={toggleTodos} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
             {todosSeleccionados
               ? <CheckSquare className="h-3.5 w-3.5 text-violet-500" />
               : <Square className="h-3.5 w-3.5" />
             }
-            {todosSeleccionados ? "Deseleccionar todo" : "Seleccionar todo"}
+            {todosSeleccionados ? "Deseleccionar" : "Seleccionar esta página"}
           </button>
-          <p className="text-xs text-muted-foreground">{filtered.length} captaciones</p>
+          <p className="text-xs text-muted-foreground tabular-nums">
+            {totalFiltrado.toLocaleString("es")} captaciones
+          </p>
+          {cargando && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
 
           {isAdmin && (
             <button
@@ -605,74 +653,68 @@ export function CaptacionesList({ initialData, eliminadas = [], total, totalSinA
         </div>
       </div>
 
-      {vista === "grid" ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-          {visibles.map((c) => (
-            <CaptacionCard
-              key={c.id}
-              cap={c}
-              selected={seleccionados.has(c.id)}
-              onSelect={(e) => { e.stopPropagation(); toggleSeleccion(c.id) }}
-              onClick={() => setSelected(c.id)}
-            />
-          ))}
-        </div>
-      ) : vista === "list" ? (
-        <div className="rounded-xl border border-border bg-card overflow-hidden">
-          <ListHeader />
-          {visibles.map((c) => (
-            <CaptacionRow
-              key={c.id}
-              cap={c}
-              selected={seleccionados.has(c.id)}
-              onSelect={() => toggleSeleccion(c.id)}
-              onClick={() => setSelected(c.id)}
-            />
-          ))}
-        </div>
-      ) : (
-        <CaptacionesPipeline captaciones={filtered} onSelect={(id) => setSelected(id)} />
-      )}
+      <div className="flex flex-col gap-6">
+        {vista === "grid" ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+            {filas.map((c) => (
+              <CaptacionCard
+                key={c.id}
+                cap={c}
+                selected={seleccionados.has(c.id)}
+                onSelect={(e) => { e.stopPropagation(); toggleSeleccion(c.id) }}
+                onClick={() => setSelected(c.id)}
+              />
+            ))}
+          </div>
+        ) : vista === "list" ? (
+          <div className="rounded-xl border border-border bg-card overflow-hidden">
+            <ListHeader />
+            {filas.map((c) => (
+              <CaptacionRow
+                key={c.id}
+                cap={c}
+                selected={seleccionados.has(c.id)}
+                onSelect={() => toggleSeleccion(c.id)}
+                onClick={() => setSelected(c.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <CaptacionesPipeline captaciones={filas} onSelect={(id) => setSelected(id)} />
+        )}
 
-      {/* Paginador (solo grid/lista) */}
-      {!paginado && filtered.length > PAGE_SIZE && (
-        <div className="flex items-center justify-center gap-3 mt-6">
-          <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={pageSafe <= 1}
-            className="flex items-center gap-1 h-9 px-3 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all disabled:opacity-40 disabled:pointer-events-none"
-          >
-            <ChevronLeft className="h-4 w-4" /> Anterior
-          </button>
-          <span className="text-sm text-muted-foreground tabular-nums">
-            Página {pageSafe} de {totalPages}
-            <span className="mx-2 opacity-40">·</span>
-            {(pageSafe - 1) * PAGE_SIZE + 1}–{Math.min(pageSafe * PAGE_SIZE, filtered.length)} de {filtered.length}
-          </span>
-          <button
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            disabled={pageSafe >= totalPages}
-            className="flex items-center gap-1 h-9 px-3 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all disabled:opacity-40 disabled:pointer-events-none"
-          >
-            Siguiente <ChevronRight className="h-4 w-4" />
-          </button>
-        </div>
-      )}
+        {/* El paginador va también en pipeline: el kanban recibe la misma página
+            que las otras vistas, y sin él sus columnas volverían a mentir. */}
+        <Paginador
+          pagina={pagina}
+          porPagina={POR_PAGINA}
+          total={totalFiltrado}
+          onCambiar={setPagina}
+          cargando={cargando}
+        />
 
-      {filtered.length === 0 && (
-        <div className="py-20 text-center space-y-2">
-          <Home className="h-8 w-8 text-muted-foreground/20 mx-auto" />
-          <p className="text-sm text-muted-foreground">
-            {search || filtro !== "todas"
-              ? "No hay captaciones con estos filtros"
-              : isAdmin
-                ? "Aún no hay captaciones. El scraper las importará automáticamente."
-                : "No tienes captaciones asignadas. El admin te asignará propiedades."}
-          </p>
-        </div>
-      )}
+        {filas.length === 0 && !cargando && (
+          <div className="py-20 text-center space-y-2">
+            <Home className="h-8 w-8 text-muted-foreground/20 mx-auto" />
+            <p className="text-sm text-muted-foreground">
+              {texto || filtro !== "todas"
+                ? "No hay captaciones con estos filtros"
+                : isAdmin
+                  ? "Aún no hay captaciones. El scraper las importará automáticamente."
+                  : "No tienes captaciones asignadas. El admin te asignará propiedades."}
+            </p>
+          </div>
+        )}
+      </div>
 
-      <DetailPanel captacionId={selected} onClose={() => setSelected(null)} isAdmin={isAdmin} />
+      {/* Al cerrar la ficha se recarga la página actual: asignar un agente o
+          cambiar el estado desde ahí no se vería en la lista, que ya no se
+          repinta desde el servidor. */}
+      <DetailPanel
+        captacionId={selected}
+        onClose={() => { setSelected(null); setRecarga((n) => n + 1) }}
+        isAdmin={isAdmin}
+      />
 
       {/* Confirm dialog: dar de baja masivo */}
       {confirmBaja && (

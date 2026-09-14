@@ -1,9 +1,12 @@
 "use client"
 
 import { useEffect, useState, useCallback, useRef } from "react"
+import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 import { crearLead, actualizarLead } from "@/lib/actions/leads"
-import { Search, X, Plus, UserCircle, Pencil, Check, Loader2 } from "lucide-react"
+import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
+import { cn } from "@/lib/utils"
+import { AlertCircle, Search, X, Plus, UserCircle, Pencil, Check, Loader2, RefreshCw } from "lucide-react"
 import type { EstadoLead } from "@/types/captaciones"
 
 const ESTADOS: EstadoLead[] = ["Nuevo", "Contactado", "Interesado", "Propuesta", "Negociacion", "Ganado", "Perdido"]
@@ -19,6 +22,9 @@ const ESTADO_CFG: Record<EstadoLead, { badge: string; label: string; dot: string
 }
 
 const FUENTES = ["Manual", "Web", "Captaciones", "Referido", "Redes sociales", "Llamada", "Otro"]
+
+const COLUMNAS =
+  "id, nombre, apellidos, email, telefono, fuente, estado, notas, fecha_creacion, captado_por, captacion_id, agente:perfiles!leads_captado_por_fkey(nombre, apellidos)"
 
 interface Lead {
   id: string
@@ -49,8 +55,12 @@ function timeAgo(date: string) {
 export default function LeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([])
   const [loading, setLoading] = useState(true)
+  const [errorCarga, setErrorCarga] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [estadoFilter, setEstadoFilter] = useState<EstadoLead | "">("")
+  const [pagina, setPagina] = useState(1)
+  /** Total real de leads que cumplen el filtro, contado en la base de datos. */
+  const [total, setTotal] = useState(0)
   const [isAdmin, setIsAdmin] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Lead | null>(null)
@@ -71,44 +81,136 @@ export default function LeadsPage() {
 
   const supabase = createClient()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Número de la última carga pedida. Ver `peticion` dentro de fetchLeads. */
+  const peticionRef = useRef(0)
 
-  const fetchLeads = useCallback(async (uid: string, admin: boolean) => {
+  /**
+   * Trae UNA página de leads y, con ella, el total de verdad.
+   *
+   * El total sale de { count: "exact" } — PostgREST lo manda en la cabecera
+   * Content-Range — y no de contar las filas traídas, que dirían siempre 50.
+   * Antes esto pedía .limit(500) sobre 1.042 leads: faltaban quinientos y la
+   * pantalla no decía ni pío.
+   */
+  const fetchLeads = useCallback(async (uid: string, admin: boolean, pag: number) => {
+    // Dos cargas pueden estar en el aire a la vez: tecleas mientras vuelve la
+    // anterior, o entra un lead por realtime justo cuando cambias de página. Sin
+    // esto, la respuesta lenta de "car" pinta encima de la de "carlos" y acabas
+    // viendo una lista que no corresponde a lo que pone el buscador. Sólo la
+    // última carga pedida tiene permiso para tocar el estado.
+    const peticion = ++peticionRef.current
+    const vigente = () => peticion === peticionRef.current
+
     setLoading(true)
-    try {
-      let query = supabase
-        .from("leads")
-        .select("id, nombre, apellidos, email, telefono, fuente, estado, notas, fecha_creacion, captado_por, captacion_id, agente:perfiles!leads_captado_por_fkey(nombre, apellidos)")
-        .order("fecha_creacion", { ascending: false })
 
+    // Una consulta que falla no es una lista vacía. Hasta ahora el error se
+    // tragaba en silencio y la pantalla ponía "Aún no tienes leads" con la base
+    // de datos llena, que es la peor manera posible de equivocarse.
+    const fallar = (mensaje: string) => {
+      if (!vigente()) return
+      setErrorCarga(mensaje)
+      setLeads([])
+      setTotal(0)
+      toast.error("No se han podido cargar los leads")
+    }
+
+    try {
+      let capIds: number[] = []
       if (!admin) {
-        const { data: caps } = await supabase
+        const { data: caps, error: errorCaps } = await supabase
           .from("captaciones")
           .select("id")
           .eq("agente_id", uid)
-        const capIds = (caps ?? []).map((c: { id: number }) => c.id)
-
-        if (capIds.length > 0) {
-          query = query.or(`captado_por.eq.${uid},captacion_id.in.(${capIds.join(",")})`)
-        } else {
-          query = query.eq("captado_por", uid)
+        // Si esta falla y la damos por vacía, el agente deja de ver los leads de
+        // sus captaciones y la lista parece correcta: hay que decirlo.
+        if (errorCaps) {
+          fallar(errorCaps.message)
+          return
         }
+        capIds = (caps ?? []).map((c: { id: number }) => c.id)
       }
 
-      if (estadoFilter) query = query.eq("estado", estadoFilter)
-      if (search.trim()) {
-        query = query.or(`nombre.ilike.%${search}%,apellidos.ilike.%${search}%,telefono.ilike.%${search}%`)
+      // La consulta se construye más de una vez —la página y, si hace falta, el
+      // recuento de rescate de más abajo— porque un constructor de supabase-js
+      // no se puede reutilizar una vez lanzado.
+      // Genérica en las columnas: supabase-js deduce el tipo de `data` del
+      // literal del select, y con un `string` a secas lo da por fallido.
+      const construir = <C extends string>(columnas: C, head = false) => {
+        let q = supabase.from("leads").select(columnas, { count: "exact", head })
+
+        if (!admin) {
+          if (capIds.length > 0) {
+            q = q.or(`captado_por.eq.${uid},captacion_id.in.(${capIds.join(",")})`)
+          } else {
+            q = q.eq("captado_por", uid)
+          }
+        }
+
+        if (estadoFilter) q = q.eq("estado", estadoFilter)
+
+        // El valor va entre comillas: PostgREST parte el `or` por comas y
+        // paréntesis, así que buscar "Pérez, Juan" sin ellas rompe el filtro y
+        // devuelve un 400. Dentro de las comillas, la barra y la comilla son el
+        // escape, y no hay nada que buscar con ellas en un nombre o un teléfono.
+        const termino = search.trim().replace(/["\\]/g, "")
+        if (termino) {
+          q = q.or(
+            `nombre.ilike."%${termino}%",apellidos.ilike."%${termino}%",telefono.ilike."%${termino}%"`,
+          )
+        }
+
+        return q
       }
 
-      const { data } = await query.limit(500)
+      const desde = (pag - 1) * POR_PAGINA
+      const { data, error, count } = await construir(COLUMNAS)
+        .order("fecha_creacion", { ascending: false })
+        .range(desde, desde + POR_PAGINA - 1)
+
+      if (!vigente()) return
+
+      if (error) {
+        // Pedir un rango que empieza más allá del total NO devuelve una lista
+        // vacía: PostgREST contesta 416 y supabase-js lo entrega como error, sin
+        // `count`. Pasa al borrar o reasignar leads mientras miras una página
+        // alta. No es un fallo de carga y no debe enseñar la pantalla roja: se
+        // baja a la última página que exista. El total hay que preguntarlo
+        // aparte justo porque el 416 no lo trae.
+        if ((error as { code?: string }).code === "PGRST103" && pag > 1) {
+          const { count: real } = await construir("id", true)
+          if (!vigente()) return
+          setErrorCarga(null)
+          setPagina(Math.max(1, Math.ceil((real ?? 0) / POR_PAGINA)))
+          return
+        }
+        fallar(error.message)
+        return
+      }
+
+      const totalReal = count ?? 0
+      setTotal(totalReal)
+
+      // Misma caída de página que arriba, para cuando el servidor sí responde
+      // 200 con un total por debajo de la página pedida.
+      const paginas = Math.max(1, Math.ceil(totalReal / POR_PAGINA))
+      if (pag > paginas) {
+        setErrorCarga(null)
+        setPagina(paginas)
+        return
+      }
+
       const normalized = (data ?? []).map((row: Record<string, unknown>) => ({
         ...row,
         agente: Array.isArray(row.agente) ? (row.agente[0] ?? null) : (row.agente ?? null),
       }))
       setLeads(normalized as Lead[])
-    } catch {
-      // silencioso — la lista queda vacía
+      setErrorCarga(null)
+    } catch (e) {
+      fallar(e instanceof Error ? e.message : "No hay conexión con el servidor")
     } finally {
-      setLoading(false)
+      // Si ya hay otra carga en marcha, quitar el "Cargando..." desde aquí haría
+      // parpadear la lista vieja antes de que llegue la buena.
+      if (vigente()) setLoading(false)
     }
   }, [estadoFilter, search])
 
@@ -126,14 +228,77 @@ export default function LeadsPage() {
     init()
   }, [])
 
-  // Refetch al cambiar filtros o al tener userId; debounce solo para búsqueda de texto
+  // Refetch al cambiar filtros, página o al tener userId; debounce solo para búsqueda de texto
   useEffect(() => {
     if (userId === null) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
     const delay = search ? 300 : 0
-    debounceRef.current = setTimeout(() => fetchLeads(userId, isAdmin), delay)
+    debounceRef.current = setTimeout(() => fetchLeads(userId, isAdmin, pagina), delay)
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [estadoFilter, search, fetchLeads, userId, isAdmin])
+  }, [estadoFilter, search, fetchLeads, userId, isAdmin, pagina])
+
+  // La página que se está mirando, en una ref: el canal de realtime se monta una
+  // vez y así la lee sin tener que resuscribirse cada vez que pasas de página.
+  const paginaRef = useRef(pagina)
+  useEffect(() => { paginaRef.current = pagina }, [pagina])
+
+  // Y lo mismo con fetchLeads, que cambia de identidad con cada tecla del
+  // buscador: si el efecto del canal dependiera de ella, cada pulsación
+  // desmontaría y volvería a montar la suscripción, y en ese hueco los INSERT
+  // que lleguen se pierden.
+  const fetchRef = useRef(fetchLeads)
+  useEffect(() => { fetchRef.current = fetchLeads }, [fetchLeads])
+
+  // Al cambiar de página la lista vuelve arriba; si no, aterrizas en mitad de la
+  // página nueva. Depende sólo de `pagina`, así que una recarga por realtime —
+  // que no la toca — no te mueve el scroll de donde lo tenías.
+  const listaRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { listaRef.current?.scrollTo({ top: 0 }) }, [pagina])
+
+  /**
+   * Leads nuevos, en vivo.
+   *
+   * Hasta ahora la lista se pedía una sola vez al abrir la pantalla, así que un
+   * lead que entrara con la pestaña abierta no aparecía nunca — por mucho que
+   * el aviso por correo hubiera llegado hacía media hora. Pasó de verdad el
+   * 14/09/2026 con un lead de la ficha de propiedad: estaba en la base de datos
+   * y la pantalla no lo enseñaba.
+   *
+   * Se recarga la lista en vez de insertar la fila suelta porque el filtro, el
+   * buscador y el agente asociado los resuelve la consulta: añadirla a mano aquí
+   * significaría reimplementar todo eso en el cliente y acabar enseñando leads
+   * que el filtro activo debería esconder.
+   *
+   * Recarga LA PÁGINA QUE ESTÁS MIRANDO, nunca la primera: si estás repasando la
+   * página 3 y entra un lead, saltar a la 1 te quita de las manos lo que estabas
+   * leyendo. Tampoco puede dejarte en una página inexistente: un INSERT sólo
+   * hace crecer el total, y si aun así se fuera de rango, fetchLeads baja sola a
+   * la última página que exista. Lo que sí ocurre es que el lead nuevo entra el
+   * primero y corre una fila a todo lo demás — es inherente a paginar por rango,
+   * y a cambio el total del paginador se actualiza en esa misma consulta.
+   */
+  useEffect(() => {
+    if (userId === null) return
+    const canal = supabase
+      .channel("leads-nuevos")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "leads" }, () => {
+        fetchRef.current(userId, isAdmin, paginaRef.current)
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(canal) }
+  }, [userId, isAdmin])
+
+  // Cualquier cambio de filtro o de búsqueda vuelve a la página 1: si estás en la
+  // 9 y filtras por algo que da veinte resultados, te quedas mirando el vacío.
+  function filtrarPor(estado: EstadoLead | "") {
+    setEstadoFilter(estado)
+    setPagina(1)
+  }
+
+  function buscar(texto: string) {
+    setSearch(texto)
+    setPagina(1)
+  }
 
   function abrirEdicion() {
     if (!selected) return
@@ -180,13 +345,17 @@ export default function LeadsPage() {
     }
     setShowModal(false)
     formRef.current?.reset()
-    if (userId) fetchLeads(userId, isAdmin)
+    // El lead recién creado entra el primero (orden por fecha desc): si estabas
+    // en otra página no lo verías, así que volvemos a la primera. Cambiar de
+    // página ya dispara la recarga; si ya estabas en la 1, hay que pedirla.
+    if (pagina !== 1) setPagina(1)
+    else if (userId) fetchLeads(userId, isAdmin, 1)
   }
 
-  const counts = ESTADOS.reduce((acc, e) => {
-    acc[e] = leads.filter((l) => l.estado === e).length
-    return acc
-  }, {} as Record<EstadoLead, number>)
+  // Las pastillas ya no llevan número. Se contaba sobre las filas cargadas, así
+  // que ahora pondría "Ganado 3" mirando 50 de 1.042: un número que miente es
+  // exactamente lo que este paginador viene a quitar de en medio. El total real,
+  // contado en la base de datos, está en la cabecera y en el paginador.
 
   return (
     <div className="flex h-full overflow-hidden p-7 gap-5">
@@ -196,12 +365,16 @@ export default function LeadsPage() {
 
         {/* Header */}
         <div className="flex items-start justify-between shrink-0">
-          <div>
+          <div className="flex flex-col gap-1">
             <h1 className="text-xl font-semibold">
               {isAdmin ? "Leads" : "Mis leads"}
             </h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              {loading ? "Cargando..." : `${leads.length} leads${leads.length === 500 ? " (límite alcanzado)" : ""}`}
+            <p className="text-sm text-muted-foreground">
+              {loading
+                ? "Cargando..."
+                : errorCarga
+                  ? "No se ha podido cargar la lista"
+                  : `${total.toLocaleString("es")} ${total === 1 ? "lead" : "leads"}`}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -211,7 +384,7 @@ export default function LeadsPage() {
                 type="text"
                 placeholder="Buscar..."
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => buscar(e.target.value)}
                 className="pl-8 pr-3 h-9 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-48"
               />
             </div>
@@ -228,42 +401,60 @@ export default function LeadsPage() {
         {/* Pills filtro estado */}
         <div className="flex items-center gap-2 overflow-x-auto shrink-0">
           <button
-            onClick={() => setEstadoFilter("")}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
-              estadoFilter === "" ? "bg-foreground text-background border-foreground" : "border-border text-muted-foreground hover:border-muted-foreground/40"
-            }`}
+            onClick={() => filtrarPor("")}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
+              estadoFilter === "" ? "bg-foreground text-background border-foreground" : "border-border text-muted-foreground hover:border-muted-foreground/40",
+            )}
           >
-            Todos <span className="opacity-70 tabular-nums">{leads.length}</span>
+            Todos
           </button>
           {ESTADOS.map((e) => (
             <button
               key={e}
-              onClick={() => setEstadoFilter(estadoFilter === e ? "" : e)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all ${
-                estadoFilter === e ? ESTADO_CFG[e].badge : "border-border text-muted-foreground hover:border-muted-foreground/40"
-              }`}
+              onClick={() => filtrarPor(estadoFilter === e ? "" : e)}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
+                estadoFilter === e ? ESTADO_CFG[e].badge : "border-border text-muted-foreground hover:border-muted-foreground/40",
+              )}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${ESTADO_CFG[e].dot}`} />
+              <span className={cn("h-1.5 w-1.5 rounded-full", ESTADO_CFG[e].dot)} />
               {ESTADO_CFG[e].label}
-              <span className="tabular-nums opacity-70">{counts[e]}</span>
             </button>
           ))}
         </div>
 
         {/* List card */}
-        <div className="flex-1 rounded-xl border border-border bg-card overflow-y-auto scrollbar-thin">
+        <div ref={listaRef} className="flex-1 rounded-xl border border-border bg-card overflow-y-auto scrollbar-thin">
           {loading ? (
             <div className="p-10 text-center text-sm text-muted-foreground">Cargando leads...</div>
+          ) : errorCarga ? (
+            <div className="p-16 flex flex-col items-center gap-4 text-center">
+              <div className="h-14 w-14 rounded-full bg-red-500/10 flex items-center justify-center">
+                <AlertCircle className="h-7 w-7 text-red-500" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-medium text-foreground">No se han podido cargar los leads</p>
+                <p className="text-xs text-muted-foreground">{errorCarga}</p>
+              </div>
+              <button
+                onClick={() => { if (userId) fetchLeads(userId, isAdmin, pagina) }}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Reintentar
+              </button>
+            </div>
           ) : leads.length === 0 ? (
             <div className="p-16 flex flex-col items-center gap-4 text-center">
               <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">
                 <UserCircle className="h-7 w-7 text-muted-foreground" />
               </div>
-              <div>
+              <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">
                   {search || estadoFilter ? "No hay leads con estos filtros" : "Aún no tienes leads"}
                 </p>
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-xs text-muted-foreground">
                   {search || estadoFilter
                     ? "Prueba cambiando los filtros de búsqueda"
                     : "Los leads se crean automáticamente cuando un propietario responde, o puedes añadir uno manualmente"}
@@ -285,16 +476,19 @@ export default function LeadsPage() {
                 <button
                   key={lead.id}
                   onClick={() => { setSelected(selected?.id === lead.id ? null : lead); setEditando(false) }}
-                  className={`w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-muted/40 ${selected?.id === lead.id ? "bg-muted/60" : ""}`}
+                  className={cn(
+                    "w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-muted/40",
+                    selected?.id === lead.id && "bg-muted/60",
+                  )}
                 >
                   <div className="h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 bg-gradient-to-br from-[oklch(0.65_0.22_295)] via-[oklch(0.80_0.15_200)] to-[oklch(0.80_0.18_145)] text-white">
                     {lead.nombre.charAt(0).toUpperCase()}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                     <p className="text-sm font-medium text-foreground truncate">
                       {lead.nombre}{lead.apellidos ? ` ${lead.apellidos}` : ""}
                     </p>
-                    <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       {lead.telefono && <span>{lead.telefono}</span>}
                       {lead.fuente && <span className="opacity-60">· {lead.fuente}</span>}
                       {isAdmin && lead.agente && (
@@ -302,7 +496,7 @@ export default function LeadsPage() {
                       )}
                     </div>
                   </div>
-                  <span className={`text-xs px-2 py-0.5 rounded border font-medium shrink-0 ${ESTADO_CFG[lead.estado].badge}`}>
+                  <span className={cn("text-xs px-2 py-0.5 rounded border font-medium shrink-0", ESTADO_CFG[lead.estado].badge)}>
                     {ESTADO_CFG[lead.estado].label}
                   </span>
                   <span className="text-xs text-muted-foreground/50 w-8 text-right shrink-0 hidden sm:block">
@@ -313,6 +507,15 @@ export default function LeadsPage() {
             </div>
           )}
         </div>
+
+        <Paginador
+          pagina={pagina}
+          porPagina={POR_PAGINA}
+          total={total}
+          onCambiar={setPagina}
+          cargando={loading}
+          className="shrink-0"
+        />
       </div>
 
       {/* ── Right: detail panel ── */}
@@ -406,11 +609,12 @@ export default function LeadsPage() {
                     key={e}
                     onClick={() => cambiarEstado(selected.id, e)}
                     disabled={updatingId === selected.id}
-                    className={`text-xs px-2 py-1.5 rounded border font-medium transition-all ${
+                    className={cn(
+                      "text-xs px-2 py-1.5 rounded border font-medium transition-all",
                       selected.estado === e
                         ? ESTADO_CFG[e].badge
-                        : "border-border text-muted-foreground hover:border-muted-foreground/40"
-                    }`}
+                        : "border-border text-muted-foreground hover:border-muted-foreground/40",
+                    )}
                   >
                     {ESTADO_CFG[e].label}
                   </button>

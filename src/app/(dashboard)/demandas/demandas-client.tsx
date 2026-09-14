@@ -5,12 +5,28 @@ import { createClient } from "@/lib/supabase/client"
 import { actualizarPropiedad, desactivarPropiedad, eliminarDemanda, eliminarPropiedad } from "@/lib/actions/demandas"
 import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail } from "lucide-react"
 import { toast } from "sonner"
+import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
+import { traerTodo } from "@/lib/supabase/paginar"
+import { cn } from "@/lib/utils"
 import { ESTADOS_DEMANDA, ESTADO_DEMANDA_CFG, FUENTE_CFG } from "@/types/demandas"
 import type { Demanda, PropiedadDemanda, EstadoDemanda } from "@/types/demandas"
 
 interface PropiedadConConteos extends PropiedadDemanda {
   totalDemandas: number
   noVistas: number
+}
+
+/** Lo que devuelve la consulta: la propiedad más el agregado `demandas(count)`. */
+type FilaPropiedad = PropiedadDemanda & { demandas?: { count: number }[] | null }
+
+/**
+ * El filtro `or` de PostgREST se escribe como una lista separada por comas
+ * dentro de paréntesis, así que una coma o un paréntesis tecleados en la caja de
+ * búsqueda parten la consulta por la mitad y devuelven un 400. `*` y `%` son
+ * comodines de `ilike` y harían que "Sant%" trajese cosas que nadie pidió.
+ */
+function limpiarBusqueda(valor: string) {
+  return valor.trim().replace(/[,()*%\\"]/g, "").trim()
 }
 
 function timeAgo(date: string) {
@@ -34,6 +50,13 @@ export default function DemandasPage() {
   const [propiedades, setPropiedades] = useState<PropiedadConConteos[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
+  /** Lo que se ha buscado de verdad, ya con el rebote aplicado. */
+  const [termino, setTermino] = useState("")
+  const [pagina, setPagina] = useState(1)
+  /** Propiedades que cumplen el filtro, contadas en la base de datos. */
+  const [total, setTotal] = useState(0)
+  /** null = todavía no se sabe; un 0 inventado diría que no hay demandas. */
+  const [totalDemandas, setTotalDemandas] = useState<number | null>(null)
   const [selected, setSelected] = useState<PropiedadConConteos | null>(null)
   const [demandas, setDemandas] = useState<Demanda[]>([])
   const [loadingDemandas, setLoadingDemandas] = useState(false)
@@ -51,43 +74,129 @@ export default function DemandasPage() {
 
   const supabase = createClient()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const listaRef = useRef<HTMLDivElement | null>(null)
+  const peticionRef = useRef(0)
   const selectedRef = useRef<PropiedadConConteos | null>(null)
   selectedRef.current = selected
 
-  const fetchPropiedades = useCallback(async () => {
+  const paginas = Math.max(1, Math.ceil(total / POR_PAGINA))
+  /** La página pedida ya no existe; el efecto de abajo está devolviendo a la última. */
+  const fueraDeRango = pagina > paginas
+
+  const fetchPropiedades = useCallback(async (pagina: number, termino: string) => {
+    // Cada petición se queda con su número. Si mientras va y viene se teclea otra
+    // búsqueda o se cambia de página, la que llega tarde se descarta: si no, la
+    // respuesta vieja pinta filas que no son las de la página que marca el
+    // paginador, y eso es peor que no enseñar nada.
+    const peticion = ++peticionRef.current
     setLoading(true)
     try {
-      const { data } = await supabase
-        .from("propiedades_demanda")
-        .select("*, demandas(id, visto)")
-        .eq("activo", true)
-        .order("updated_at", { ascending: false })
+      const desde = (pagina - 1) * POR_PAGINA
 
-      const result: PropiedadConConteos[] = (data ?? []).map((p: any) => {
-        const ds: { id: string; visto: boolean }[] = p.demandas ?? []
-        const { demandas: _d, ...rest } = p
+      // `demandas(count)` deja que Postgres cuente las demandas de cada
+      // propiedad. Antes se traían las filas enteras sólo para hacerles un
+      // .length, y son esas las que reventaban el tope: 1.825 demandas viajando
+      // para pintar un "89 demandas" en un lateral.
+      let q = supabase
+        .from("propiedades_demanda")
+        .select("*, demandas(count)", { count: "exact" })
+        .eq("activo", true)
+
+      const t = limpiarBusqueda(termino)
+      if (t) q = q.or(`ref.ilike.%${t}%,ciudad.ilike.%${t}%,zona.ilike.%${t}%,tipo.ilike.%${t}%`)
+
+      // El id desempata el orden. Con updated_at a secas, dos propiedades con la
+      // misma marca de tiempo pueden intercambiarse entre una petición y la
+      // siguiente, y entonces una sale dos veces y otra no sale en ninguna.
+      const { data, count, error } = await q
+        .order("updated_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(desde, desde + POR_PAGINA - 1)
+
+      if (peticion !== peticionRef.current) return
+
+      if (error) {
+        toast.error("No se pudieron cargar las propiedades")
+        return
+      }
+
+      const filas = (data ?? []) as FilaPropiedad[]
+
+      // Las no vistas van aparte porque en el mismo select harían falta dos
+      // agregados de la misma tabla y uno de ellos filtrado. Aquí sí hacen falta
+      // las filas para agruparlas, y aunque sean las de 50 propiedades pueden
+      // pasar del tope de 1.000 después de un puente: traerTodo pagina hasta
+      // agotarlas. El orden por id es lo que impide que ese paginado repita o se
+      // salte filas y descuadre el recuento.
+      const pendientes = new Map<string, number>()
+      if (filas.length) {
+        const ids = filas.map((p) => p.id)
+        const sinVer = await traerTodo<{ propiedad_id: string }>(() =>
+          supabase
+            .from("demandas")
+            .select("propiedad_id")
+            .in("propiedad_id", ids)
+            .eq("visto", false)
+            .order("id", { ascending: true })
+        )
+        for (const d of sinVer) {
+          pendientes.set(d.propiedad_id, (pendientes.get(d.propiedad_id) ?? 0) + 1)
+        }
+        if (peticion !== peticionRef.current) return
+      }
+
+      setPropiedades(filas.map((p) => {
+        const { demandas: agregado, ...rest } = p
         return {
           ...rest,
           extras: rest.extras ?? [],
-          totalDemandas: ds.length,
-          noVistas: ds.filter((d) => !d.visto).length,
+          totalDemandas: agregado?.[0]?.count ?? 0,
+          noVistas: pendientes.get(p.id) ?? 0,
         }
-      })
-      result.sort((a, b) => b.noVistas - a.noVistas || b.totalDemandas - a.totalDemandas)
-      setPropiedades(result)
+      }))
+      setTotal(count ?? 0)
     } finally {
-      setLoading(false)
+      // Sólo la última petición apaga el indicador: si lo apagase la que llega
+      // tarde, la lista se daría por cargada mientras la buena sigue en camino.
+      if (peticion === peticionRef.current) setLoading(false)
     }
+  }, [])
+
+  const fetchTotalDemandas = useCallback(async () => {
+    // head:true trae sólo la cabecera con el total: la cabecera de la página
+    // tiene que decir 1.825 aunque en pantalla haya 50 propiedades, y sumar lo
+    // que se ve daría un número más pequeño cada vez que pasas de página.
+    const { count, error } = await supabase.from("demandas").select("id", { count: "exact", head: true })
+    // Si falla se deja en null y la cabecera no menciona las demandas. Poner un 0
+    // sería decir que no hay ninguna, que es justo la clase de mentira silenciosa
+    // que vinimos a quitar.
+    if (error || count === null) return
+    setTotalDemandas(count)
   }, [])
 
   const fetchDemandas = useCallback(async (propiedadId: string) => {
     setLoadingDemandas(true)
-    const { data } = await supabase
+    // Esta lista no se pagina: la propiedad más solicitada anda por las 90
+    // demandas y caben de sobra. El count está para que el día que deje de ser
+    // verdad se vea — PostgREST recorta en 1.000 devolviendo 200 OK.
+    const { data, count, error } = await supabase
       .from("demandas")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("propiedad_id", propiedadId)
       .order("fecha_creacion", { ascending: false })
-    setDemandas((data ?? []) as Demanda[])
+    if (error) {
+      // Sin esto, un fallo de red dejaba el panel con el vacío de "sin demandas"
+      // en una propiedad que sí las tiene.
+      toast.error("No se pudieron cargar las demandas de esta propiedad")
+      setDemandas([])
+      setLoadingDemandas(false)
+      return
+    }
+    const filas = (data ?? []) as Demanda[]
+    if (count !== null && count > filas.length) {
+      toast.warning(`Esta propiedad tiene ${count} demandas y sólo se han podido cargar ${filas.length}`)
+    }
+    setDemandas(filas)
     setLoadingDemandas(false)
 
     // Marcar como vistas
@@ -96,25 +205,23 @@ export default function DemandasPage() {
   }, [])
 
   useEffect(() => {
-    fetchPropiedades()
+    fetchTotalDemandas()
 
     const channel = supabase
       .channel("demandas-page")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "demandas" }, (payload) => {
         const nueva = payload.new as any
-        setPropiedades((prev) => {
-          const exists = prev.find((p) => p.id === nueva.propiedad_id)
-          if (exists) {
-            return prev.map((p) =>
-              p.id === nueva.propiedad_id
-                ? { ...p, totalDemandas: p.totalDemandas + 1, noVistas: p.noVistas + 1 }
-                : p
-            )
-          }
-          // Si la propiedad no estaba en la lista, recargar todo
-          fetchPropiedades()
-          return prev
-        })
+        // Si la propiedad está en la página que se ve, se le suma la demanda. Si
+        // no está, no se recarga nada: recargar movería la lista bajo los pies
+        // de quien la esté leyendo, y el aviso ya sale por el toast.
+        setPropiedades((prev) =>
+          prev.map((p) =>
+            p.id === nueva.propiedad_id
+              ? { ...p, totalDemandas: p.totalDemandas + 1, noVistas: p.noVistas + 1 }
+              : p
+          )
+        )
+        setTotalDemandas((n) => (n === null ? n : n + 1))
         if (selectedRef.current?.id === nueva.propiedad_id) {
           setDemandas((prev) => [nueva as Demanda, ...prev])
         }
@@ -125,13 +232,36 @@ export default function DemandasPage() {
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [fetchPropiedades])
+  }, [fetchTotalDemandas])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    debounceRef.current = setTimeout(() => fetchPropiedades(), search ? 300 : 0)
+    debounceRef.current = setTimeout(() => {
+      // Se guarda ya limpio: si sólo se teclean caracteres que hay que quitar, el
+      // término queda vacío y la pantalla no dice "sin resultados" de una
+      // búsqueda que en realidad no se ha llegado a filtrar.
+      setTermino(limpiarBusqueda(search))
+      // Volver a la 1 al cambiar la búsqueda: si estás en la página 9 y filtras
+      // por algo con 20 resultados, te quedas mirando una página vacía.
+      setPagina(1)
+    }, search ? 300 : 0)
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [search, fetchPropiedades])
+  }, [search])
+
+  useEffect(() => {
+    fetchPropiedades(pagina, termino)
+    // Al cambiar de página se vuelve arriba: si no, aterrizas a media lista
+    // sobre filas que no son las que estabas mirando.
+    listaRef.current?.scrollTo({ top: 0 })
+  }, [pagina, termino, fetchPropiedades])
+
+  // Borrar o desactivar puede dejar la página actual fuera de rango: estabas en
+  // la 2 con 51 propiedades, quitas una y quedan 50, o sea una sola página. Sin
+  // esto te quedas mirando una lista vacía con medio centenar de fichas detrás,
+  // que es la misma sensación de "faltan datos" que veníamos a arreglar.
+  useEffect(() => {
+    if (pagina > paginas) setPagina(paginas)
+  }, [pagina, paginas])
 
   function selectPropiedad(p: PropiedadConConteos) {
     if (selected?.id === p.id) {
@@ -195,6 +325,10 @@ export default function DemandasPage() {
     const res = await desactivarPropiedad(selected.id)
     if (res.error) { toast.error(res.error); return }
     setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
+    // El total es el que cuenta la base de datos, así que al quitar una fila hay
+    // que bajarlo a mano o el paginador seguiría prometiendo una propiedad que
+    // ya no está.
+    setTotal((n) => Math.max(0, n - 1))
     setSelected(null)
     toast.success("Propiedad desactivada")
   }
@@ -205,6 +339,8 @@ export default function DemandasPage() {
     const res = await eliminarPropiedad(selected.id)
     if (res.error) { toast.error(res.error); return }
     setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
+    setTotal((n) => Math.max(0, n - 1))
+    setTotalDemandas((n) => (n === null ? n : Math.max(0, n - selected.totalDemandas)))
     setSelected(null)
     setDemandas([])
     toast.success("Propiedad eliminada")
@@ -216,6 +352,7 @@ export default function DemandasPage() {
     setDeletingId(null)
     if (res.error) { toast.error(res.error); return }
     setDemandas((prev) => prev.filter((d) => d.id !== demandaId))
+    setTotalDemandas((n) => (n === null ? n : Math.max(0, n - 1)))
     if (selected) {
       setPropiedades((prev) =>
         prev.map((p) => p.id === selected.id ? { ...p, totalDemandas: Math.max(0, p.totalDemandas - 1) } : p)
@@ -232,31 +369,22 @@ export default function DemandasPage() {
     setEditingDemandId(null)
   }
 
-  const filtered = propiedades.filter((p) => {
-    if (!search.trim()) return true
-    const s = search.toLowerCase()
-    return (
-      p.ref.toLowerCase().includes(s) ||
-      p.ciudad?.toLowerCase().includes(s) ||
-      p.zona?.toLowerCase().includes(s) ||
-      p.tipo?.toLowerCase().includes(s)
-    )
-  })
-
-  const totalDemandas = propiedades.reduce((a, p) => a + p.totalDemandas, 0)
+  const resumen = termino
+    ? `${total.toLocaleString("es")} propiedad${total !== 1 ? "es" : ""} encontrada${total !== 1 ? "s" : ""}`
+    : totalDemandas === null
+      ? `${total.toLocaleString("es")} propiedades`
+      : `${total.toLocaleString("es")} propiedades · ${totalDemandas.toLocaleString("es")} demanda${totalDemandas !== 1 ? "s" : ""}`
 
   return (
     <div className="flex h-full overflow-hidden">
       {/* ── Left: property list ── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <div className="p-8 pb-0 shrink-0">
-          <div className="flex items-start justify-between mb-6">
-            <div>
+        <div className="p-8 pb-0 shrink-0 flex flex-col gap-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col gap-1">
               <h1 className="text-2xl font-semibold">Demandas</h1>
-              <p className="text-sm text-muted-foreground mt-1">
-                {loading
-                  ? "Cargando..."
-                  : `${propiedades.length} propiedades · ${totalDemandas} demanda${totalDemandas !== 1 ? "s" : ""}`}
+              <p className="text-sm text-muted-foreground tabular-nums">
+                {loading || fueraDeRango ? "Cargando..." : resumen}
               </p>
             </div>
             <div className="relative">
@@ -273,20 +401,20 @@ export default function DemandasPage() {
           <div className="border-b border-border" />
         </div>
 
-        <div className="flex-1 overflow-y-auto">
-          {loading ? (
+        <div ref={listaRef} className="flex-1 overflow-y-auto">
+          {loading || fueraDeRango ? (
             <div className="p-10 text-center text-sm text-muted-foreground">Cargando...</div>
-          ) : filtered.length === 0 ? (
+          ) : propiedades.length === 0 ? (
             <div className="p-16 flex flex-col items-center gap-4 text-center">
               <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">
                 <Building2 className="h-7 w-7 text-muted-foreground" />
               </div>
-              <div>
+              <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">
-                  {search ? "Sin resultados" : "Sin demandas todavía"}
+                  {termino ? "Sin resultados" : "Sin demandas todavía"}
                 </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {search
+                <p className="text-xs text-muted-foreground">
+                  {termino
                     ? "Prueba con otro término"
                     : "Las demandas llegan automáticamente desde los portales vía email"}
                 </p>
@@ -294,14 +422,17 @@ export default function DemandasPage() {
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {filtered.map((p) => {
+              {propiedades.map((p) => {
                 const precio = fmtPrecio(p.precio_alquiler, p.precio_venta)
                 const active = selected?.id === p.id
                 return (
                   <button
                     key={p.id}
                     onClick={() => selectPropiedad(p)}
-                    className={`w-full flex items-start gap-4 px-8 py-4 text-left transition-colors hover:bg-muted/40 ${active ? "bg-muted/60" : ""}`}
+                    className={cn(
+                      "w-full flex items-start gap-4 px-8 py-4 text-left transition-colors hover:bg-muted/40",
+                      active && "bg-muted/60"
+                    )}
                   >
                     <div className="h-9 w-9 rounded-md flex items-center justify-center shrink-0 bg-muted border border-border">
                       <Building2 className="h-4 w-4 text-muted-foreground" />
@@ -338,6 +469,18 @@ export default function DemandasPage() {
             </div>
           )}
         </div>
+
+        {total > POR_PAGINA && (
+          <div className="shrink-0 border-t border-border px-7">
+            <Paginador
+              pagina={pagina}
+              porPagina={POR_PAGINA}
+              total={total}
+              onCambiar={setPagina}
+              cargando={loading || fueraDeRango}
+            />
+          </div>
+        )}
       </div>
 
       {/* ── Right: property detail + demands ── */}

@@ -1,6 +1,7 @@
 "use server"
 
 import { createClient, createAdminClient, createServiceClient } from "@/lib/supabase/server"
+import { sesionActual } from "@/lib/auth/acceso"
 import { revalidatePath } from "next/cache"
 import type { EstadoAgenda } from "@/types/captaciones"
 
@@ -18,7 +19,37 @@ export async function getCaptacionByTelefono(telefono: string) {
   return data as ({ id: number; nombre: string | null; telefono: string | null; calle: string | null; barrio: string | null; precio: number | null; metros: number | null; habitaciones: number | null; imagen_url: string | null; url: string | null; raw_data: Record<string, unknown> | null } | null)
 }
 
-export async function getCaptaciones(filtro?: string, search?: string, soloAgenteId?: string, isAdmin = false) {
+/**
+ * Una página de la lista de captaciones, con el total de verdad.
+ *
+ * Antes acababa en `.limit(500)` y devolvía el array pelado. Con 1.031 activas
+ * eso son 531 que no existían para la pantalla, y nada en la respuesta lo decía:
+ * PostgREST recorta con un 200 OK y sin aviso. Así que aquí se pide sólo el
+ * tramo que se ve, con `.range()`, y el total se lee del `count` exacto que
+ * PostgREST calcula en la base de datos y devuelve en `Content-Range`. Contarlo
+ * sobre `data` daría el tamaño de la página y volveríamos al mismo engaño.
+ *
+ * El rol ya no llega por parámetro. Al paginar desde el navegador esta función
+ * pasa a ser una acción invocable por el cliente, y un `isAdmin: true` colado en
+ * el payload habría bastado para leer la tabla entera saltándose RLS: quién eres
+ * se decide aquí, en el servidor.
+ */
+export async function getCaptaciones({
+  filtro,
+  search,
+  pagina = 1,
+  // Replica POR_PAGINA de shared/paginador. No se importa de allí porque ese
+  // módulo es "use client" y un módulo de servidor no puede leer sus constantes.
+  porPagina = 50,
+}: {
+  filtro?: string
+  search?: string
+  /** Empieza en 1. */
+  pagina?: number
+  porPagina?: number
+} = {}) {
+  const { userId, isAdmin } = await sesionActual()
+
   // Admins usan service role para bypassar RLS y ver todas las captaciones
   const supabase = isAdmin ? await createAdminClient() : await createClient()
 
@@ -31,16 +62,19 @@ export async function getCaptaciones(filtro?: string, search?: string, soloAgent
       agente_id, fecha_agenda, recordatorio_fecha, notas_agenda, estado_agenda,
       operacion:raw_data->>operation,
       agente:perfiles!captaciones_agente_id_fkey(id, nombre, apellidos, avatar_url)
-    `)
+    `, { count: "exact" })
     .eq("activo", true)
     .order("created_at", { ascending: false })
 
-  if (soloAgenteId) {
-    query = query.eq("agente_id", soloAgenteId)
+  if (!isAdmin) {
+    query = query.eq("agente_id", userId)
   }
 
   if (search) {
-    query = query.or(`calle.ilike.%${search}%,barrio.ilike.%${search}%,nombre.ilike.%${search}%`)
+    // Las comas y los paréntesis son la sintaxis del propio `.or()`: sin
+    // quitarlos, teclear "Gran Vía, 4" en el buscador rompe la consulta entera.
+    const q = search.replace(/[,()\\]/g, " ").trim()
+    if (q) query = query.or(`calle.ilike.%${q}%,barrio.ilike.%${q}%,nombre.ilike.%${q}%`)
   }
 
   if (filtro === "agendadas") {
@@ -53,9 +87,45 @@ export async function getCaptaciones(filtro?: string, search?: string, soloAgent
     query = query.eq("estado_agenda", "pendiente").not("agente_id", "is", null)
   }
 
-  const { data, error } = await query.limit(500)
+  // Página y tamaño llegan del navegador: sin acotarlos, un `porPagina` de
+  // 100.000 volvería a pedir más filas de las que PostgREST devuelve, que es
+  // exactamente el corte silencioso que esto viene a quitar.
+  const tamano = Math.min(200, Math.max(1, Math.floor(porPagina) || 50))
+  const desde = (Math.max(1, Math.floor(pagina) || 1) - 1) * tamano
+
+  const { data, error, count } = await query.range(desde, desde + tamano - 1)
   if (error) throw new Error(error.message)
-  return data ?? []
+  return { filas: data ?? [], total: count ?? 0 }
+}
+
+/**
+ * Los totales de verdad.
+ *
+ * `getCaptaciones` devuelve como mucho 500 filas, que es lo sensato para pintar
+ * una lista. Pero contar sobre lo que devuelve da 500 aunque haya 1.031, y la
+ * cabecera lleva tiempo diciendo un número que no es. Aquí se cuenta en la base
+ * de datos con `head: true`: no viaja ni una fila, sólo la cifra.
+ */
+export async function getTotalesCaptaciones(soloAgenteId?: string) {
+  const supabase = await createAdminClient()
+
+  const base = () => {
+    let q = supabase.from("captaciones").select("id", { count: "exact", head: true }).eq("activo", true)
+    if (soloAgenteId) q = q.eq("agente_id", soloAgenteId)
+    return q
+  }
+
+  const [todas, sinAgente, agendadas] = await Promise.all([
+    base(),
+    base().is("agente_id", null),
+    base().eq("estado_agenda", "pendiente").not("agente_id", "is", null),
+  ])
+
+  return {
+    total: todas.count ?? 0,
+    sinAgente: sinAgente.count ?? 0,
+    agendadas: agendadas.count ?? 0,
+  }
 }
 
 export async function getCaptacion(id: number) {

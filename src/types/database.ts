@@ -32,6 +32,7 @@ export type ModuloKey =
   | "matches"
   | "mensajes"
   | "valorador"
+  | "catalogos"
 
 export type Permisos = Record<ModuloKey, boolean>
 
@@ -57,6 +58,7 @@ export const MODULOS: Modulo[] = [
   { key: "matches",      grupo: "Inmobiliaria",       label: "Matches",      descripcion: "Cruce entre demandas y cartera" },
   { key: "mensajes",     grupo: "Inmobiliaria",       label: "Mensajes",     descripcion: "Bandeja de entrada y WhatsApp" },
   { key: "valorador",    grupo: "Inmobiliaria",       label: "Valorador",    descripcion: "Informes de valoración de inmuebles" },
+  { key: "catalogos",    grupo: "Organización",       label: "Catálogos",    descripcion: "Estados, etiquetas, fuentes y motivos del CRM" },
 ]
 
 /**
@@ -78,6 +80,10 @@ export const PERMISOS_DEFAULT: Permisos = {
   matches: false,
   mensajes: true,
   valorador: true,
+  // Catálogos va cerrado. No es que un agente no pueda tenerlo, es que afecta
+  // al trabajo de los demás: quien toca los catálogos renombra estados para los
+  // seis a la vez. Eso se concede a dedo, no se hereda por ser agente.
+  catalogos: false,
 }
 
 /**

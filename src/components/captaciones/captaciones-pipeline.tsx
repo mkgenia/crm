@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import type { getCaptaciones } from "@/lib/actions/captaciones"
 
-type Captacion = Awaited<ReturnType<typeof getCaptaciones>>[number]
+type Captacion = Awaited<ReturnType<typeof getCaptaciones>>["filas"][number]
 
 // Cards visibles por columna antes de "Ver más" (evita renderizar cientos de nodos)
 const PAGE_SIZE = 15

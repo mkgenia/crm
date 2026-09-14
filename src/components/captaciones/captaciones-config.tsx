@@ -15,6 +15,8 @@ import {
 } from "@/lib/actions/captaciones-config"
 import { encodePolyline } from "./polyline"
 import { AvisosDestinos } from "./avisos-destinos"
+import { RepartoAgentes } from "./reparto-agentes"
+import type { EstadoAsignacion } from "@/lib/actions/asignacion"
 
 // Estas dos listas son las que hacen que una zona nueva se pueda crear desde aquí
 // sin tocar n8n: de ellas salen el segmento de la URL de Idealista y el
@@ -108,7 +110,8 @@ export function CaptacionesConfig({
   uso,
   cola,
   avisos,
-}: Props) {
+  reparto,
+}: Props & { reparto: EstadoAsignacion }) {
   const [open, setOpen] = useState(false)
   const [enabled, setEnabled] = useState(initialEnabled)
   const [zonas, setZonas] = useState<Zona[]>(initialZonas)
@@ -437,6 +440,8 @@ export function CaptacionesConfig({
             </section>
 
             <AvisosDestinos emails={avisos.emails} telefonos={avisos.telefonos} />
+
+            <RepartoAgentes estado={reparto} />
 
             {/* Presupuesto Apify */}
             <section className="space-y-3">

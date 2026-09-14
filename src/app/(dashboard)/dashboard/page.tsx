@@ -3,6 +3,7 @@ import { redirect } from "next/navigation"
 import AdminDashboard, { type AdminData } from "./AdminDashboard"
 import AgentDashboard from "./AgentDashboard"
 import { getAgendaMes } from "@/lib/actions/agenda"
+import { traerTodo } from "@/lib/supabase/paginar"
 
 export const metadata = { title: "Inicio — mkgenia" }
 
@@ -14,19 +15,29 @@ async function getAdminData(): Promise<AdminData> {
 
   const hace30dias = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
-  const [leadsRes, capsRes, usuariosRes, recientesRes, capsHistRes, leadsHistRes, demandasRes] = await Promise.all([
-    supabase.from("leads").select("id, estado, fecha_creacion, captado_por, fuente", { count: "exact" }),
-    supabase.from("captaciones").select("id, activo, agente_id, estado_whatsapp", { count: "exact" }),
+  const [allLeads, allCaps, demandas, usuariosRes, recientesRes, capsHistRes, leadsHistRes, interesEventos] = await Promise.all([
+    traerTodo<{ id: string; estado: string; fecha_creacion: string; captado_por: string | null; fuente: string | null }>(() =>
+      supabase.from("leads").select("id, estado, fecha_creacion, captado_por, fuente").order("fecha_creacion", { ascending: true })),
+    traerTodo<{ id: number; activo: boolean; agente_id: string | null; estado_whatsapp: string | null }>(() =>
+      supabase.from("captaciones").select("id, activo, agente_id, estado_whatsapp").order("created_at", { ascending: true })),
+    traerTodo<{ id: string; estado: string; visto: boolean; fecha_creacion: string }>(() =>
+      supabase.from("demandas").select("id, estado, visto, fecha_creacion").order("fecha_creacion", { ascending: true })),
     supabase.from("perfiles").select("id, nombre, apellidos, rol"),
     supabase.from("leads").select("id, nombre, apellidos, fuente, estado, fecha_creacion")
       .order("fecha_creacion", { ascending: false }).limit(6),
     supabase.from("captaciones").select("created_at").gte("created_at", hace30dias),
     supabase.from("leads").select("fecha_creacion").gte("fecha_creacion", hace30dias),
-    supabase.from("demandas").select("id, estado, visto, fecha_creacion", { count: "exact" }),
+    // Cuándo se interesó cada propietario. El captador registra cada cambio de
+    // estado en `historial_cambios`, así que la fecha es la de verdad y no la de
+    // cuándo se le escribió.
+    traerTodo<{ fecha: string; captacion_id: number }>(() =>
+      supabase.from("historial_cambios")
+        .select("fecha, captacion_id")
+        .eq("campo", "estado_whatsapp")
+        .in("valor_nuevo", ["Interesado", "Quiere_Llamada"])
+        .order("fecha", { ascending: true })),
   ])
 
-  const allLeads = leadsRes.data ?? []
-  const allCaps = capsRes.data ?? []
   const todosPerfiles = usuariosRes.data ?? []
   const agentes = todosPerfiles.filter((u) => u.rol !== "Admin")
 
@@ -63,7 +74,6 @@ async function getAdminData(): Promise<AdminData> {
   const conocidas = Object.values(FAMILIAS).flat()
   const otros = allLeads.filter((l) => !conocidas.includes(l.fuente ?? "")).length
 
-  const demandas = demandasRes.data ?? []
 
   // Los cuatro periodos se calculan de una pasada aquí y viajan juntos al
   // cliente. Cuesta lo mismo que calcular uno —las filas ya están cargadas para
@@ -105,7 +115,21 @@ async function getAdminData(): Promise<AdminData> {
   return {
     origenes: {
       web: familia("web"),
-      scraper: familia("scraper"),
+      // El scraper NO cuenta envios, cuenta interesados.
+      //
+      // Contaba un lead por cada WhatsApp que salia: 880 "leads del scraper"
+      // que en realidad eran 880 mensajes enviados a propietarios que en su
+      // mayoria no contestaron. Al lado de 145 de Instagram parecia que el
+      // captador era el canal que mas trae, y es al reves.
+      //
+      // Los periodos y las barras salen de CUANDO se interesaron (el historial
+      // guarda la fecha del cambio de estado). El total es cuantos lo estan
+      // AHORA, que es lo que enseña el resto del CRM: los que dijeron que si y
+      // luego se cayeron no deben seguir sumando.
+      scraper: {
+        ...porPeriodo(interesEventos.map((e) => ({ fecha_creacion: e.fecha }))),
+        total: interesadosTotal,
+      },
       rrss: familia("rrss"),
       qr: familia("qr"),
       otros,
@@ -115,14 +139,14 @@ async function getAdminData(): Promise<AdminData> {
       sinVer: demandas.filter((d) => d.visto === false).length,
       cualificadas: demandas.filter((d) => d.estado === "Cualificado" || d.estado === "cualificado").length,
     },
-    leads: leadsRes.count ?? 0,
+    leads: allLeads.length,
     leadsEsteMes: allLeads.filter((l) => l.fecha_creacion >= inicioMes).length,
-    captaciones: capsRes.count ?? 0,
+    captaciones: allCaps.length,
     captacionesActivas: allCaps.filter((c) => c.activo).length,
     usuarios: todosPerfiles.length,
     interesadosTotal,
-    tasaGlobal: (capsRes.count ?? 0) > 0
-      ? Math.round((interesadosTotal / (capsRes.count ?? 1)) * 100) : 0,
+    tasaGlobal: allCaps.length > 0
+      ? Math.round((interesadosTotal / allCaps.length) * 100) : 0,
     pipeline: ESTADOS_LEAD.map((e) => ({ estado: e, count: allLeads.filter((l) => l.estado === e).length })),
     porAgente: agentes.map((a) => {
       const misCaps = allCaps.filter((c) => c.agente_id === a.id)
