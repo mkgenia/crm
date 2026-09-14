@@ -318,11 +318,12 @@ interface Props {
   total: number
   totalSinAgente: number
   totalAgendadas: number
+  totalPendientes: number
   isAdmin?: boolean
   agentes?: AgenteInfo[]
 }
 
-export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalSinAgente, totalAgendadas, isAdmin = true, agentes = [] }: Props) {
+export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalSinAgente, totalAgendadas, totalPendientes, isAdmin = true, agentes = [] }: Props) {
   const [selected, setSelected] = useState<number | null>(null)
   const [texto, setTexto] = useState("")
   const [search, setSearch] = useState("")
@@ -345,15 +346,30 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
   const [cargando, setCargando] = useState(false)
   const [recarga, setRecarga] = useState(0)
 
-  // Contadores de las pestañas. Los tres primeros vienen contados en la base de
-  // datos; de "pendientes" y "completadas" no hay contador propio, así que se
-  // rellenan con el total real de la consulta la primera vez que se abre ese
-  // filtro. Contarlos sobre las filas cargadas daría 50 siempre.
+  // Contadores de los chips. Los cuatro primeros vienen contados en la base de
+  // datos; de "completadas" no hay contador propio, así que se rellena con el
+  // total real de la consulta la primera vez que se abre ese filtro. Contarlos
+  // sobre las filas cargadas daría 50 siempre.
   const [totalesFiltro, setTotalesFiltro] = useState<Record<string, number>>({
     todas: total,
     sin_agente: totalSinAgente,
     agendadas: totalAgendadas,
+    pendientes: totalPendientes,
   })
+
+  // Las bajas y las asignaciones masivas revalidan /captaciones, así que estos
+  // cuatro números vuelven a llegar recalculados del servidor. Sin volcarlos,
+  // los chips se quedarían con la cifra de antes de la acción mientras la
+  // pestaña "Activas", que sí lee la prop, ya enseña la nueva.
+  useEffect(() => {
+    setTotalesFiltro((prev) => ({
+      ...prev,
+      todas: total,
+      sin_agente: totalSinAgente,
+      agendadas: totalAgendadas,
+      pendientes: totalPendientes,
+    }))
+  }, [total, totalSinAgente, totalAgendadas, totalPendientes])
 
   // El buscador escribe en `texto` y sólo consulta cuando el agente para de
   // teclear: si no, "Ruzafa" son seis consultas y seis repintados de la lista.
@@ -382,7 +398,11 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
         if (!search) setTotalesFiltro((prev) => ({ ...prev, [filtro]: res.total }))
       })
       .catch((e: unknown) => {
-        if (!cancelado) toast.error(e instanceof Error ? e.message : "No se pudieron cargar las captaciones")
+        // El mensaje real no se enseña: en producción Next tapa lo que lanza una
+        // server action con un texto genérico sobre digests que no dice nada al
+        // agente. El detalle, a la consola.
+        console.error("[captaciones] no se pudo cargar la página", e)
+        if (!cancelado) toast.error("No se pudieron cargar las captaciones")
       })
       .finally(() => { if (!cancelado) setCargando(false) })
 
@@ -392,11 +412,13 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
   }, [filtro, search, pagina, recarga])
 
   // Si la página en la que estás deja de existir —das de baja media lista, o el
-  // filtro tiene menos páginas— el servidor devolvería un tramo vacío.
+  // filtro tiene menos páginas— el servidor devuelve un tramo vacío con el total
+  // bueno, y aquí se salta a la última que sí existe.
+  const ultimaPagina = Math.max(1, Math.ceil(totalFiltrado / POR_PAGINA))
+  const fueraDeRango = pagina > ultimaPagina
   useEffect(() => {
-    const ultima = Math.max(1, Math.ceil(totalFiltrado / POR_PAGINA))
-    if (pagina > ultima) setPagina(ultima)
-  }, [totalFiltrado, pagina])
+    if (fueraDeRango) setPagina(ultimaPagina)
+  }, [fueraDeRango, ultimaPagina])
 
   // Volver a la página 1 se hace aquí y no en un efecto sobre [filtro, search]:
   // ese efecto correría con la página vieja todavía puesta y dispararía una
@@ -693,7 +715,10 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
           cargando={cargando}
         />
 
-        {filas.length === 0 && !cargando && (
+        {/* fueraDeRango: entre el tramo vacío y el salto a la última página hay
+            un repintado sin filas, y sin esto asomaría "no hay captaciones"
+            justo antes de enseñar las que sí hay. */}
+        {filas.length === 0 && !cargando && !fueraDeRango && (
           <div className="py-20 text-center space-y-2">
             <Home className="h-8 w-8 text-muted-foreground/20 mx-auto" />
             <p className="text-sm text-muted-foreground">

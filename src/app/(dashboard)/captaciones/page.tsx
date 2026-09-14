@@ -25,11 +25,17 @@ export default async function CaptacionesPage() {
     getTotalesCaptaciones(isAdmin ? undefined : userId),
   ])
 
-  // De la base de datos y no de la lista: la lista se corta en 500 y la
-  // cabecera llevaba tiempo diciendo 500 cuando hay mas de mil.
+  // De la base de datos y no de la lista: la lista sólo trae la página que se
+  // ve, y contar sobre ella daría 50 pase lo que pase.
   const total = totales.total
   const totalSinAgente = isAdmin ? totales.sinAgente : 0
-  const totalAgendadas = totales.agendadas
+  // "Agendadas" en los filtros de la lista quiere decir "con agente asignado",
+  // así que es el total menos las que no tienen. El contador `agendadas` de
+  // getTotalesCaptaciones cuenta otra cosa —pendiente Y con agente—, que es
+  // justo el filtro "Pendientes": ponerlo en el chip de Agendadas hacía que el
+  // número cambiara al pulsarlo.
+  const totalAgendadas = total - totalSinAgente
+  const totalPendientes = totales.agendadas
 
   return (
     <div className="p-8">
@@ -65,6 +71,7 @@ export default async function CaptacionesPage() {
         total={total}
         totalSinAgente={totalSinAgente}
         totalAgendadas={totalAgendadas}
+        totalPendientes={totalPendientes}
         isAdmin={isAdmin}
         agentes={agentes}
       />
