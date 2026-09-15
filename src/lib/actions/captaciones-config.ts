@@ -1,6 +1,7 @@
 "use server"
 
 import { createAdminClient } from "@/lib/supabase/server"
+import { admiteAdmin, SIN_PERMISO } from "@/lib/auth/acceso"
 import { revalidatePath } from "next/cache"
 import {
   AVISO_EMAILS_DEFECTO,
@@ -104,6 +105,7 @@ export async function getAutoContactoConfig() {
 }
 
 export async function toggleAutoContacto(enabled: boolean) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   // Booleano jsonb real: n8n compara String(value) === 'true', que funciona con ambos.
   await supabase
@@ -119,6 +121,7 @@ export async function toggleAutoContacto(enabled: boolean) {
  * workflow de cola lo lee en cada turno y no envía nada por encima de él.
  */
 export async function setLimiteDiario(limite: number) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const n = Math.max(1, Math.min(80, Math.round(limite)))
   const supabase = await createAdminClient()
   await supabase
@@ -140,6 +143,7 @@ export interface NuevaZona {
 }
 
 export async function agregarZona(z: NuevaZona) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
 
   const fila: Record<string, unknown> = {
@@ -182,6 +186,7 @@ export async function agregarZona(z: NuevaZona) {
  * (vivienda en Valencia) con 48 h duplica el gasto de Apify sin captar más.
  */
 export async function setVentanaZona(id: string, horas: 0 | 24 | 48) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   const { error } = await supabase.from("scraper_zonas").update({ ventana_horas: horas }).eq("id", id)
   if (error) return { error: error.message }
@@ -196,6 +201,7 @@ export async function setVentanaZona(id: string, horas: 0 | 24 | 48) {
  * sin ahorrar nada.
  */
 export async function toggleZona(id: string, activa: boolean) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   const { error } = await supabase.from("scraper_zonas").update({ activa }).eq("id", id)
   if (error) return { error: error.message }
@@ -204,6 +210,7 @@ export async function toggleZona(id: string, activa: boolean) {
 }
 
 export async function eliminarZona(id: string) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   await supabase.from("scraper_zonas").delete().eq("id", id)
   revalidatePath("/captaciones")
@@ -245,6 +252,7 @@ export async function getEstadoCola() {
  * doble que la segunda, ésta el doble que la tercera, y así.
  */
 export async function reordenarZonas(ids: string[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   if (!ids?.length) return { error: "Lista vacía" }
   const supabase = await createAdminClient()
 
@@ -272,6 +280,7 @@ export async function reordenarZonas(ids: string[]) {
  * vaciar una cola acumulada un día concreto, no para dejarlo puesto.
  */
 export async function setRitmo(ritmo: Ritmo) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("app_settings")
@@ -286,6 +295,7 @@ export async function setRitmo(ritmo: Ritmo) {
  * puede exportar funciones async. */
 
 export async function setAvisoEmails(emails: string[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const limpios = [...new Set(emails.map(normalizarEmail).filter((x): x is string => !!x))].slice(0, 10)
   const supabase = await createAdminClient()
   const { error } = await supabase
@@ -297,6 +307,7 @@ export async function setAvisoEmails(emails: string[]) {
 }
 
 export async function setAvisoTelefonos(telefonos: string[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const limpios = [...new Set(telefonos.map(normalizarTelefono).filter((x): x is string => !!x))].slice(0, 10)
   const supabase = await createAdminClient()
   const { error } = await supabase

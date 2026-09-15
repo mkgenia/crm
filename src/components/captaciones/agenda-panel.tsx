@@ -3,10 +3,10 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
-import { asignarAgenda, actualizarEstadoAgenda } from "@/lib/actions/captaciones"
+import { asignarAgenda } from "@/lib/actions/captaciones"
 import { toast } from "sonner"
-import { Check, X, CalendarClock, FileText, Bell, Loader2, ArrowLeftRight, ChevronDown } from "lucide-react"
-import { AGENDA_COLORS, type EstadoAgenda } from "@/types/captaciones"
+import { Loader2, ArrowLeftRight, X } from "lucide-react"
+import type { EstadoAgenda } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 
 interface Agente {
@@ -21,163 +21,147 @@ interface Props {
   agentes: Agente[]
   initial: {
     agente_id: string | null
-    fecha_agenda: string | null
-    recordatorio_fecha: string | null
-    notas_agenda: string | null
-    estado_agenda: EstadoAgenda
+    /**
+     * Estas cuatro columnas ya no las escribe este panel: lo que se apunta tras una
+     * llamada va por `atender`. Se siguen aceptando (opcionales, e ignoradas) para que
+     * quien renderiza el panel pueda dejar de pasarlas sin romper el tipo.
+     */
+    fecha_agenda?: string | null
+    recordatorio_fecha?: string | null
+    notas_agenda?: string | null
+    estado_agenda?: EstadoAgenda
   }
   onUpdate?: () => void
-}
-
-function toDatetimeLocal(iso: string | null) {
-  if (!iso) return ""
-  return iso.slice(0, 16)
 }
 
 function initials(a: Agente) {
   return `${a.nombre.charAt(0)}${a.apellidos?.charAt(0) ?? ""}`.toUpperCase()
 }
 
+/** Asignar o traspasar el agente de una captación. No hace nada más. */
 export function AgendaPanel({ captacionId, agentes, initial, onUpdate }: Props) {
   const [loading, setLoading] = useState(false)
-  const [statusLoading, setStatusLoading] = useState<EstadoAgenda | null>(null)
   const [traspasando, setTraspasando] = useState(false)
-  const [form, setForm] = useState({
-    agente_id: initial.agente_id ?? "",
-    fecha_agenda: toDatetimeLocal(initial.fecha_agenda),
-    recordatorio_fecha: toDatetimeLocal(initial.recordatorio_fecha),
-    notas_agenda: initial.notas_agenda ?? "",
-    estado_agenda: initial.estado_agenda,
-  })
+  /**
+   * Solo guardamos la elección pendiente. El agente vigente se lee siempre de `initial`,
+   * que el padre refresca al terminar, así que el panel nunca se queda con un valor viejo
+   * (y no hace falta sincronizar estado con un efecto).
+   */
+  const [seleccion, setSeleccion] = useState<string | null>(null)
 
-  const hasAgenda = !!initial.agente_id
-  const estadoInfo = AGENDA_COLORS[form.estado_agenda]
-  const agenteActual = agentes.find((a) => a.id === form.agente_id)
+  const asignada = !!initial.agente_id
+  const agenteActual = agentes.find((a) => a.id === initial.agente_id) ?? null
+  /**
+   * La ficha de solo lectura únicamente vale si conocemos al agente. Si la captación tiene
+   * un agente_id que ya no está en la lista (perfil borrado o filtrado), caemos al selector
+   * para poder reasignarla en vez de dejar el panel sin salida.
+   */
+  const ficha = !traspasando ? agenteActual : null
+  const puedeGuardar = !!seleccion && seleccion !== initial.agente_id
 
   async function handleGuardar() {
+    if (!puedeGuardar) return
     setLoading(true)
-    const res = await asignarAgenda(captacionId, {
-      agente_id: form.agente_id || null,
-      fecha_agenda: form.fecha_agenda ? new Date(form.fecha_agenda).toISOString() : null,
-      recordatorio_fecha: form.recordatorio_fecha ? new Date(form.recordatorio_fecha).toISOString() : null,
-      notas_agenda: form.notas_agenda || null,
-      estado_agenda: form.estado_agenda,
-    })
+    const res = await asignarAgenda(captacionId, { agente_id: seleccion })
     setLoading(false)
-    if (res.error) { toast.error("Error al guardar"); return }
-    toast.success(hasAgenda ? "Agenda actualizada" : "Agente asignado")
+    // Si falla se dice y el botón vuelve a su sitio: nada de spinners eternos.
+    if (res.error) {
+      toast.error(res.error)
+      return
+    }
+    toast.success(asignada ? "Captación traspasada" : "Agente asignado")
     setTraspasando(false)
-    onUpdate?.()
-  }
-
-  async function handleStatus(estado: EstadoAgenda) {
-    setStatusLoading(estado)
-    const res = await actualizarEstadoAgenda(captacionId, estado)
-    setStatusLoading(null)
-    if (res.error) { toast.error("Error al actualizar"); return }
-    setForm((f) => ({ ...f, estado_agenda: estado }))
-    toast.success(`Marcada como ${estado}`)
+    setSeleccion(null)
     onUpdate?.()
   }
 
   return (
-    <div className="space-y-5">
-
-      {/* Estado actual + acciones rápidas */}
-      {hasAgenda && (
-        <div className={cn("flex items-center justify-between rounded-lg px-4 py-3 border", estadoInfo.bg, "border-border")}>
-          <div className="flex items-center gap-2.5">
-            <span className={cn("h-2 w-2 rounded-full", estadoInfo.dot)} />
-            <span className={cn("text-sm font-medium capitalize", estadoInfo.text)}>
-              {form.estado_agenda}
-            </span>
-            {agenteActual && (
-              <span className="text-xs text-muted-foreground">· {agenteActual.nombre}</span>
-            )}
-          </div>
-          {form.estado_agenda === "pendiente" && (
-            <div className="flex gap-1.5">
-              <Button size="sm" variant="ghost"
-                className="h-7 px-2 text-emerald-500 hover:text-emerald-500 hover:bg-emerald-500/10"
-                onClick={() => handleStatus("completado")} disabled={!!statusLoading}
-              >
-                {statusLoading === "completado" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                Completar
-              </Button>
-              <Button size="sm" variant="ghost"
-                className="h-7 px-2 text-red-500 hover:text-red-500 hover:bg-red-500/10"
-                onClick={() => handleStatus("cancelado")} disabled={!!statusLoading}
-              >
-                {statusLoading === "cancelado" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                Cancelar
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Agente asignado */}
-      <div className="space-y-2">
-        <Label className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-2">
+        <Label className="text-xs text-muted-foreground uppercase tracking-wide">
           Agente asignado
         </Label>
 
-        {hasAgenda && !traspasando ? (
-          /* Agente actual + botón traspasar */
+        {ficha ? (
           <div className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
             <div className="h-9 w-9 rounded-full flex items-center justify-center text-sm font-bold bg-gradient-to-br from-violet-500 via-cyan-400 to-emerald-400 text-white shrink-0">
-              {agenteActual ? initials(agenteActual) : "?"}
+              {initials(ficha)}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-foreground">
-                {agenteActual ? `${agenteActual.nombre} ${agenteActual.apellidos ?? ""}`.trim() : "—"}
+              <p className="text-sm font-medium text-foreground truncate">
+                {`${ficha.nombre} ${ficha.apellidos ?? ""}`.trim()}
               </p>
-              <p className="text-xs text-muted-foreground">Agente asignado</p>
+              <p className="text-xs text-muted-foreground">Lleva esta captación</p>
             </div>
+            {/* El icono NO lleva margen: <Button> ya separa con su propio gap. */}
             <Button
-              size="sm" variant="ghost"
+              size="sm"
+              variant="ghost"
               className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground shrink-0"
               onClick={() => setTraspasando(true)}
             >
-              <ArrowLeftRight className="h-3.5 w-3.5 mr-1.5" />
+              <ArrowLeftRight className="h-3.5 w-3.5" />
               Traspasar
             </Button>
           </div>
         ) : (
-          /* Grid de selección de agente */
-          <div className="space-y-2">
-            {hasAgenda && (
+          <div className="flex flex-col gap-2">
+            {asignada && !traspasando && (
+              <p className="text-xs text-muted-foreground">
+                El agente asignado ya no está en la lista. Elige uno para reasignarla.
+              </p>
+            )}
+            {traspasando && (
               <button
-                onClick={() => { setForm((f) => ({ ...f, agente_id: initial.agente_id ?? "" })); setTraspasando(false) }}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                type="button"
+                disabled={loading}
+                onClick={() => {
+                  setTraspasando(false)
+                  setSeleccion(null)
+                }}
+                className="flex items-center gap-1.5 self-start text-xs text-muted-foreground hover:text-foreground transition-colors disabled:pointer-events-none disabled:opacity-50"
               >
-                <ChevronDown className="h-3.5 w-3.5" /> Cancelar traspaso
+                <X className="h-3.5 w-3.5" /> Cancelar traspaso
               </button>
             )}
             <div className="grid grid-cols-2 gap-2">
               {agentes.map((a) => (
+                /**
+                 * Bloqueados mientras se guarda: si no, se puede cambiar de agente con la
+                 * petición en vuelo y al volver se limpia la selección, dejando en pantalla
+                 * un agente distinto del que se acaba de grabar.
+                 */
                 <button
                   key={a.id}
-                  onClick={() => setForm((f) => ({ ...f, agente_id: f.agente_id === a.id ? "" : a.id }))}
+                  type="button"
+                  disabled={loading}
+                  onClick={() => setSeleccion((s) => (s === a.id ? null : a.id))}
                   className={cn(
-                    "flex items-center gap-2.5 px-3 py-2.5 rounded-lg border text-left transition-all",
-                    form.agente_id === a.id
+                    "flex items-center gap-2.5 px-3 py-2.5 rounded-lg border text-left transition-all disabled:pointer-events-none disabled:opacity-50",
+                    seleccion === a.id
                       ? "border-violet-500/50 bg-violet-500/10"
                       : "border-border bg-card hover:bg-muted/40"
                   )}
                 >
-                  <div className={cn(
-                    "h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0",
-                    form.agente_id === a.id
-                      ? "bg-gradient-to-br from-violet-500 via-cyan-400 to-emerald-400 text-white"
-                      : "bg-muted text-muted-foreground"
-                  )}>
+                  <div
+                    className={cn(
+                      "h-7 w-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0",
+                      seleccion === a.id
+                        ? "bg-gradient-to-br from-violet-500 via-cyan-400 to-emerald-400 text-white"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
                     {initials(a)}
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-xs font-medium text-foreground truncate">{a.nombre}</p>
-                    {a.apellidos && <p className="text-xs text-muted-foreground truncate">{a.apellidos}</p>}
+                    {a.apellidos && (
+                      <p className="text-xs text-muted-foreground truncate">{a.apellidos}</p>
+                    )}
                   </div>
+                  {a.id === initial.agente_id && (
+                    <span className="text-[10px] text-muted-foreground shrink-0">actual</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -185,54 +169,17 @@ export function AgendaPanel({ captacionId, agentes, initial, onUpdate }: Props) 
         )}
       </div>
 
-      {/* Fecha y hora */}
-      <div className="space-y-2">
-        <Label className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
-          <CalendarClock className="h-3.5 w-3.5" /> Fecha y hora
-        </Label>
-        <input
-          type="datetime-local"
-          value={form.fecha_agenda}
-          onChange={(e) => setForm((f) => ({ ...f, fecha_agenda: e.target.value }))}
-          className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-        />
-      </div>
-
-      {/* Recordatorio */}
-      <div className="space-y-2">
-        <Label className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
-          <Bell className="h-3.5 w-3.5" /> Recordatorio (opcional)
-        </Label>
-        <input
-          type="datetime-local"
-          value={form.recordatorio_fecha}
-          onChange={(e) => setForm((f) => ({ ...f, recordatorio_fecha: e.target.value }))}
-          className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-        />
-      </div>
-
-      {/* Notas */}
-      <div className="space-y-2">
-        <Label className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
-          <FileText className="h-3.5 w-3.5" /> Notas para el agente
-        </Label>
-        <textarea
-          rows={3}
-          value={form.notas_agenda}
-          onChange={(e) => setForm((f) => ({ ...f, notas_agenda: e.target.value }))}
-          placeholder="Indicaciones, contexto, objetivos..."
-          className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
-        />
-      </div>
-
-      <Button
-        onClick={handleGuardar}
-        disabled={loading || !form.agente_id}
-        className="w-full"
-      >
-        {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-        {hasAgenda ? (traspasando ? "Confirmar traspaso" : "Guardar cambios") : "Asignar agente"}
-      </Button>
+      {/* El botón solo sale cuando hay algo que guardar: sin agente conocido, o en pleno traspaso. */}
+      {!ficha && (
+        <Button onClick={handleGuardar} disabled={loading || !puedeGuardar} className="w-full">
+          {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+          {/*
+            El rótulo mira `traspasando`, no `asignada`: cuando el agente guardado ya no existe
+            en la lista esto no es un traspaso, es una reasignación de una captación huérfana.
+          */}
+          {traspasando ? "Confirmar traspaso" : asignada ? "Reasignar agente" : "Asignar agente"}
+        </Button>
+      )}
     </div>
   )
 }

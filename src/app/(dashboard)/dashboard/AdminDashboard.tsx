@@ -3,29 +3,28 @@
 import Link from "next/link"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
-import { Globe, Radar, Share2, QrCode, Inbox, Heart } from "lucide-react"
+import { Globe, Radar, Share2, QrCode, Inbox, Heart, PhoneMissed } from "lucide-react"
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
 } from "recharts"
 import { AgendaPanel } from "@/components/agenda/agenda-panel"
 import { SeccionesOrdenables, SeccionOrdenable } from "@/components/shared/secciones-ordenables"
+import { claseColor, clasePunto } from "@/lib/catalogos"
 import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
 
-const PIPELINE_COLORS = ["#7F77DD", "#378ADD", "#1D9E75", "#EF9F27", "#D85A30", "#639922", "#888780"]
-const ESTADO_LABEL: Record<string, string> = {
-  Nuevo: "Nuevo", Contactado: "Contactado", Interesado: "Interesado",
-  Propuesta: "Propuesta", Negociacion: "Negociación", Ganado: "Ganado", Perdido: "Perdido",
-}
-const ESTADO_LEAD_STYLES: Record<string, string> = {
-  Nuevo:       "bg-violet-500/10 text-violet-600 dark:text-violet-300 border-violet-500/20",
-  Contactado:  "bg-cyan-500/10 text-cyan-600 dark:text-cyan-300 border-cyan-500/20",
-  Interesado:  "bg-blue-500/10 text-blue-600 dark:text-blue-300 border-blue-500/20",
-  Propuesta:   "bg-orange-500/10 text-orange-600 dark:text-orange-300 border-orange-500/20",
-  Negociacion: "bg-yellow-500/10 text-yellow-600 dark:text-yellow-300 border-yellow-500/20",
-  Ganado:      "bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
-  Perdido:     "bg-muted text-muted-foreground border-border",
-}
+/*
+ * Ni los nombres de los estados ni sus colores se escriben aquí.
+ *
+ * Había tres mapas —etiqueta, pastilla y una paleta de siete hex para la barra—
+ * y los tres se quedaban cortos en cuanto el administrador añadía un estado
+ * desde /configuracion/catalogos: la leyenda del pipeline pintaba un punto
+ * transparente y un hueco donde va el nombre (le pasa hoy mismo al estado
+ * `test`, el octavo). Ahora el nombre y el color llegan resueltos del servidor y
+ * se pintan con `claseColor`/`clasePunto`, que son mapas fijos —Tailwind no
+ * encuentra una clase construida con plantilla y la purga en producción— y caen
+ * a gris ante un color desconocido.
+ */
 
 function timeAgo(date: string) {
   const diff = Date.now() - new Date(date).getTime()
@@ -95,14 +94,29 @@ export interface AdminData {
   usuarios: number
   interesadosTotal: number
   tasaGlobal: number
-  pipeline: Array<{ estado: string; count: number }>
+  /**
+   * La señal del captador (migración 027): quién ha dicho que sí y a cuántos de
+   * ésos no les ha llamado nadie todavía.
+   *
+   * Cada contador puede venir a `null` por su cuenta y eso significa "esta
+   * consulta falló", no "cero". Se pintan por separado justamente por eso.
+   */
+  senal: {
+    total: number | null
+    sinLlamar: number | null
+    porValor: Array<{ valor: string; nombre: string; color: string | null; count: number | null }>
+  }
+  /** Las columnas del catálogo `estado_lead`, con su nombre y su color. */
+  pipeline: Array<{ estado: string; nombre: string; color: string | null; count: number }>
   porAgente: Array<{
     id: string; nombre: string; initials: string
     captaciones: number; leads: number; interesados: number; tasa: number
   }>
   leadsRecientes: Array<{
     id: string | number; nombre: string; apellidos?: string | null
-    fuente?: string | null; estado: string; fecha_creacion?: string | null
+    fuente?: string | null; estado: string
+    estadoNombre: string; estadoColor: string | null
+    fecha_creacion?: string | null
   }>
   historialCaptaciones: Array<{ date: string; count: number }>
   historialLeads: Array<{ date: string; count: number }>
@@ -139,15 +153,23 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
         }
       >
 
+      <SeccionOrdenable id="senal" titulo="Han dicho que sí">
+      <SenalPanel senal={data.senal} />
+      </SeccionOrdenable>
+
       <SeccionOrdenable id="origenes" titulo="De dónde entran los leads">
       {/* De dónde entra cada lead: es la pregunta que se hace uno al abrir el CRM,
           así que va primero y a tamaño grande. Los canales que aún no producen
           nada se pintan igual — ver el hueco es la mitad de la información. */}
-      <div>
-        <div className="flex items-end justify-between gap-4 mb-4 flex-wrap">
-          <div>
+      {/* El hueco lo reparte el padre con gap. Los márgenes sueltos del hijo
+          —mb-4 en la cabecera, mt-0.5 bajo el título, mt-2 en la nota— decían lo
+          mismo desde el sitio equivocado. Los valores son los de antes: 16 px
+          entre bloques, 2 px bajo el título y 8 px antes de la nota. */}
+      <div className="flex flex-col gap-4">
+        <div className="flex items-end justify-between gap-4 flex-wrap">
+          <div className="flex flex-col gap-0.5">
             <h2 className="text-lg font-semibold text-foreground">De dónde entran los leads</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
+            <p className="text-xs text-muted-foreground">
               {PERIODOS.find((p) => p.valor === periodo)!.frase}
             </p>
           </div>
@@ -172,17 +194,28 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
           </div>
         </div>
 
+        {/* La rejilla y su nota van juntas en un grupo propio: la nota se
+            despega 8 px de las tarjetas, no los 16 que separan los bloques. */}
+        <div className="flex flex-col gap-2">
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           <OrigenCard
             href="/leads" icon={Globe} label="Formularios web"
             datos={data.origenes.web} periodo={periodo}
             tono="cyan"
           />
+          {/* El "sin llamar" se repite aquí a propósito. El orden de la portada
+              se guarda en el navegador, y a quien ya la había reordenado la
+              sección nueva se le añade al final: este número no puede depender
+              de que baje a buscarlo. */}
           <OrigenCard
-            href="/captaciones" icon={Radar} label="Scraper · interesados"
+            href="/captaciones" icon={Radar} label="Scraper · con señal"
             datos={data.origenes.scraper} periodo={periodo}
             tono="violeta"
-            extra={`${data.interesadosTotal.toLocaleString("es")} interesados ahora mismo`}
+            extra={
+              data.senal.sinLlamar !== null && data.senal.sinLlamar > 0
+                ? `${data.interesadosTotal.toLocaleString("es")} con señal · ${data.senal.sinLlamar} sin llamar`
+                : `${data.interesadosTotal.toLocaleString("es")} con señal ahora mismo`
+            }
           />
           <OrigenCard
             href="/demandas" icon={Inbox} label="Demandas"
@@ -207,11 +240,12 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
           />
         </div>
         {data.origenes.otros > 0 && (
-          <p className="text-[11px] text-muted-foreground/70 mt-2">
+          <p className="text-[11px] text-muted-foreground/70">
             {data.origenes.otros} lead{data.origenes.otros > 1 ? "s" : ""} con un origen que no encaja en
             ninguno de estos canales.
           </p>
         )}
+        </div>
       </div>
 
       </SeccionOrdenable>
@@ -234,28 +268,29 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
       </SeccionOrdenable>
 
       <SeccionOrdenable id="pipeline" titulo="Pipeline de leads">
-      <div>
-        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
+      <div className="flex flex-col gap-4">
+        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
           Pipeline de leads · todos los agentes
         </h2>
-        <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-4">
           {totalPipeline > 0 && (
             <div className="flex gap-0.5 h-3 rounded-full overflow-hidden">
-              {data.pipeline.map((p, i) =>
+              {data.pipeline.map((p) =>
                 p.count > 0 ? (
                   <div key={p.estado}
-                    style={{ width: `${(p.count / totalPipeline) * 100}%`, background: PIPELINE_COLORS[i] }}
-                    className="rounded-sm" title={`${ESTADO_LABEL[p.estado]}: ${p.count}`}
+                    style={{ width: `${(p.count / totalPipeline) * 100}%` }}
+                    className={cn("rounded-sm", clasePunto(p.color))}
+                    title={`${p.nombre}: ${p.count}`}
                   />
                 ) : null
               )}
             </div>
           )}
           <div className="flex flex-wrap gap-x-5 gap-y-2">
-            {data.pipeline.map((p, i) => (
+            {data.pipeline.map((p) => (
               <div key={p.estado} className="flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full shrink-0" style={{ background: PIPELINE_COLORS[i] }} />
-                <span className="text-xs text-muted-foreground">{ESTADO_LABEL[p.estado]}</span>
+                <span className={cn("h-2 w-2 rounded-full shrink-0", clasePunto(p.color))} />
+                <span className="text-xs text-muted-foreground">{p.nombre}</span>
                 <span className="text-xs font-medium text-foreground tabular-nums">{p.count}</span>
               </div>
             ))}
@@ -272,8 +307,8 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
       </SeccionOrdenable>
 
       <SeccionOrdenable id="ultimos" titulo="Últimos leads">
-      <div>
-        <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">Últimos leads</h2>
           <Link href="/leads" className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -295,8 +330,8 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
                   <p className="text-sm font-medium text-foreground truncate">{lead.nombre} {lead.apellidos}</p>
                   <p className="text-xs text-muted-foreground">{lead.fuente ?? "—"}</p>
                 </div>
-                <span className={`text-xs px-2 py-0.5 rounded border font-medium ${ESTADO_LEAD_STYLES[lead.estado] ?? "bg-muted text-muted-foreground border-border"}`}>
-                  {ESTADO_LABEL[lead.estado] ?? lead.estado}
+                <span className={cn("text-xs px-2 py-0.5 rounded border font-medium", claseColor(lead.estadoColor))}>
+                  {lead.estadoNombre}
                 </span>
                 <span className="text-xs text-muted-foreground/60 shrink-0 hidden sm:block w-8 text-right">
                   {lead.fecha_creacion ? timeAgo(lead.fecha_creacion) : "—"}
@@ -309,6 +344,94 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
       </SeccionOrdenable>
 
       </SeccionesOrdenables>
+    </div>
+  )
+}
+
+/**
+ * Quién ha levantado la mano y todavía no ha sonado su teléfono.
+ *
+ * Con la migración 027 el interés dejó de ser un estado de WhatsApp y pasó a la
+ * columna `senal`. La portada seguía contando "interesados" en cuatro sitios y
+ * ninguno respondía a la única pregunta que cuesta dinero: de los que han dicho
+ * que sí, ¿a cuántos no ha llamado nadie? `atendido_en` a nulo no es un olvido
+ * de alguien —lo escribe sola la base al registrar cualquier interacción, 021—:
+ * es que ese teléfono no ha sonado nunca.
+ */
+function SenalPanel({ senal }: { senal: AdminData["senal"] }) {
+  // Un contador que ha fallado vale null y NO se pinta. Un cero enorme aquí se
+  // leería como "no queda nadie esperando", que es exactamente lo contrario de
+  // lo que significa una consulta que no ha respondido.
+  const sinLlamar = senal.sinLlamar
+  const urge = sinLlamar !== null && sinLlamar > 0
+
+  return (
+    // El hueco entre el título y la tarjeta lo pone el padre con gap, no el
+    // hijo con un margen suelto.
+    <div className="flex flex-col gap-4">
+      <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+        Han dicho que sí
+      </h2>
+
+      <Link
+        href="/captaciones"
+        className={cn(
+          "rounded-lg border bg-card px-5 py-5 flex items-center justify-between gap-6 flex-wrap transition-colors",
+          urge ? "border-rose-500/40 hover:bg-rose-500/[0.04]" : "border-border hover:bg-muted/20",
+        )}
+      >
+        <div className="flex items-center gap-4 min-w-0">
+          <span className={cn(
+            "h-10 w-10 rounded-lg flex items-center justify-center shrink-0",
+            urge ? "bg-rose-500/15 text-rose-500" : "bg-emerald-500/15 text-emerald-500",
+          )}>
+            <PhoneMissed className="h-5 w-5" />
+          </span>
+
+          <div className="flex items-baseline gap-3 flex-wrap min-w-0">
+            {sinLlamar === null ? (
+              // Se dice que no se ha podido contar. Inventarse un cero sería
+              // peor que no enseñar nada.
+              <span className="text-sm text-muted-foreground">
+                No se ha podido contar a quién falta por llamar
+              </span>
+            ) : (
+              <>
+                <span className={cn(
+                  "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
+                  urge ? "text-rose-500" : "text-muted-foreground/35",
+                )}>
+                  {sinLlamar.toLocaleString("es")}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  {urge ? "esperando a que alguien les llame" : "nadie esperando una llamada"}
+                  {senal.total !== null && ` · ${senal.total.toLocaleString("es")} con señal en total`}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* El desglose por señal, con el nombre y el color tal y como estén en
+            /configuracion/catalogos. Una señal nueva aparece aquí sola. */}
+        <div className="flex items-center gap-2 flex-wrap shrink-0">
+          {senal.porValor.map((v) => (
+            <span
+              key={v.valor}
+              className={cn(
+                "text-xs px-2.5 py-1 rounded border font-medium flex items-center gap-2",
+                claseColor(v.color),
+              )}
+            >
+              <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", clasePunto(v.color))} />
+              {v.nombre}
+              {/* Sin número si la consulta de ESE valor falló. La pastilla sigue
+                  diciendo que la señal existe, que ya es algo. */}
+              {v.count !== null && <span className="tabular-nums">{v.count.toLocaleString("es")}</span>}
+            </span>
+          ))}
+        </div>
+      </Link>
     </div>
   )
 }
@@ -378,14 +501,14 @@ function OrigenCard({ href, icon: Icon, label, datos, periodo, tono, extra }: {
         // El número a la izquierda y los catorce días a la derecha: la tarjeta
         // es ancha, y dejar ese hueco vacío es lo que la hacía parecer pobre.
         <div className="relative flex items-end justify-between gap-4">
-          <div className="shrink-0">
+          <div className="shrink-0 flex flex-col gap-2">
             <p className={cn(
               "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
               valor === 0 ? "text-muted-foreground/35" : "text-foreground",
             )}>
               {valor}
             </p>
-            <p className="text-[11px] text-muted-foreground leading-snug mt-2">
+            <p className="text-[11px] text-muted-foreground leading-snug">
               {extra ?? (sinUsar
                 ? "Aún sin usar"
                 : periodo === "total"
@@ -417,8 +540,8 @@ function AgentesYHistorial({ porAgente, historialCaptaciones, historialLeads }: 
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-      <div className="flex flex-col">
-        <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
             Rendimiento por agente
           </h2>
@@ -534,8 +657,8 @@ function HistorialChart({
   const CARD_H = 221
 
   return (
-    <div>
-      <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest mb-4">
+    <div className="flex flex-col gap-4">
+      <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
         Actividad (30 días)
       </h2>
 
@@ -617,7 +740,9 @@ function HistorialChart({
                   padding: "6px 10px",
                 }}
                 labelFormatter={fmt}
-                formatter={(value: any, name: any) => [
+                // Sin anotar los parámetros: recharts los tipa por contexto y
+                // así no hace falta un `any` que el lint rechaza.
+                formatter={(value, name) => [
                   value,
                   name === "captaciones" ? "Captaciones" : "Leads",
                 ]}

@@ -1,8 +1,10 @@
 "use server"
 
 import { createClient, createAdminClient, createServiceClient } from "@/lib/supabase/server"
-import { sesionActual } from "@/lib/auth/acceso"
+import { admiteAdmin, SIN_PERMISO, sesionActual } from "@/lib/auth/acceso"
 import { revalidatePath } from "next/cache"
+import { getCatalogosActivos } from "@/lib/actions/catalogos"
+import { opcionesDe } from "@/lib/catalogos"
 import type { EstadoAgenda } from "@/types/captaciones"
 
 export async function getCaptacionByTelefono(telefono: string) {
@@ -58,7 +60,7 @@ export async function getCaptaciones({
     .select(`
       id, created_at, nombre, telefono, precio, precio_m2,
       barrio, calle, metros, habitaciones, banos, planta,
-      tiene_ascensor, estado, estado_crm, estado_whatsapp, activo, imagen_url, imagenes,
+      tiene_ascensor, estado, estado_crm, estado_whatsapp, senal, activo, imagen_url, imagenes,
       agente_id, fecha_agenda, recordatorio_fecha, notas_agenda, estado_agenda,
       operacion:raw_data->>operation,
       agente:perfiles!captaciones_agente_id_fkey(id, nombre, apellidos, avatar_url)
@@ -77,14 +79,33 @@ export async function getCaptaciones({
     if (q) query = query.or(`calle.ilike.%${q}%,barrio.ilike.%${q}%,nombre.ilike.%${q}%`)
   }
 
-  if (filtro === "agendadas") {
-    query = query.not("agente_id", "is", null)
-  } else if (filtro === "sin_agente") {
-    query = query.is("agente_id", null)
-  } else if (filtro === "completadas") {
-    query = query.eq("estado_agenda", "completado")
-  } else if (filtro === "pendientes") {
-    query = query.eq("estado_agenda", "pendiente").not("agente_id", "is", null)
+  // El filtro sigue siendo el `valor` de una fila del catálogo, sin tabla de
+  // equivalencias de por medio. Lo que cambió en la 027 es que ya no hay una
+  // sola pregunta, hay dos, y cada una vive en su columna:
+  //
+  //   estado_whatsapp -> ¿ha contestado?        Enviado · Respondido · …
+  //   senal           -> ¿qué entiende la IA?   interesado · quiere_llamada
+  //
+  // De qué lista es el valor NO se decide con una lista escrita aquí —eso es
+  // justo lo que obligaba a desplegar por cada valor nuevo—: lo dice el
+  // catálogo, que es quien conoce el `tipo` de cada valor. Así, una señal nueva
+  // creada desde /configuracion/catalogos filtra sola.
+  //
+  // Si un valor llegara a estar en las dos listas manda la señal: es la
+  // pastilla que mira el comercial, y es la que no puede acabar filtrando por
+  // otra columna sin que nadie lo note.
+  //
+  // El catálogo sólo se lee cuando hay filtro: la vista por defecto ("todas")
+  // no paga una consulta de más por esto.
+  //
+  // El valor viene del navegador, pero `.eq()` lo manda parametrizado y uno que
+  // no esté en ninguna de las dos listas devuelve cero filas, que es lo correcto.
+  if (filtro && filtro !== "todas") {
+    const catalogos = await getCatalogosActivos()
+    const esSenal = opcionesDe(catalogos, "senal_interes").some((c) => c.valor === filtro)
+    query = esSenal
+      ? query.eq("senal", filtro)
+      : query.eq("estado_whatsapp", filtro)
   }
 
   // Página y tamaño llegan del navegador: sin acotarlos, un `porPagina` de
@@ -106,26 +127,69 @@ export async function getCaptaciones({
  * cabecera lleva tiempo diciendo un número que no es. Aquí se cuenta en la base
  * de datos con `head: true`: no viaja ni una fila, sólo la cifra.
  */
-export async function getTotalesCaptaciones(soloAgenteId?: string) {
-  const supabase = await createAdminClient()
+/**
+ * Los totales de cada pastilla de la lista de captaciones.
+ *
+ * Cuentan por `estado_whatsapp` —¿ha contestado?— y, desde la 027, también por
+ * `senal` —¿qué ha entendido la IA de lo que contestó?—, que son dos preguntas
+ * distintas y ya no caben en una sola columna. Antes contaban quién la tenía
+ * asignada y cómo estaba la agenda — "795 sin asignar" no te dice nada de la
+ * captación, y ocupaba el sitio de lo que sí importa.
+ *
+ * `conSenal` va aparte de `porSenal` a propósito: el subtítulo enseña cuántos
+ * propietarios han mostrado interés, y eso es "tiene señal, la que sea". Sumar
+ * las de abajo daría el mismo número hoy, pero dejaría fuera cualquier señal
+ * que el administrador añada mañana y cualquier fila con una señal archivada.
+ *
+ * Son `head: true`, así que viajan los contadores y no las filas: da igual que
+ * la tabla crezca a 50.000.
+ *
+ * El rol se resuelve aquí dentro y ya no llega por parámetro. Esto está
+ * exportado desde un fichero "use server", así que cualquiera puede llamarlo
+ * desde el navegador: con `soloAgenteId` a elección de quien llamara, un agente
+ * podía pedir los totales de otro.
+ */
+export async function getTotalesCaptaciones() {
+  const { userId, isAdmin } = await sesionActual()
+  const supabase = isAdmin ? await createAdminClient() : await createClient()
+
+  // La lista de estados sale del catálogo, no de aquí. Si mañana se crea un
+  // estado nuevo desde /configuracion/catalogos, esta función lo cuenta sola y
+  // le sale su pastilla sin tocar código ni desplegar.
+  const catalogos = await getCatalogosActivos()
+  const estados = opcionesDe(catalogos, "estado_whatsapp").map((c) => c.valor)
+  const senales = opcionesDe(catalogos, "senal_interes").map((c) => c.valor)
 
   const base = () => {
     let q = supabase.from("captaciones").select("id", { count: "exact", head: true }).eq("activo", true)
-    if (soloAgenteId) q = q.eq("agente_id", soloAgenteId)
+    if (!isAdmin) q = q.eq("agente_id", userId)
     return q
   }
 
-  const [todas, sinAgente, agendadas] = await Promise.all([
+  // `head: true`, así que viajan los contadores y no las filas: da igual que la
+  // tabla crezca a 50.000. Son una decena de consultas en paralelo, no una por
+  // fila.
+  const [todas, conSenal, ...cuentas] = await Promise.all([
     base(),
-    base().is("agente_id", null),
-    base().eq("estado_agenda", "pendiente").not("agente_id", "is", null),
+    base().not("senal", "is", null),
+    ...estados.map((e) => base().eq("estado_whatsapp", e)),
+    ...senales.map((s) => base().eq("senal", s)),
   ])
 
-  return {
-    total: todas.count ?? 0,
-    sinAgente: sinAgente.count ?? 0,
-    agendadas: agendadas.count ?? 0,
-  }
+  // Un contador que falla se devuelve como null y no como 0: un 0 se lee como
+  // "no hay ninguna", que es justo la mentira que estamos quitando de en medio.
+  const n = (r: { count: number | null; error: unknown }) => (r.error ? null : r.count ?? 0)
+
+  // `cuentas` llega en el mismo orden en que se pidió: primero los estados y
+  // después las señales. Se reparte por posición y no por nombre porque los dos
+  // catálogos podrían llegar a compartir un `valor`.
+  const porEstado: Record<string, number | null> = {}
+  estados.forEach((e, i) => { porEstado[e] = n(cuentas[i]) })
+
+  const porSenal: Record<string, number | null> = {}
+  senales.forEach((sv, i) => { porSenal[sv] = n(cuentas[estados.length + i]) })
+
+  return { total: n(todas) ?? 0, porEstado, porSenal, conSenal: n(conSenal) }
 }
 
 export async function getCaptacion(id: number) {
@@ -163,31 +227,43 @@ export async function getAgentes() {
   return data ?? []
 }
 
+/**
+ * Asignar o traspasar el agente de una captación.
+ *
+ * Las cuatro columnas de agenda (fecha_agenda, recordatorio_fecha,
+ * notas_agenda, estado_agenda) siguen aceptándose para no romper a quien todavía
+ * las mande, pero ya no las escribe nadie: desde la migración 021 las citas y
+ * los recordatorios son filas de `agenda` y las notas, filas de
+ * `interacciones`. Se pueden borrar de la tabla cuando esto lleve unos días.
+ */
 export async function asignarAgenda(
   captacionId: number,
   payload: {
     agente_id: string | null
-    fecha_agenda: string | null
-    recordatorio_fecha: string | null
-    notas_agenda: string | null
-    estado_agenda: EstadoAgenda
+    fecha_agenda?: string | null
+    recordatorio_fecha?: string | null
+    notas_agenda?: string | null
+    estado_agenda?: EstadoAgenda
   }
 ) {
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("captaciones")
-    .update({ ...payload, visto_en: null })
+    .update({
+      agente_id: payload.agente_id,
+      asignado_en: payload.agente_id ? new Date().toISOString() : null,
+      visto_en: null,
+    })
     .eq("id", captacionId)
 
   if (error) return { error: error.message }
 
-  // Sincronizar leads vinculados a esta captación
-  if (payload.agente_id) {
-    await supabase
-      .from("leads")
-      .update({ captado_por: payload.agente_id })
-      .eq("captacion_id", captacionId)
-  }
+  // El lead espejo hereda el agente SOLO, con el trigger de la migración 026.
+  // Aquí no se toca a propósito: a una captación se le pone agente desde cinco
+  // sitios y tres de ellos no pasan por este código (el trigger automático al
+  // mostrar interés, el botón de repartir y el de "Atendido"). Hacerlo también
+  // aquí serían dos reglas para lo mismo, y dos reglas para lo mismo siempre
+  // acaban discrepando.
 
   revalidatePath("/captaciones")
   revalidatePath("/leads")
@@ -515,6 +591,7 @@ export async function marcarRespondido(captacionId: number) {
 }
 
 export async function eliminarCaptacion(captacionId: number) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("captaciones")
@@ -550,6 +627,7 @@ export async function getCaptacionesEliminadasPorAgente(agenteId: string) {
 }
 
 export async function darDeBajaMasivo(ids: number[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   if (!ids.length) return { success: true }
   const supabase = await createAdminClient()
   const { error } = await supabase
@@ -562,19 +640,23 @@ export async function darDeBajaMasivo(ids: number[]) {
 }
 
 export async function asignarAgentesMasivo(ids: number[], agenteId: string) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   if (!ids.length) return { success: true }
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("captaciones")
-    .update({ agente_id: agenteId, visto_en: null })
+    .update({
+      agente_id: agenteId,
+      asignado_en: new Date().toISOString(),
+      asignacion_motivo: "Asignación a mano",
+      visto_en: null,
+    })
     .in("id", ids)
   if (error) return { error: error.message }
 
-  // Asignar también los leads vinculados a estas captaciones
-  await supabase
-    .from("leads")
-    .update({ captado_por: agenteId })
-    .in("captacion_id", ids)
+  // Los leads espejo heredan el agente solos (trigger de la 026). Lo que había
+  // aquí escribía `captado_por` SIN condición, así que cada reasignación masiva
+  // borraba al captador de todos esos leads a la vez.
 
   revalidatePath("/captaciones")
   revalidatePath("/leads")
@@ -602,6 +684,7 @@ export async function marcarCaptacionesVistas(ids: number[]) {
 }
 
 export async function restaurarCaptaciones(ids: number[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   if (!ids.length) return { success: true }
   const supabase = await createAdminClient()
   const { error } = await supabase
@@ -614,6 +697,7 @@ export async function restaurarCaptaciones(ids: number[]) {
 }
 
 export async function eliminarDefinitivamente(ids: number[]) {
+  if (!await admiteAdmin()) return { error: SIN_PERMISO }
   if (!ids.length) return { success: true }
   const supabase = await createAdminClient()
   // Storage necesita service_role PURO: createAdminClient arrastra las cookies del

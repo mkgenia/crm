@@ -118,9 +118,11 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const isAdmin = rol === "Admin"
-  const [alertasWA, setAlertasWA] = useState(0)
+  // Los contadores nacen en null y vuelven a null si la consulta falla: un 0 se
+  // lee como "no hay ninguna", y ahí es donde el agente deja de mirar.
+  const [alertasWA, setAlertasWA] = useState<number | null>(null)
   const [nuevasCaptaciones, setNuevasCaptaciones] = useState(0)
-  const [nuevasDemandas, setNuevasDemandas] = useState(0)
+  const [nuevasDemandas, setNuevasDemandas] = useState<number | null>(null)
   const [plegados, setPlegados] = useState<Record<string, boolean>>({})
   const [sombra, setSombra] = useState({ arriba: false, abajo: false })
   const navRef = useRef<HTMLElement>(null)
@@ -166,23 +168,32 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
     return () => ro.disconnect()
   }, [medirSombras, plegados])
 
-  // Realtime badge: respuestas WA + detección de nuevas asignaciones (solo agentes)
+  // Realtime badge: captaciones con señal + detección de nuevas asignaciones (solo agentes)
   useEffect(() => {
     const supabase = createClient()
     let uid: string | null = null
 
     const fetchCount = async () => {
       if (!uid) return
+      // Se cuenta por `senal`, no por estado: desde la migración 027 "le
+      // interesa" y "quiere llamada" ya no son estados de WhatsApp —los dos se
+      // fundieron en Respondido— y lo que la IA entiende vive en su columna.
+      // Buscar aquí los estados viejos devolvería 0 para siempre.
       let query = supabase
         .from("captaciones")
         .select("id", { count: "exact", head: true })
-        .in("estado_whatsapp", ["Interesado", "Quiere_Llamada"])
+        .not("senal", "is", null)
         .eq("activo", true)
 
       if (!isAdmin) query = query.eq("agente_id", uid)
 
-      const { count } = await query
-      setAlertasWA(count ?? 0)
+      // El count se pide a la base con head:true y sin traer filas: contar sobre
+      // lo cargado miente en cuanto se pasa de 1.000, que es donde PostgREST
+      // corta en silencio.
+      const { count, error } = await query
+      // Un fallo de red no puede apagar la chapa diciendo "no hay ninguna":
+      // vuelve a null y la chapa simplemente no se pinta hasta el próximo aviso.
+      setAlertasWA(error ? null : count)
     }
 
     // Canal creado síncronamente → cleanup siempre tiene referencia
@@ -227,17 +238,21 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   useEffect(() => {
     const supabase = createClient()
     const fetchDemandas = async () => {
-      const { count } = await supabase
+      const { count, error } = await supabase
         .from("demandas")
         .select("id", { count: "exact", head: true })
         .eq("visto", false)
-      setNuevasDemandas(count ?? 0)
+      // Mismo criterio que el de captaciones: si la cuenta falla no se pinta.
+      setNuevasDemandas(error ? null : count)
     }
     fetchDemandas()
     const channel = supabase
       .channel("sidebar-demandas")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "demandas" }, () => {
-        setNuevasDemandas((n) => n + 1)
+        // Se vuelve a contar en la base en vez de sumar uno a lo que hubiera:
+        // la demanda nueva puede entrar ya vista, y si la cuenta de partida
+        // falló (null) sumarle uno la inventaría.
+        void fetchDemandas()
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "demandas" }, () => {
         fetchDemandas()
@@ -282,9 +297,11 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
           const contieneActivo = items.some(
             (i) => pathname === i.href || pathname.startsWith(i.href + "/")
           )
+          // Un contador sin leer (null) no suma: cuenta como lo que es, un dato
+          // que no se tiene, no como un cero.
           const pendientes = items.reduce((n, i) => {
-            if (i.href === "/captaciones") return n + alertasWA
-            if (i.href === "/demandas") return n + nuevasDemandas
+            if (i.href === "/captaciones") return n + (alertasWA ?? 0)
+            if (i.href === "/demandas") return n + (nuevasDemandas ?? 0)
             return n
           }, 0)
 
@@ -306,7 +323,8 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
 
                   {/* Plegado, el grupo tiene que seguir contando lo que pasa
                       dentro: si no, cerrar "Generador de leads" apagaría el
-                      aviso de los 88 interesados sin que nadie lo decida. */}
+                      aviso de las captaciones con señal sin que nadie lo
+                      decida. */}
                   {!abierto && pendientes > 0 && (
                     <span className="ml-auto text-[10px] font-semibold text-emerald-400 tabular-nums">
                       {pendientes}
@@ -329,9 +347,11 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
               <div className="space-y-0.5 pt-0.5" inert={!abierto}>
                 {items.map(({ href, icon: Icon, label, enDesarrollo }) => {
                   const active = pathname === href || pathname.startsWith(href + "/")
-                  const showBadge = href === "/captaciones" && alertasWA > 0
-                  const showNuevas = href === "/captaciones" && !isAdmin && nuevasCaptaciones > 0 && alertasWA === 0
-                  const showDemandas = href === "/demandas" && nuevasDemandas > 0
+                  // `?? 0` y no `!`: mientras el contador no se haya leído (o su
+                  // consulta haya fallado) la chapa no se pinta.
+                  const showBadge = href === "/captaciones" && (alertasWA ?? 0) > 0
+                  const showNuevas = href === "/captaciones" && !isAdmin && nuevasCaptaciones > 0 && !alertasWA
+                  const showDemandas = href === "/demandas" && (nuevasDemandas ?? 0) > 0
 
                   return (
                     <Link

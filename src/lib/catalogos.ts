@@ -24,9 +24,13 @@ export interface Catalogo {
 
 export type TipoCatalogo =
   | "estado_lead"
+  | "estado_prospecto"
+  | "estado_demanda"
   | "estado_whatsapp"
   | "fuente"
   | "tipo_agenda"
+  | "tipo_interaccion"
+  | "resultado_atencion"
   | "motivo_perdida"
   | "etiqueta"
   | "zona"
@@ -52,6 +56,24 @@ export const TIPOS: Array<{
     titulo: "Estados del lead",
     descripcion: "Las columnas del pipeline, de Nuevo a Ganado o Perdido.",
     bloqueado: true,
+  },
+  {
+    tipo: "estado_prospecto",
+    titulo: "Estados del prospecto",
+    descripcion: "Por dónde va un piso que estamos captando. Nacen tres; los demás se encienden aquí cuando alguien los pida.",
+    bloqueado: true,
+  },
+  {
+    tipo: "estado_demanda",
+    titulo: "Estados de la demanda",
+    descripcion: "Por dónde va una demanda que llega de los portales. La primera la escribe el workflow del correo.",
+    bloqueado: true,
+  },
+  {
+    tipo: "resultado_atencion",
+    titulo: "Resultados de una llamada",
+    descripcion: "Lo que se marca de un toque al colgar: no contesta, le interesa, se lo piensa…",
+    bloqueado: false,
   },
   {
     tipo: "etiqueta",
@@ -81,6 +103,12 @@ export const TIPOS: Array<{
     tipo: "tipo_agenda",
     titulo: "Tipos de agenda",
     descripcion: "Cita, recordatorio o nota en el calendario del equipo.",
+    bloqueado: true,
+  },
+  {
+    tipo: "tipo_interaccion",
+    titulo: "Tipos de interacción",
+    descripcion: "Cada cosa que pasa en la ficha de un contacto: una llamada, un WhatsApp, una visita, una nota.",
     bloqueado: true,
   },
   {

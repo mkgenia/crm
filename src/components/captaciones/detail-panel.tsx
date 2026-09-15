@@ -1,138 +1,145 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, CalendarClock, Info, Loader2, Check, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Phone, UserPlus, RotateCcw } from "lucide-react"
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from "react"
+import Link from "next/link"
+import { X, MapPin, Home, TrendingDown, TrendingUp, ExternalLink, StickyNote, Info, Loader2, Trash2, MessageCircle, PhoneOff, Sparkles, Send, Building2, ArrowUpRight, RotateCcw } from "lucide-react"
 import { AgendaPanel } from "./agenda-panel"
-import { getCaptacion, getHistorial, getAgentes, actualizarEstadoCaptacion, actualizarEstadoAgenda, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, marcarRespondido, reintentarAutoContacto } from "@/lib/actions/captaciones"
-import { crearLeadDesdeCaptacion } from "@/lib/actions/leads"
+import { getCaptacion, getHistorial, getAgentes, eliminarCaptacion, contactarCaptacion, contactarCaptacionConTelefono, generarMensajeIA, reintentarAutoContacto } from "@/lib/actions/captaciones"
+import { promocionarCaptacion } from "@/lib/actions/prospectos"
 import { getMensajesCaptacion, type Mensaje } from "@/lib/actions/mensajes"
+import { getInteracciones, type Interaccion } from "@/lib/actions/interacciones"
+import { getCatalogosActivos } from "@/lib/actions/catalogos"
+import { createClient } from "@/lib/supabase/client"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ESTADO_COLORS, ESTADO_LABELS, AGENDA_COLORS, ESTADOS_CAPTACION, WA_CLASIFICACIONES, WA_REINTENTABLES, type EstadoAgenda } from "@/types/captaciones"
+import { Atendido } from "@/components/shared/atendido"
+import { LineaTiempo, type PersonaLinea } from "@/components/shared/linea-tiempo"
+import { claseColor, clasePunto, colorDe, nombreDe, type Catalogo } from "@/lib/catalogos"
+import { WA_REINTENTABLES } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { Button } from "@/components/ui/button"
 
-type Tab = "agenda" | "info"
+type Tab = "notas" | "info"
 
+/** Lo que Idealista escribe cuando no sabe el estado del piso: no se enseña. */
 const ESTADOS_OCULTOS = ["sin identificar", "no especificado", "sin especificar", "desconocido"]
 
-function AgendaAgente({ captacionId, estado_crm, agente, fecha_agenda, notas_agenda, estado_agenda, onUpdate }: {
-  captacionId: number
-  estado_crm: string | null
-  agente: any
-  fecha_agenda: string | null
-  notas_agenda: string | null
-  estado_agenda: EstadoAgenda
-  onUpdate: () => void
-}) {
-  const [estadoActual, setEstadoActual] = useState(estado_crm ?? "")
-  const [savingEstado, setSavingEstado] = useState(false)
-  const [statusLoading, setStatusLoading] = useState<EstadoAgenda | null>(null)
-  const colors = AGENDA_COLORS[estado_agenda] ?? AGENDA_COLORS.pendiente
+/**
+ * Las tres listas del catálogo que se pintan en esta ficha.
+ *
+ * `estado_whatsapp` responde a "¿ha contestado?", `senal_interes` a "¿qué ha
+ * entendido la IA?" y `estado_lead` a "¿por dónde va el trato?". Son tres
+ * preguntas distintas y por eso son tres columnas: hasta la migración 027,
+ * `Interesado` y `Quiere_Llamada` eran estados de WhatsApp y respondían a las
+ * tres a la vez.
+ *
+ * `estado_crm` se nombra con el catálogo `estado_lead` y no con uno propio: son
+ * los mismos siete valores del pipeline de leads, y de ahí los saca ya el
+ * tablero (`captaciones-pipeline.tsx`). Escritos a mano aquí, "Negociacion"
+ * salía sin tilde y un valor recoloreado desde /configuracion/catalogos nunca
+ * llegaba a esta ficha.
+ */
+const WA_CAT = "estado_whatsapp"
+const SENAL_CAT = "senal_interes"
+const CRM_CAT = "estado_lead"
 
-  async function handleEstadoCaptacion(nuevoEstado: string) {
-    setSavingEstado(true)
-    const prev = estadoActual
-    setEstadoActual(nuevoEstado)
-    const res = await actualizarEstadoCaptacion(captacionId, nuevoEstado)
-    setSavingEstado(false)
-    if (res.error) { toast.error(res.error); setEstadoActual(prev) }
-    else { toast.success(`Estado CRM: ${nuevoEstado}`); onUpdate() }
-  }
+/**
+ * Qué catálogo nombra cada columna del historial de cambios.
+ *
+ * El historial guarda el valor crudo que escribió el workflow
+ * ("Quiere_Llamada", "Negociacion"), así que sin esto una fila de hace tres
+ * meses se lee en bruto. `nombreDe` cae al valor crudo cuando no está
+ * catalogado, que es exactamente lo que hace falta con los dos valores que la
+ * 027 archivó: las 95 filas que los nombran se siguen leyendo.
+ *
+ * `estado` no está en el mapa a propósito: es el texto libre que manda
+ * Idealista ("buen estado", "a reformar"), no una lista nuestra.
+ */
+const CAT_POR_CAMPO: Record<string, string> = {
+  estado_crm: CRM_CAT,
+  estado_whatsapp: WA_CAT,
+  senal: SENAL_CAT,
+}
 
-  async function handleStatus(nuevo: EstadoAgenda) {
-    setStatusLoading(nuevo)
-    const res = await actualizarEstadoAgenda(captacionId, nuevo)
-    setStatusLoading(null)
-    if (res.error) { toast.error("Error al actualizar"); return }
-    toast.success(`Visita marcada como ${nuevo}`)
-    onUpdate()
-  }
+/**
+ * Las fechas se formatean con locale y zona fijos.
+ *
+ * El servidor corre en UTC y el navegador en Madrid: si cada uno usara la suya,
+ * el mismo dato saldría con una hora distinta a cada lado y React lo cantaría
+ * como desajuste al hidratar. Numérico y no "14 sept" por lo mismo: el ICU de
+ * Node y el del navegador no siempre abrevian igual los meses.
+ */
+const FECHA = new Intl.DateTimeFormat("es-ES", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  timeZone: "Europe/Madrid",
+})
+const FECHA_HORA = new Intl.DateTimeFormat("es-ES", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "Europe/Madrid",
+})
 
-  const estadoMostrado = estadoActual && !ESTADOS_OCULTOS.includes(estadoActual.toLowerCase().trim()) ? estadoActual : null
+/**
+ * El reloj, tratado como lo que es: un sistema externo a React.
+ *
+ * Mismo planteamiento que en `shared/linea-tiempo.tsx`, y por el mismo motivo:
+ * "hace 2 días" sale de Date.now(), así que calculado durante el render el HTML
+ * del servidor y el del primer render del cliente dirían cosas distintas y
+ * React lo cantaría como desajuste de hidratación. Leído con
+ * useSyncExternalStore, los dos ven null y enseñan la fecha absoluta —idéntica
+ * a ambos lados—; ya hidratado, React repinta con la hora de verdad.
+ *
+ * Está copiado y no importado porque en linea-tiempo es privado del módulo.
+ * Cuando haya un sitio común para el tiempo, este trozo se va allí.
+ */
+const RELOJ = {
+  subscribe(alCambiar: () => void) {
+    // Cada minuto, para que la señal no envejezca a la vista de quien deja la
+    // ficha abierta mientras llama.
+    const t = setInterval(alCambiar, 60_000)
+    return () => clearInterval(t)
+  },
+  // Redondeado al minuto a propósito: getSnapshot tiene que devolver lo mismo
+  // mientras nada cambie, y un Date.now() crudo renderizaría sin parar.
+  ahora: () => Math.floor(Date.now() / 60_000) * 60_000,
+  enServidor: () => null,
+}
 
-  return (
-    <div className="space-y-5">
-      {/* Estado de agenda + completar/cancelar */}
-      <div className={cn("flex items-center justify-between rounded-lg px-4 py-3 border", colors.bg, "border-border")}>
-        <div className="flex items-center gap-2.5">
-          <span className={cn("h-2 w-2 rounded-full", colors.dot)} />
-          <span className={cn("text-sm font-medium capitalize", colors.text)}>{estado_agenda}</span>
-        </div>
-        {estado_agenda === "pendiente" && (
-          <div className="flex gap-1.5">
-            <Button size="sm" variant="ghost"
-              className="h-7 px-2 text-emerald-500 hover:text-emerald-500 hover:bg-emerald-500/10"
-              onClick={() => handleStatus("completado")} disabled={!!statusLoading}
-            >
-              {statusLoading === "completado" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-              Completar
-            </Button>
-            <Button size="sm" variant="ghost"
-              className="h-7 px-2 text-red-500 hover:text-red-500 hover:bg-red-500/10"
-              onClick={() => handleStatus("cancelado")} disabled={!!statusLoading}
-            >
-              {statusLoading === "cancelado" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-              Cancelar
-            </Button>
-          </div>
-        )}
-      </div>
+/** Días naturales, no bloques de 24 h: a las 00:30 "ayer" tiene que ser ayer. */
+function diasNaturales(antes: number, ahora: number): number {
+  const a = new Date(antes)
+  const b = new Date(ahora)
+  a.setHours(0, 0, 0, 0)
+  b.setHours(0, 0, 0, 0)
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000)
+}
 
-      {/* Selector de estado de captación */}
-      <div className="space-y-2">
-        <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
-          Estado de la captación
-          {savingEstado && <Loader2 className="h-3 w-3 animate-spin" />}
-        </p>
-        <div className="grid grid-cols-3 gap-1.5">
-          {ESTADOS_CAPTACION.map((e) => {
-            const style = ESTADO_COLORS[e] ?? { bg: "bg-muted", text: "text-muted-foreground" }
-            const active = estadoMostrado === e
-            return (
-              <button
-                key={e}
-                onClick={() => handleEstadoCaptacion(e)}
-                disabled={savingEstado}
-                className={cn(
-                  "px-2 py-1.5 rounded-md text-xs font-medium border transition-all",
-                  active
-                    ? cn(style.bg, style.text, "border-current/30 ring-1 ring-current/20")
-                    : "bg-muted/40 text-muted-foreground border-border hover:bg-muted"
-                )}
-              >
-                {ESTADO_LABELS[e] ?? e}
-              </button>
-            )
-          })}
-        </div>
-      </div>
+/** Pasada una semana, "hace N días" ya no sitúa a nadie: mejor la fecha. */
+function cuando(ms: number, ahora: number): string {
+  const seg = Math.round((ahora - ms) / 1000)
+  // El reloj va redondeado al minuto, así que una señal recién detectada puede
+  // caer unos segundos "en el futuro". Sólo lo futuro de verdad lleva fecha.
+  if (seg < -120) return FECHA.format(ms)
+  if (seg < 60) return "ahora mismo"
+  const min = Math.floor(seg / 60)
+  if (min < 60) return `hace ${min} min`
+  const horas = Math.floor(min / 60)
+  if (horas < 24) return `hace ${horas} h`
+  const dias = diasNaturales(ms, ahora)
+  if (dias <= 1) return "ayer"
+  if (dias < 7) return `hace ${dias} días`
+  return FECHA.format(ms)
+}
 
-      {/* Info agenda */}
-      {fecha_agenda && (
-        <div className="rounded-lg border border-border bg-card px-4 py-3 flex items-center gap-2.5">
-          <CalendarClock className="h-4 w-4 text-muted-foreground shrink-0" />
-          <div>
-            <p className="text-xs text-muted-foreground">Fecha programada</p>
-            <p className="text-sm font-medium text-foreground">
-              {new Date(fecha_agenda).toLocaleDateString("es-ES", { weekday: "long", day: "2-digit", month: "long" })}
-              {" · "}
-              {new Date(fecha_agenda).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}
-            </p>
-          </div>
-        </div>
-      )}
-      {notas_agenda && (
-        <div className="rounded-lg border border-border bg-card px-4 py-3">
-          <p className="text-xs text-muted-foreground mb-1">Notas</p>
-          <p className="text-sm text-foreground whitespace-pre-wrap">{notas_agenda}</p>
-        </div>
-      )}
-      {!fecha_agenda && !notas_agenda && (
-        <p className="text-sm text-muted-foreground text-center py-4">Sin fecha programada</p>
-      )}
-    </div>
-  )
+/** El sello de la señal, si lo hay y se puede leer. Una fecha rota no pinta. */
+function msDe(ts: unknown): number | null {
+  if (typeof ts !== "string") return null
+  const ms = new Date(ts).getTime()
+  return Number.isNaN(ms) ? null : ms
 }
 
 function hasPhone(tel: string | null) {
@@ -155,7 +162,7 @@ function fmtDia(ts: number) {
   return d.toLocaleDateString("es-ES", { day: "2-digit", month: "short" })
 }
 
-function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () => void }) {
+function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; catalogos: Catalogo[]; onUpdate: () => void }) {
   const [mensajes, setMensajes] = useState<Mensaje[]>([])
   const [cargando, setCargando] = useState(false)
   const [mensaje, setMensaje] = useState("")
@@ -175,9 +182,17 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   async function cargarMensajes() {
     if (!tienePhone) return
     setCargando(true)
-    const data = await getMensajesCaptacion(captacion.telefono)
-    setMensajes(data)
+    // `.catch` y no sólo un `finally`: si la acción ni llega a contestar —red
+    // caída, despliegue a mitad— el `await` lanza, el `setCargando(false)` de
+    // abajo no se ejecuta nunca y el panel se queda girando para siempre sin
+    // decir por qué. Vale para todos los botones de este panel.
+    const data = await getMensajesCaptacion(captacion.telefono).catch(() => null)
     setCargando(false)
+    if (!data) {
+      toast.error("No se pudo cargar la conversación")
+      return
+    }
+    setMensajes(data)
     setTimeout(() => {
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight
     }, 50)
@@ -187,35 +202,42 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
 
   async function handleGenerar() {
     setGenerando(true)
-    const msg = await generarMensajeIA(captacion.id)
+    // Un mensaje vacío también es un fallo: la acción devuelve "" cuando no
+    // encuentra la captación, y abrir el editor en blanco parece que ha ido
+    // bien.
+    const msg = await generarMensajeIA(captacion.id).catch(() => "")
+    setGenerando(false)
+    if (!msg) { toast.error("No se pudo generar el mensaje"); return }
     setMensaje(msg)
     setExpandido(true)
-    setGenerando(false)
   }
 
   async function handleGenerarNoTel() {
     setGenerando(true)
-    const msg = await generarMensajeIA(captacion.id)
+    const msg = await generarMensajeIA(captacion.id).catch(() => "")
+    setGenerando(false)
+    if (!msg) { toast.error("No se pudo generar el mensaje"); return }
     setMensaje(msg)
     setFaseNoTel("mensaje")
-    setGenerando(false)
   }
 
   async function handleEnviar() {
     if (!mensaje.trim()) return
     setEnviando(true)
     const res = await contactarCaptacion(captacion.id, mensaje)
+      .catch(() => ({ error: "No se pudo enviar el mensaje" }))
     setEnviando(false)
     if (res.error) { toast.error(res.error); return }
     toast.success("Mensaje enviado por WhatsApp")
     onUpdate()
-    cargarMensajes()
+    void cargarMensajes()
   }
 
   async function handleEnviarNoTel() {
     if (!mensaje.trim() || !telefonoManual.trim()) return
     setEnviando(true)
     const res = await contactarCaptacionConTelefono(captacion.id, telefonoManual, mensaje)
+      .catch(() => ({ error: "No se pudo enviar el mensaje" }))
     setEnviando(false)
     if (res.error) { toast.error(res.error); return }
     toast.success("Mensaje enviado por WhatsApp")
@@ -233,13 +255,12 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   async function handleReintentar() {
     setReintentando(true)
     const res = await reintentarAutoContacto(captacion.id)
+      .catch(() => ({ error: "No se pudo devolver a la cola" }))
     setReintentando(false)
     if (res?.error) { toast.error(res.error); return }
     toast.success("Vuelve a la cola del captador")
     onUpdate()
   }
-
-  const clasificacion = estadoWA ? WA_CLASIFICACIONES[estadoWA] : null
 
   // Agrupar mensajes por día
   const porDia: { dia: string; items: Mensaje[] }[] = []
@@ -251,7 +272,9 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   }
 
   return (
-    <div className="mb-5 rounded-lg border border-border overflow-hidden">
+    // Sin margen propio: el hueco con lo que tiene al lado lo pone el `gap` del
+    // contenedor de la pestaña, que es quien sabe qué hay pintado y qué no.
+    <div className="rounded-lg border border-border overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 bg-muted/30">
         <MessageCircle className="h-4 w-4 text-emerald-500 shrink-0" />
@@ -264,10 +287,17 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
         {tienePhone && !estadoWA && (
           <span className="text-xs text-muted-foreground">{captacion.telefono}</span>
         )}
-        {clasificacion && (
-          <span className={cn("flex items-center gap-1.5 text-xs font-medium", clasificacion.text)}>
-            <span className={cn("h-1.5 w-1.5 rounded-full", clasificacion.dot)} />
-            {estadoWA === "Enviado" ? "Enviado · sin respuesta" : clasificacion.label}
+        {/* El estado de la conversación, también desde el catálogo. Aquí sí es
+            la pastilla entera: va sobre el fondo del panel, no sobre la foto.
+            Se quitó el "Enviado · sin respuesta" escrito a mano; el matiz lo
+            da ya el propio catálogo, que es donde se puede cambiar. */}
+        {estadoWA && (
+          <span className={cn(
+            "flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[11px] font-medium",
+            claseColor(colorDe(catalogos, WA_CAT, estadoWA)),
+          )}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(colorDe(catalogos, WA_CAT, estadoWA)))} />
+            {nombreDe(catalogos, WA_CAT, estadoWA)}
           </span>
         )}
         {puedeReintentar && (
@@ -445,11 +475,37 @@ function WhatsAppPanel({ captacion, onUpdate }: { captacion: any; onUpdate: () =
   )
 }
 
+/**
+ * A dónde lleva "Ver prospecto".
+ *
+ * Parámetro y no `/prospectos/<id>`: /prospectos es hoy una sola página y la
+ * ficha la está montando otro agente. Con `?p=` el enlace ya funciona —cae en
+ * la pantalla de prospectos— y el día que haya ficha sólo tiene que leer el
+ * parámetro; una ruta anidada que todavía no existe sería un 404 desde el
+ * primer clic.
+ */
+const rutaProspecto = (id: string) => `/prospectos?p=${id}`
+
 interface Props {
   captacionId: number | null
   onClose: () => void
   isAdmin?: boolean
   hideWhatsApp?: boolean
+  /**
+   * Aviso al padre de que ESTA captación ha cambiado y la tarjeta que la
+   * representa en la lista ya no dice la verdad.
+   *
+   * Hasta ahora sólo se recargaba al cerrar el panel (`onClose`), así que
+   * traspasar el agente desde aquí dejaba la tarjeta de la izquierda enseñando
+   * el agente viejo mientras el panel seguía abierto — y el traspaso parecía no
+   * haberse guardado. Se dispara al traspasar, al atender, al contactar por
+   * WhatsApp y al pasar a prospecto: las cuatro cosas que se ven desde fuera.
+   *
+   * Es opcional a propósito: quien renderice el panel decide si su lista se
+   * puede refrescar sin perder el sitio. Está sin enganchar en
+   * `captaciones-list.tsx` y en `mensajes-shell.tsx`, que son de otro agente.
+   */
+  onCambio?: () => void
 }
 
 function fmt(n: number | null) {
@@ -457,46 +513,244 @@ function fmt(n: number | null) {
   return n.toLocaleString("es-ES") + " €"
 }
 
-export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp = false }: Props) {
-  const [tab, setTab] = useState<Tab>("agenda")
+export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp = false, onCambio }: Props) {
+  const [tab, setTab] = useState<Tab>("notas")
   const [data, setData] = useState<Awaited<ReturnType<typeof getCaptacion>> | null>(null)
   const [historial, setHistorial] = useState<Awaited<ReturnType<typeof getHistorial>>>([])
   const [agentes, setAgentes] = useState<Awaited<ReturnType<typeof getAgentes>>>([])
+  const [interacciones, setInteracciones] = useState<Interaccion[]>([])
   const [loading, setLoading] = useState(false)
-  const [creandoLead, setCreandoLead] = useState(false)
-  const [leadCreado, setLeadCreado] = useState(false)
+  const [fallo, setFallo] = useState(false)
+  const [promocionando, setPromocionando] = useState(false)
+  /**
+   * El prospecto recién creado, sólo hasta que `load()` traiga la fila con su
+   * `prospecto_id`. Sin esto, entre el "hecho" y la relectura el botón volvería
+   * a ofrecer promocionar algo que ya está promocionado.
+   */
+  const [prospectoNuevo, setProspectoNuevo] = useState<string | null>(null)
 
-  async function load() {
-    if (!captacionId) return
-    setLoading(true)
+  // Ni los catálogos ni quién soy dependen de la captación abierta, así que no
+  // viajan en `load()`: se piden una vez y se quedan mientras el panel viva.
+  const [catalogos, setCatalogos] = useState<Catalogo[]>([])
+  const [yoId, setYoId] = useState("")
+
+  // null hasta que el componente está hidratado; ver RELOJ. Con null se enseña
+  // la fecha absoluta, que es igual en el servidor y en el navegador.
+  const ahora = useSyncExternalStore<number | null>(
+    RELOJ.subscribe,
+    RELOJ.ahora,
+    RELOJ.enServidor,
+  )
+
+  /**
+   * Al abrir otra captación, la ficha vuelve a su sitio.
+   *
+   * El panel no se desmonta entre una y otra —está siempre montado y sólo se
+   * desliza—, así que sin esto la siguiente se abriría en la pestaña de la
+   * anterior y con su historial debajo mientras carga el suyo. Se hace durante
+   * el render y no en un efecto: así no hay un repintado intermedio con los
+   * datos mezclados, y el lint del compilador tampoco lo permitiría.
+   */
+  const [vista, setVista] = useState<number | null>(null)
+  if (captacionId !== vista) {
+    setVista(captacionId)
+    setTab("notas")
+    setProspectoNuevo(null)
+    // El salto de la ficha anterior puede seguir en el aire: sin apagarlo aquí,
+    // la captación que se acaba de abrir enseña su botón en "Pasando a
+    // prospecto…" y deshabilitado por un salto que no es el suyo.
+    setPromocionando(false)
+    setInteracciones([])
+    setFallo(false)
+    // El esqueleto se enciende aquí y no dentro del efecto por dos motivos: el
+    // primer pintado de la ficha nueva ya no enseña un fotograma con los datos
+    // de la anterior, y el lint del compilador no admite setState síncrono
+    // dentro de un efecto. Al cerrar (null) se apaga: el panel se va deslizando
+    // y tiene que irse con su contenido, no convertido en un esqueleto.
+    setLoading(!!captacionId)
+  }
+
+  /**
+   * Qué ficha se está mirando AHORA.
+   *
+   * `load` y los manejadores se quedan con el `captacionId` del render en el que
+   * nacieron, y hay acciones que tardan —el salto a prospecto crea el contacto,
+   * copia la ficha y deja rastro—: si mientras tanto se abre otra captación o se
+   * cierra el panel, la relectura de la anterior pintaba sus datos encima de la
+   * que se está mirando, y entonces "Atendido" apuntaba la llamada en la ficha
+   * equivocada. La referencia se lee al contestar, no al pulsar, así que no
+   * envejece con el manejador.
+   */
+  const idVisible = useRef(captacionId)
+  useEffect(() => { idVisible.current = captacionId }, [captacionId])
+
+  /**
+   * Lee la ficha entera.
+   *
+   * `otraFicha` separa las dos veces que se llama a esto, que sólo se
+   * diferencian al fallar: abriendo OTRA captación no puede quedarse en
+   * pantalla la anterior —el botón de atender apuntaría la llamada en la
+   * captación equivocada—, mientras que releyendo tras guardar una nota lo que
+   * ya hay sigue siendo de esta misma captación y se deja.
+   *
+   * `vigente` corta la respuesta que llega tarde: al bajar por la lista se
+   * abren dos fichas seguidas, y si la primera contesta después de la segunda
+   * pintaría sus datos encima de los de la que se está mirando. Sin decir nada
+   * vale lo que siga en pantalla (`idVisible`): así también está cubierta la
+   * relectura que dispara una acción lenta —atender, traspasar, promocionar—
+   * cuando ya se ha cambiado de ficha o se ha cerrado el panel.
+   */
+  async function load({ otraFicha = false, vigente }: {
+    otraFicha?: boolean
+    vigente?: () => boolean
+  } = {}) {
+    const id = captacionId
+    if (!id) return
+    const sigueValiendo = vigente ?? (() => idVisible.current === id)
     try {
-      const [cap, hist, ags] = await Promise.all([
-        getCaptacion(captacionId),
-        getHistorial(captacionId),
+      const [cap, hist, ags, linea] = await Promise.all([
+        getCaptacion(id),
+        getHistorial(id),
         getAgentes(),
+        getInteracciones({ captacionId: id }),
       ])
+      if (!sigueValiendo()) return
       setData(cap)
       setHistorial(hist)
       setAgentes(ags)
-    } catch (e) {
-      toast.error("Error al cargar la captación")
+      setFallo(false)
+      // El historial no se traga su error: una lista vacía por un fallo de
+      // lectura se ve igual que una captación sin llamadas, y eso se cree.
+      if (linea.error) toast.error(linea.error)
+      setInteracciones(linea.interacciones)
+    } catch {
+      if (!sigueValiendo()) return
+      toast.error("No se pudo cargar la captación")
+      if (otraFicha) {
+        setData(null)
+        setHistorial([])
+        setInteracciones([])
+        setFallo(true)
+      }
     } finally {
-      setLoading(false)
+      if (sigueValiendo()) setLoading(false)
     }
   }
 
   useEffect(() => {
-    if (captacionId) { setTab("agenda"); load(); setLeadCreado(false) }
+    if (!captacionId) return
+    let vivo = true
+    void load({ otraFicha: true, vigente: () => vivo })
+    return () => { vivo = false }
   }, [captacionId])
 
-  async function handleCrearLead() {
+  useEffect(() => {
+    let vivo = true
+
+    ;(async () => {
+      try {
+        const cats = await getCatalogosActivos()
+        if (vivo) setCatalogos(cats)
+      } catch {
+        // Sin catálogos, el botón de atender se queda sin los resultados de la
+        // llamada. Se avisa: en silencio parecería que no hay ninguno.
+        if (vivo) toast.error("No se pudieron cargar los catálogos")
+      }
+
+      // Quién soy sale de la sesión del navegador porque este panel cuelga de un
+      // árbol de cliente: la línea de tiempo lo necesita para saber qué
+      // anotaciones puedo borrar.
+      //
+      // Éste sí falla callado, y es lo correcto: sin saber quién soy la línea de
+      // tiempo se sigue leyendo entera, sólo deja de ofrecer el botón de borrar.
+      // Un aviso aquí sería ruido sobre algo que no impide trabajar.
+      try {
+        const { data: { user } } = await createClient().auth.getUser()
+        if (vivo && user) setYoId(user.id)
+      } catch {}
+    })()
+
+    return () => { vivo = false }
+  }, [])
+
+  // El equipo ya viene en `agentes`: la línea de tiempo sólo necesita el nombre
+  // para firmar cada anotación, así que se deriva en vez de volver a pedirlo.
+  const personas: PersonaLinea[] = useMemo(
+    () => (agentes as Array<{ id: string; nombre: string | null; apellidos: string | null }>)
+      .map((a) => ({ id: a.id, nombre: `${a.nombre ?? ""} ${a.apellidos ?? ""}`.trim() || "—" })),
+    [agentes],
+  )
+
+  // El sello de la última vez que una PERSONA la atendió. `atendido_por` es un
+  // uuid y el botón sólo lo enseña, así que aquí se cambia por el nombre.
+  const yaAtendido = useMemo(() => {
+    const en = data?.atendido_en as string | null | undefined
+    if (!en) return null
+    const quien = personas.find((p) => p.id === data?.atendido_por)
+    return { en, por: quien?.nombre ?? null }
+  }, [data, personas])
+
+  /**
+   * El prospecto de esta captación, si lo hay.
+   *
+   * Se mira primero lo que acaba de devolver la promoción y después la fila:
+   * `load()` tarda un viaje en traer el `prospecto_id` recién escrito, y en ese
+   * hueco el botón no puede volver a ofrecer el salto.
+   */
+  const prospectoId = prospectoNuevo
+    ?? (data as { prospecto_id?: string | null } | null)?.prospecto_id
+    ?? null
+
+  /**
+   * El salto: de anuncio de Idealista a piso que estamos captando.
+   *
+   * Todo el trabajo vive en la función SQL `promocionar_captacion` (022), que es
+   * idempotente por índice único: dos clics seguidos devuelven el mismo
+   * prospecto en vez de crear dos del mismo piso.
+   */
+  async function handlePasarAProspecto() {
     if (!data) return
-    setCreandoLead(true)
-    const res = await crearLeadDesdeCaptacion(data.id)
-    setCreandoLead(false)
+    // La captación sobre la que se pulsa, para poder comprobar al volver que
+    // sigue siendo la que se está mirando: el salto tarda y da tiempo a abrir
+    // otra ficha.
+    const id = data.id
+
+    // Confirmación breve y no un diálogo con formulario: el salto copia la
+    // ficha y congela quién la captó, y desde la interfaz no hay botón para
+    // deshacerlo. Se avisa antes, no después.
+    if (!confirm("¿Pasar esta captación a prospecto? Se creará su ficha de captación y desde aquí no se puede deshacer.")) return
+
+    setPromocionando(true)
+    // El .catch cubre que la acción ni llegue a contestar —red caída, despliegue
+    // a mitad—: sin él la promesa se rompe y el botón se queda girando para
+    // siempre, sin decir nada y sin dejar volver a intentarlo.
+    const res: Awaited<ReturnType<typeof promocionarCaptacion>> =
+      await promocionarCaptacion(id)
+        .catch(() => ({ error: "No se pudo pasar a prospecto" }))
+
+    // Si ya se está mirando otra ficha, esta respuesta no puede tocar la
+    // pantalla: el aviso sí se da —el salto ha ocurrido de verdad—, pero el
+    // enlace "Ver prospecto" y el botón son de la captación que se pulsó, no de
+    // la que hay delante. Al volver a abrirla, `load()` trae su `prospecto_id`.
+    const enPantalla = idVisible.current === id
+    if (enPantalla) setPromocionando(false)
+
+    // Los mensajes de la función SQL están escritos para leerse ("Esta captación
+    // no tiene un teléfono válido. Añádelo antes de promocionar."): se enseñan
+    // tal cual. Un genérico dejaría al agente sin saber qué le falta.
     if (res.error) { toast.error(res.error); return }
-    toast.success("Lead creado correctamente")
-    setLeadCreado(true)
+
+    // `yaExistia` NO es un fallo: alguien la promocionó antes. Se dice como lo
+    // que es y se deja el enlace para ir a la ficha que ya hay.
+    toast.success(res.yaExistia ? "Ya era un prospecto" : "Captación pasada a prospecto")
+    if (res.prospectoId && enPantalla) setProspectoNuevo(res.prospectoId)
+
+    // La función deja rastro en la línea de tiempo y marca la captación, así que
+    // hay que releer la ficha —sólo si sigue delante; si no, al abrirla se lee
+    // sola—. La tarjeta de la lista, en cambio, se avisa siempre: sigue
+    // enseñando una captación sin prospecto se mire lo que se mire.
+    if (enPantalla) void load()
+    onCambio?.()
   }
 
   const open = !!captacionId
@@ -546,7 +800,10 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                   <button
                     onClick={async () => {
                       if (!confirm("¿Dar de baja esta captación? Dejará de aparecer en el listado.")) return
+                      // Sin el .catch, una baja que no llega a contestar cerraba
+                      // el panel en silencio y la captación seguía viva.
                       const res = await eliminarCaptacion(data!.id)
+                        .catch(() => ({ error: "No se pudo dar de baja la captación" }))
                       if (res.error) { toast.error(res.error); return }
                       toast.success("Captación dada de baja")
                       onClose()
@@ -564,61 +821,117 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                 </button>
               </div>
 
-              {/* Info sobre imagen */}
-              <div className="absolute bottom-0 left-0 right-0 p-4">
-                <p className="text-white font-semibold text-base leading-tight truncate">
-                  {data.calle ?? "Sin dirección"}
-                </p>
-                {data.barrio && (
-                  <span className="text-white/70 text-xs flex items-center gap-1 mt-0.5">
-                    <MapPin className="h-3 w-3" /> {data.barrio}
-                  </span>
-                )}
+              {/* Info sobre imagen. Dos huecos distintos, dos contenedores: la
+                  dirección y el barrio van pegados (gap-0.5) y las chapas se
+                  separan del bloque (gap-2). Ningún hijo lleva margen propio. */}
+              <div className="absolute bottom-0 left-0 right-0 p-4 flex flex-col gap-2">
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  <p className="text-white font-semibold text-base leading-tight truncate">
+                    {data.calle ?? "Sin dirección"}
+                  </p>
+                  {data.barrio && (
+                    <span className="text-white/70 text-xs flex items-center gap-1">
+                      <MapPin className="h-3 w-3" /> {data.barrio}
+                    </span>
+                  )}
+                </div>
                 {/* Los 3 estados — fila separada, etiquetados */}
-                <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   {/* Estado inmueble (Idealista, read-only) */}
-                  {data.estado && !["sin identificar","no especificado","sin especificar","desconocido"].includes(data.estado.toLowerCase().trim()) && (
+                  {data.estado && !ESTADOS_OCULTOS.includes(data.estado.toLowerCase().trim()) && (
                     <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-black/50 text-white/60 border border-white/10">
                       <Home className="h-2.5 w-2.5" /> {data.estado}
                     </span>
                   )}
-                  {/* Estado CRM (gestión del agente) */}
-                  {(data as any).estado_crm && (() => {
-                    const s = ESTADO_COLORS[(data as any).estado_crm]
+                  {/* Estado CRM (gestión del agente).
+                      También del catálogo, por el mismo motivo que el de
+                      WhatsApp: el mapa que había aquí escrito a mano pintaba
+                      "Negociacion" sin tilde y se quedaba ciego a cualquier
+                      recoloreado del panel. Mismo tratamiento sobre la foto:
+                      el color va en el punto y el texto en blanco, porque los
+                      tonos de claseColor están pensados para el fondo del panel
+                      y sobre una imagen oscura se pierden. */}
+                  {(() => {
+                    const { estado_crm: estadoCrm } = data as { estado_crm?: string | null }
+                    if (!estadoCrm) return null
                     return (
-                      <span className={cn("flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold border border-current/20", s?.bg ?? "bg-cyan-500/20", s?.text ?? "text-cyan-400")}>
-                        <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                        {(data as any).estado_crm}
+                      <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold bg-black/50 text-white/80 border border-white/10">
+                        <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(colorDe(catalogos, CRM_CAT, estadoCrm)))} />
+                        {nombreDe(catalogos, CRM_CAT, estadoCrm)}
                       </span>
                     )
                   })()}
-                  {/* Estado WhatsApp (automático) */}
-                  {(data as any).estado_whatsapp && (() => {
-                    const waColors: Record<string, string> = {
-                      Pendiente:     "bg-zinc-500/30 text-zinc-300 border-zinc-400/20",
-                      Enviado:       "bg-violet-500/30 text-violet-300 border-violet-400/20",
-                      Respondido:    "bg-cyan-500/30 text-cyan-300 border-cyan-400/20",
-                      Interesado:    "bg-emerald-500/30 text-emerald-300 border-emerald-400/20",
-                      Quiere_Llamada: "bg-orange-500/30 text-orange-300 border-orange-400/20",
-                      No_Interesado: "bg-red-500/30 text-red-300 border-red-400/20",
-                      Sin_WhatsApp:  "bg-amber-500/30 text-amber-300 border-amber-400/20",
-                      Duplicado:     "bg-slate-500/30 text-slate-300 border-slate-400/20",
-                    }
-                    const waLabels: Record<string, string> = {
-                      Pendiente: "WA Pendiente", Enviado: "WA Enviado", Respondido: "WA Respondido",
-                      Interesado: "WA Interesado", Quiere_Llamada: "WA Llamada", No_Interesado: "WA No interesa",
-                      Sin_WhatsApp: "Sin WhatsApp", Duplicado: "Duplicado",
-                    }
-                    const key = (data as any).estado_whatsapp
+                  {/* Estado WhatsApp (automático).
+                      El nombre y el color salen del catálogo: esta lista la
+                      edita el administrador —y la 027 ya archivó dos valores—,
+                      así que escrita aquí se quedaría vieja al primer cambio.
+                      Un valor que no esté catalogado sigue leyéndose: nombreDe
+                      cae al valor crudo y el punto, a gris.
+
+                      Sobre la foto no vale la pastilla de claseColor: sus tonos
+                      están pensados para el fondo del panel, no para una imagen
+                      oscura. El color va en el punto y el texto en blanco,
+                      igual que la chapa del estado del inmueble. */}
+                  {(() => {
+                    // La fila llega sin tipar del cliente de Supabase: se
+                    // estrecha una vez a lo que hace falta, en vez de repetir
+                    // el mismo `as any` por cada uso dentro del JSX.
+                    const { estado_whatsapp: estadoWA } = data as { estado_whatsapp?: string | null }
+                    if (!estadoWA) return null
+                    const color = colorDe(catalogos, WA_CAT, estadoWA)
                     return (
-                      <span className={cn("flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold border", waColors[key] ?? "bg-white/10 text-white/60 border-white/10")}>
-                        <MessageCircle className="h-2.5 w-2.5" /> {waLabels[key] ?? key}
+                      <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold bg-black/50 text-white/80 border border-white/10">
+                        <MessageCircle className="h-2.5 w-2.5" />
+                        <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(color))} />
+                        {nombreDe(catalogos, WA_CAT, estadoWA)}
                       </span>
                     )
                   })()}
                 </div>
               </div>
             </div>
+
+            {/* La señal, lo primero que se lee al abrir la ficha.
+                Es la razón por la que el agente la está abriendo: el sistema ha
+                entendido que este propietario está interesado o que pide que le
+                llamen. Va en una banda propia y no como una chapa más sobre la
+                foto porque ahí competiría con los tres estados y se perdería.
+                Sin señal no se pinta nada: una banda apagada sería una fila
+                vacía en todas las fichas.
+
+                Aquí sí vale la pastilla del catálogo (claseColor): va sobre el
+                fondo del panel, que es para lo que están pensados sus tonos en
+                claro y en oscuro. */}
+            {(() => {
+              const { senal, senal_en } = data as { senal?: string | null; senal_en?: string | null }
+              if (!senal) return null
+              const desde = msDe(senal_en)
+              return (
+                <div className={cn(
+                  "flex items-center gap-2 border-b px-4 py-2.5 shrink-0",
+                  claseColor(colorDe(catalogos, SENAL_CAT, senal)),
+                )}>
+                  <Sparkles className="h-4 w-4 shrink-0" />
+                  <span className="text-sm font-semibold truncate">
+                    {nombreDe(catalogos, SENAL_CAT, senal)}
+                  </span>
+                  {/* Sin sello no se inventa un "hace un rato": la señal se
+                      enseña igual, que es lo que importa. */}
+                  {desde !== null && (
+                    <>
+                      <span aria-hidden className="opacity-40">·</span>
+                      <time
+                        dateTime={senal_en ?? undefined}
+                        title={FECHA_HORA.format(desde)}
+                        className="text-xs opacity-90 whitespace-nowrap"
+                      >
+                        {ahora === null ? FECHA.format(desde) : cuando(desde, ahora)}
+                      </time>
+                    </>
+                  )}
+                </div>
+              )
+            })()}
 
             {/* Stats rápidos */}
             <div className="grid grid-cols-4 gap-px bg-border shrink-0">
@@ -638,18 +951,18 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
             {/* Tabs */}
             <div className="flex border-b border-border shrink-0">
               <button
-                onClick={() => setTab("agenda")}
+                onClick={() => setTab("notas")}
                 className={cn(
                   "flex-1 flex items-center justify-center gap-1.5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px",
-                  tab === "agenda"
+                  tab === "notas"
                     ? "border-violet-500 text-violet-500"
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 )}
               >
-                <CalendarClock className="h-4 w-4" />
-                Agenda
-                {data.agente_id && (
-                  <span className={cn("h-1.5 w-1.5 rounded-full ml-0.5", AGENDA_COLORS[data.estado_agenda as EstadoAgenda]?.dot ?? "bg-violet-500")} />
+                <StickyNote className="h-4 w-4" />
+                Notas
+                {interacciones.length > 0 && (
+                  <span className="text-[11px] tabular-nums opacity-70">{interacciones.length}</span>
                 )}
               </button>
               <button
@@ -669,66 +982,127 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
             {/* Contenido scrollable */}
             <div className="flex-1 overflow-y-auto p-5">
 
-              {tab === "agenda" && isAdmin && !hideWhatsApp && (
-                <WhatsAppPanel captacion={data} onUpdate={load} />
-              )}
+              {/* La pestaña de trabajo: se atiende arriba y lo apuntado queda
+                  debajo. El hueco entre las piezas lo pone este `gap`. */}
+              {tab === "notas" && (
+                <div className="flex flex-col gap-5">
+                  <Atendido
+                    captacionId={data.id}
+                    catalogos={catalogos}
+                    yaAtendido={yaAtendido}
+                    // Atender apunta la nota, puede dejar un recordatorio y, si la
+                    // captación no tenía dueño, se la queda quien la atiende: hay
+                    // que releer la ficha entera, no sólo el historial. Sin
+                    // esqueleto: hacer desaparecer media ficha cada vez que se
+                    // guarda una nota se lee como que algo ha fallado.
+                    //
+                    // Y avisar al padre: el agente y el sello de atención se ven
+                    // en la tarjeta de la lista, que si no se queda con lo de
+                    // antes hasta recargar la página.
+                    onHecho={() => { void load(); onCambio?.() }}
+                  />
 
-              {tab === "agenda" && (
-                isAdmin ? (
-                  <AgendaPanel
+                  {isAdmin && !hideWhatsApp && (
+                    // El `key` no es decorativo: el panel de detalle no se
+                    // desmonta al pasar de una captación a otra, así que sin él
+                    // este trozo se quedaba con el borrador, la conversación y
+                    // el teléfono tecleado de la ficha anterior —y "Enviar"
+                    // mandaba el mensaje de A al propietario de B—. Además corta
+                    // la carrera: la conversación de A que llega tarde cae en un
+                    // componente ya desmontado en vez de pintarse sobre la de B.
+                    // Contactar cambia `estado_whatsapp`, que es una de las
+                    // pastillas de la tarjeta de la lista: el padre también se
+                    // tiene que enterar.
+                    <WhatsAppPanel key={data.id} captacion={data} catalogos={catalogos} onUpdate={() => { void load(); onCambio?.() }} />
+                  )}
+
+                  <LineaTiempo
+                    interacciones={interacciones}
+                    catalogos={catalogos}
+                    personas={personas}
+                    yoId={yoId}
+                    isAdmin={isAdmin}
                     captacionId={data.id}
-                    agentes={agentes}
-                    initial={{
-                      agente_id: data.agente_id,
-                      fecha_agenda: data.fecha_agenda,
-                      recordatorio_fecha: data.recordatorio_fecha,
-                      notas_agenda: data.notas_agenda,
-                      estado_agenda: (data.estado_agenda as EstadoAgenda) ?? "pendiente",
-                    }}
-                    onUpdate={load}
+                    // Esta lista la pide el propio panel, así que el
+                    // `router.refresh()` de dentro no le recarga nada: cada
+                    // anotación y cada borrado avisan para volver a leerla.
+                    onCambio={() => load()}
                   />
-                ) : (
-                  <AgendaAgente
-                    captacionId={data.id}
-                    estado_crm={(data as any).estado_crm ?? null}
-                    agente={Array.isArray(data.agente) ? data.agente[0] : data.agente}
-                    fecha_agenda={data.fecha_agenda}
-                    notas_agenda={data.notas_agenda}
-                    estado_agenda={(data.estado_agenda as EstadoAgenda) ?? "pendiente"}
-                    onUpdate={load}
-                  />
-                )
+                </div>
               )}
 
               {tab === "info" && (
-                <div className="space-y-5">
+                <div className="flex flex-col gap-5">
+
+                  {/* El salto, y el único paso del recorrido que no se podía dar
+                      con el ratón. Va lo primero de la pestaña porque es la
+                      ACCIÓN; todo lo que hay debajo son datos.
+
+                      Fuera del bloque del propietario a propósito: una captación
+                      sin nombre ni teléfono no pintaba aquel bloque, y entonces
+                      el botón desaparecía justo en el caso en el que la función
+                      SQL tiene algo útil que decir ("añade el teléfono antes de
+                      promocionar"). El hueco entre el texto y el botón lo pone
+                      el `gap` del contenedor; ningún hijo lleva margen. */}
+                  <div className="flex flex-col gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Prospecto</p>
+                    {prospectoId ? (
+                      <Link
+                        href={rutaProspecto(prospectoId)}
+                        className="flex items-center justify-center gap-2 w-full rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/20 hover:border-emerald-500/60"
+                      >
+                        <Building2 className="h-3.5 w-3.5" />
+                        Ver prospecto
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </Link>
+                    ) : (
+                      <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
+                        <p className="text-xs text-muted-foreground">
+                          Cuando el propietario dice que sí, esto deja de ser un anuncio
+                          ajeno: se copia la ficha para poder trabajarla y se congela quién
+                          lo captó.
+                        </p>
+                        <button
+                          onClick={handlePasarAProspecto}
+                          disabled={promocionando}
+                          className="w-full flex items-center justify-center gap-2 h-9 rounded-md border border-violet-500/30 text-xs font-medium text-violet-400 transition-colors hover:bg-violet-500/10 hover:border-violet-500/60 disabled:opacity-40 disabled:pointer-events-none"
+                        >
+                          {promocionando
+                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Pasando a prospecto…</>
+                            : <><Building2 className="h-3.5 w-3.5" /> Pasar a prospecto</>
+                          }
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Quién la lleva. Vivía en la pestaña de agenda, que ya no
+                      existe; el panel sólo asigna y traspasa, que es lo único de
+                      aquella pantalla que se sigue usando. */}
+                  {isAdmin && (
+                    <AgendaPanel
+                      captacionId={data.id}
+                      agentes={agentes}
+                      initial={{ agente_id: data.agente_id }}
+                      // Traspasar cambia el agente que la tarjeta de la lista
+                      // enseña a la izquierda: sin avisar al padre, esa tarjeta
+                      // seguía con el agente viejo hasta recargar la página y el
+                      // traspaso parecía no haberse guardado.
+                      onUpdate={() => { void load(); onCambio?.() }}
+                    />
+                  )}
 
                   {/* Propietario */}
                   {(data.nombre || data.telefono) && (
                     <div className="space-y-2">
                       <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Propietario</p>
-                      <div className="rounded-lg border border-border bg-card p-4 space-y-2">
+                      {/* El hueco entre el nombre, el teléfono y el botón lo pone
+                          este `gap`: ningún hijo lleva margen propio. */}
+                      <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-2">
                         {data.nombre && <p className="text-sm font-medium text-foreground">{data.nombre}</p>}
                         {data.telefono && (
                           <p className="text-sm text-muted-foreground">{data.telefono}</p>
                         )}
-                        <button
-                          onClick={handleCrearLead}
-                          disabled={creandoLead || leadCreado}
-                          className={cn(
-                            "mt-1 w-full flex items-center justify-center gap-2 h-8 rounded-md border text-xs font-medium transition-colors",
-                            leadCreado
-                              ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10 cursor-default"
-                              : "border-violet-500/30 text-violet-400 hover:bg-violet-500/10 hover:border-violet-500/60 disabled:opacity-40"
-                          )}
-                        >
-                          {creandoLead
-                            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Creando lead…</>
-                            : leadCreado
-                            ? <><Check className="h-3.5 w-3.5" /> Lead creado</>
-                            : <><UserPlus className="h-3.5 w-3.5" /> Crear lead</>
-                          }
-                        </button>
                       </div>
                     </div>
                   )}
@@ -759,7 +1133,14 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                         <div className="space-y-3">
                           {historial.map((h) => {
                             const isPrecio = h.campo === "precio"
-                            const isEstado = h.campo === "estado"
+                            // Qué lista nombra esta fila. `estado` (el texto de
+                            // Idealista) no tiene catálogo y se pinta en crudo,
+                            // pero con la misma forma: era la única que se
+                            // pintaba como pastilla y las de estado_crm,
+                            // estado_whatsapp y senal caían al renglón suelto
+                            // "estado_whatsapp: Enviado → Interesado".
+                            const tipoCat = CAT_POR_CAMPO[h.campo]
+                            const isEstado = h.campo === "estado" || !!tipoCat
                             const fecha = new Date(h.fecha).toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "2-digit" })
                             const hora = new Date(h.fecha).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })
 
@@ -781,15 +1162,22 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                                 </div>
                               )
                             } else if (isEstado) {
-                              const estilo = ESTADO_COLORS[h.valor_nuevo ?? ""] ?? { bg: "bg-muted", text: "text-muted-foreground" }
+                              // Sin catálogo (el `estado` de Idealista) el valor
+                              // se enseña tal cual y la pastilla sale gris: es
+                              // texto libre del portal, no una lista nuestra.
+                              const nombre = (v: string | null) =>
+                                tipoCat ? nombreDe(catalogos, tipoCat, v) : v ?? "—"
                               content = (
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
                                   {h.valor_anterior && (
-                                    <span className="text-xs text-muted-foreground">{h.valor_anterior}</span>
+                                    <span className="text-xs text-muted-foreground">{nombre(h.valor_anterior)}</span>
                                   )}
                                   {h.valor_anterior && <span className="text-xs text-muted-foreground">→</span>}
-                                  <span className={cn("text-xs px-1.5 py-0.5 rounded font-medium", estilo.bg, estilo.text)}>
-                                    {h.valor_nuevo}
+                                  <span className={cn(
+                                    "text-xs px-1.5 py-0.5 rounded border font-medium",
+                                    claseColor(tipoCat ? colorDe(catalogos, tipoCat, h.valor_nuevo) : null),
+                                  )}>
+                                    {nombre(h.valor_nuevo)}
                                   </span>
                                 </div>
                               )
@@ -838,6 +1226,26 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
               )}
             </div>
           </>
+        ) : fallo ? (
+          /* Sin esto, una ficha que no carga es un panel en blanco del que sólo
+             se sale adivinando que hay que pulsar fuera. */
+          <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+            <p className="text-sm text-muted-foreground">No se pudo cargar esta captación.</p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { setFallo(false); setLoading(true); void load({ otraFicha: true }) }}
+                className="h-8 rounded-md border border-violet-500/30 px-3 text-xs font-medium text-violet-400 transition-colors hover:bg-violet-500/10"
+              >
+                Reintentar
+              </button>
+              <button
+                onClick={onClose}
+                className="h-8 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
         ) : null}
       </div>
     </>

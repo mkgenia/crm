@@ -23,10 +23,18 @@ import { clasePunto, colorDe, nombreDe, opcionesDe, type Catalogo } from "@/lib/
 
 /**
  * La línea de tiempo de un contacto: todo lo que ha pasado con él, lo último
- * arriba, y un formulario para apuntar lo siguiente.
+ * arriba. Es la historia, y la historia se LEE.
  *
  * Sirve igual para un lead que para una captación porque son las dos puntas del
  * mismo negocio y quien lee la ficha quiere una sola lista, no dos.
+ *
+ * Apuntar lo siguiente no se hace aquí: se hace con el botón "Atendido" de la
+ * ficha, que además mueve el embudo y deja el recordatorio. Esta lista traía su
+ * propio formulario, siempre abierto y justo debajo de aquel botón —dos cajas
+ * para lo mismo, y la de abajo haciendo menos—, así que ahora nace plegado tras
+ * un enlace discreto. No se ha borrado porque sigue siendo lo único que sabe
+ * apuntar lo que no es una llamada (un email, una visita, una nota suelta) y
+ * elegir la dirección; simplemente ya no compite con el camino principal.
  */
 
 const TIPO_CAT = "tipo_interaccion"
@@ -147,6 +155,42 @@ export interface PersonaLinea {
   nombre: string
 }
 
+/**
+ * Lo que hay a medio escribir, atado al contacto al que se le está escribiendo.
+ *
+ * Va junto y con su `clave` porque los paneles que pintan esta lista NO se
+ * desmontan al pasar de una ficha a otra —`captaciones-list.tsx` monta un solo
+ * `DetailPanel` y sólo le cambia el `captacionId`, y por eso el panel de
+ * WhatsApp de al lado lleva `key` a mano—. Sin esto, abrir la caja en la ficha
+ * de A, escribir "le he mandado el email" y pinchar B en la lista dejaba la
+ * caja abierta con el texto de A dentro de la ficha de B: pulsar "Apuntar"
+ * escribía la nota de A en el historial de B. Mismo fallo que ya costó un `key`
+ * en el panel de WhatsApp, y aquí ni siquiera se ve venir, porque el texto no
+ * cambia de aspecto al cambiar de ficha.
+ *
+ * Guardado así, el borrador se descarta mirando la clave en cada render: ni
+ * `useEffect` ni `setState` en render, sólo un valor derivado.
+ */
+interface Borrador {
+  clave: string
+  abierto: boolean
+  /** null = no se ha elegido tipo; lo decide `tipoElegido`. */
+  tipo: string | null
+  direccion: Direccion
+  resumen: string
+  detalle: string
+  conDetalle: boolean
+}
+
+const BORRADOR_VACIO: Omit<Borrador, "clave"> = {
+  abierto: false,
+  tipo: null,
+  direccion: "saliente",
+  resumen: "",
+  detalle: "",
+  conDetalle: false,
+}
+
 export function LineaTiempo({
   interacciones,
   catalogos,
@@ -174,12 +218,30 @@ export function LineaTiempo({
   const router = useRouter()
   const opciones = useMemo(() => opcionesDe(catalogos, TIPO_CAT), [catalogos])
 
-  const [tipo, setTipo] = useState(() => opciones[0]?.valor ?? "nota")
-  const [direccion, setDireccion] = useState<Direccion>("saliente")
-  const [resumen, setResumen] = useState("")
-  const [detalle, setDetalle] = useState("")
-  const [conDetalle, setConDetalle] = useState(false)
+  /** A quién se le está apuntando, como una sola clave. Ver `Borrador`. */
+  const clave = `${leadId ?? ""}|${captacionId ?? ""}`
+
+  /**
+   * El formulario nace plegado y plegarlo NO borra lo escrito.
+   *
+   * Tirar de un clic lo que se acaba de teclear es la forma más rápida de que no
+   * se vuelva a teclear: lo tecleado sigue ahí al volver a abrir. Cambiar de
+   * contacto sí lo tira, y ahí es al revés: heredarlo sería escribirle a otro.
+   */
+  const [borrador, setBorrador] = useState<Borrador>(() => ({ clave, ...BORRADOR_VACIO }))
   const [guardando, setGuardando] = useState(false)
+
+  // El borrador de OTRA ficha no se enseña ni se envía: se lee como vacío.
+  const b = borrador.clave === clave ? borrador : { clave, ...BORRADOR_VACIO }
+
+  function editar(parche: Partial<Omit<Borrador, "clave">>) {
+    setBorrador((prev) => ({
+      ...(prev.clave === clave ? prev : BORRADOR_VACIO),
+      ...parche,
+      clave,
+    }))
+  }
+
   const [abiertos, setAbiertos] = useState<string[]>([])
   const [ocultos, setOcultos] = useState<string[]>([])
 
@@ -198,12 +260,41 @@ export function LineaTiempo({
     [interacciones, ocultos],
   )
 
+  /**
+   * El tipo elegido, o el que toca cuando no se ha elegido ninguno.
+   *
+   * Por defecto "nota" y no el primero del catálogo: el primero por orden es
+   * "Atendido", que es justo lo que ya escribe el botón de arriba, y aquí se
+   * viene precisamente a por lo demás. Se prefiere por su valor, no por su
+   * posición, para que renombrarlo o reordenarlo en /configuracion/catalogos no
+   * cambie nada.
+   *
+   * Se deriva en cada render en vez de congelarse al montar porque hay pantallas
+   * que piden los catálogos desde el navegador (/mensajes): en el primer render
+   * la lista llega vacía y un valor fijado entonces se quedaba fuera del
+   * desplegable. Si el catálogo no trae ni "nota" ni nada, cae al literal y el
+   * selector enseña su única opción de emergencia.
+   */
+  const tipoElegido = useMemo(() => {
+    if (b.tipo && opciones.some((o) => o.valor === b.tipo)) return b.tipo
+    return opciones.find((o) => o.valor === "nota")?.valor ?? opciones[0]?.valor ?? "nota"
+  }, [b.tipo, opciones])
+
   const puedeApuntar = Boolean(leadId || captacionId)
   const nombrePersona = (id: string | null) => personas.find((p) => p.id === id)?.nombre ?? "—"
 
   async function apuntar(e: FormEvent) {
     e.preventDefault()
-    if (!resumen.trim()) return toast.error("Escribe al menos una línea")
+    const resumen = b.resumen.trim()
+    if (!resumen) return toast.error("Escribe al menos una línea")
+    // El botón se apaga mientras guarda, pero el Enter del teclado no pasa por
+    // él en todos los navegadores: sin esta línea, dos Enter seguidos apuntan la
+    // misma nota dos veces y la fila duplicada hay que borrarla a mano.
+    if (guardando) return
+
+    // A quién se le está apuntando AHORA. Si mientras contesta el servidor se
+    // cambia de ficha, lo que haya escrito ya es de otro contacto.
+    const paraEsta = clave
 
     setGuardando(true)
     // El .catch cubre que la acción ni llegue a contestar —red caída, despliegue
@@ -212,17 +303,23 @@ export function LineaTiempo({
     const r = await apuntarInteraccion({
       leadId,
       captacionId,
-      tipo,
+      tipo: tipoElegido,
       resumen,
-      detalle: detalle.trim() || undefined,
-      direccion,
+      detalle: b.detalle.trim() || undefined,
+      direccion: b.direccion,
     }).catch(() => ({ error: "No se pudo apuntar" }))
     setGuardando(false)
 
+    // Al fallar, el formulario NO se pliega: lo que se acaba de escribir es justo
+    // lo que no se puede perder de vista.
     if (r.error) return toast.error(r.error)
-    setResumen("")
-    setDetalle("")
-    setConDetalle(false)
+    // Guardado, se vacía y la caja se vuelve a plegar: esto es el camino de
+    // excepción y la lista tiene que volver a ser lo que es, una historia que se
+    // lee. Sólo si se sigue en la misma ficha: si no, no hay nada que vaciar y
+    // lo que hay escrito es de la ficha nueva.
+    setBorrador((prev) =>
+      prev.clave === paraEsta ? { clave: paraEsta, ...BORRADOR_VACIO } : prev,
+    )
     router.refresh()
     onCambio?.()
   }
@@ -231,6 +328,11 @@ export function LineaTiempo({
   // falla: esperar medio segundo a que una nota desaparezca hace pensar que el
   // botón no ha ido y se pulsa otra vez.
   async function borrar(id: string) {
+    // Dos clics seguidos en la papelera mandaban dos borrados: el primero
+    // borraba de verdad y el segundo contestaba "esa anotación ya no existe",
+    // y al devolver la fila a la lista por ese error la anotación reaparecía
+    // —ya borrada— con un aviso rojo que no venía a cuento.
+    if (ocultos.includes(id)) return
     setOcultos((xs) => [...xs, id])
     // También se devuelve si la acción se rompe sin contestar: si sólo se mirara
     // `r.error`, una red caída dejaba la anotación escondida para siempre y sin
@@ -252,14 +354,36 @@ export function LineaTiempo({
         {visibles.length > 0 && (
           <span className="text-[11px] text-muted-foreground tabular-nums">{visibles.length}</span>
         )}
+
+        {puedeApuntar && (
+          /* El enlace de escape, discreto y en la cabecera.
+             En la cabecera y no al pie de la lista porque en /mensajes el
+             historial vive dentro de una caja con scroll: al pie habría que
+             bajarse toda la historia para encontrarlo. `ml-auto` es alineación,
+             no separación; lo que separa sigue siendo el `gap` del padre. */
+          <button
+            type="button"
+            onClick={() => editar({ abierto: !b.abierto })}
+            aria-expanded={b.abierto}
+            className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Plus
+              className={cn("h-3 w-3 transition-transform duration-200", b.abierto && "rotate-45")}
+            />
+            {b.abierto ? "Cerrar" : "Apuntar otra cosa"}
+          </button>
+        )}
       </div>
 
-      {puedeApuntar && (
-        <form onSubmit={apuntar} className="flex flex-col gap-2 border-b border-border px-4 py-3">
+      {puedeApuntar && b.abierto && (
+        <form
+          onSubmit={apuntar}
+          className="flex flex-col gap-2 border-b border-border px-4 py-3 animate-in fade-in-0 slide-in-from-top-1 duration-150"
+        >
           <div className="flex flex-wrap items-center gap-2">
             <select
-              value={tipo}
-              onChange={(e) => setTipo(e.target.value)}
+              value={tipoElegido}
+              onChange={(e) => editar({ tipo: e.target.value })}
               aria-label="Tipo de anotación"
               className="h-8 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-violet-500/60"
             >
@@ -279,12 +403,12 @@ export function LineaTiempo({
             <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
               {ORDEN_DIRECCIONES.map((d) => {
                 const { Icono, etiqueta } = DIRECCIONES[d]
-                const activa = direccion === d
+                const activa = b.direccion === d
                 return (
                   <button
                     key={d}
                     type="button"
-                    onClick={() => setDireccion(d)}
+                    onClick={() => editar({ direccion: d })}
                     title={etiqueta}
                     aria-label={etiqueta}
                     aria-pressed={activa}
@@ -301,16 +425,20 @@ export function LineaTiempo({
               })}
             </div>
 
+            {/* autoFocus: abrir la caja y tener que pulsar otra vez para poder
+                escribir son dos clics, y el segundo ya no se da. */}
             <input
-              value={resumen}
-              onChange={(e) => setResumen(e.target.value)}
-              placeholder="Llamada de seguimiento: no lo coge"
+              autoFocus
+              value={b.resumen}
+              onChange={(e) => editar({ resumen: e.target.value })}
+              aria-label="Qué apuntar"
+              placeholder="Le he mandado el email con las fotos"
               className="h-8 min-w-40 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:border-violet-500/60"
             />
 
             <button
               type="submit"
-              disabled={guardando || !resumen.trim()}
+              disabled={guardando || !b.resumen.trim()}
               className="h-8 rounded-md bg-violet-500 px-3 text-xs font-medium text-white transition-colors hover:bg-violet-600 disabled:opacity-40"
             >
               {guardando ? "Guardando…" : "Apuntar"}
@@ -320,18 +448,22 @@ export function LineaTiempo({
           <div className="flex flex-col gap-2">
             <button
               type="button"
-              onClick={() => setConDetalle((v) => !v)}
+              onClick={() => editar({ conDetalle: !b.conDetalle })}
+              aria-expanded={b.conDetalle}
               className="flex items-center gap-1 self-start text-[11px] text-muted-foreground transition-colors hover:text-foreground"
             >
               <Plus
-                className={cn("h-3 w-3 transition-transform duration-200", conDetalle && "rotate-45")}
+                className={cn(
+                  "h-3 w-3 transition-transform duration-200",
+                  b.conDetalle && "rotate-45",
+                )}
               />
-              {conDetalle ? "Quitar el detalle" : "Añadir detalle"}
+              {b.conDetalle ? "Quitar el detalle" : "Añadir detalle"}
             </button>
-            {conDetalle && (
+            {b.conDetalle && (
               <textarea
-                value={detalle}
-                onChange={(e) => setDetalle(e.target.value)}
+                value={b.detalle}
+                onChange={(e) => editar({ detalle: e.target.value })}
                 placeholder="El mensaje entero, la nota larga, lo que se dijo…"
                 rows={3}
                 autoFocus

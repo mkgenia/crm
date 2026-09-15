@@ -42,9 +42,44 @@ export async function getInteracciones(
     .order("ocurrida_en", { ascending: false })
     .limit(tope)
 
-  if (de.leadId) q = q.eq("lead_id", de.leadId)
-  else if (de.captacionId) q = q.eq("captacion_id", de.captacionId)
-  else return { interacciones: [], error: "Falta el lead o la captación" }
+  // Una captación y su lead espejo son el mismo contacto contado dos veces: lo
+  // que se apunta desde el chat cuelga del lead y lo que se apunta desde el
+  // anuncio cuelga de la captación. Con el `if/else` de antes, la ficha del
+  // anuncio enseñaba media historia y parecía que faltaban llamadas.
+  let leadId = de.leadId
+  if (!leadId && de.captacionId) {
+    const { data: espejo } = await supabase
+      .from("leads")
+      .select("id, duplicado_de")
+      .eq("captacion_id", de.captacionId)
+      .order("fecha_creacion", { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    // COALESCE(duplicado_de, id), la misma regla que usa atender() en la 021:
+    // si el lead se marcó como duplicado, la historia vive en el original.
+    const fila = espejo as { id: string; duplicado_de: string | null } | null
+    leadId = fila?.duplicado_de ?? fila?.id
+  }
+
+  const claves: string[] = []
+  if (leadId) {
+    // Los valores de `.or()` viajan dentro de un string que PostgREST parsea, no
+    // parametrizados como en `.eq()`: un id con una coma dentro reescribiría el
+    // filtro entero, y esto lo llama el navegador. Por eso se exige uuid.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(leadId)) {
+      return { interacciones: [], error: "Ese lead no existe" }
+    }
+    claves.push(`lead_id.eq.${leadId}`)
+  }
+  if (de.captacionId) {
+    if (!Number.isInteger(de.captacionId)) {
+      return { interacciones: [], error: "Esa captación no existe" }
+    }
+    claves.push(`captacion_id.eq.${de.captacionId}`)
+  }
+  if (claves.length === 0) return { interacciones: [], error: "Falta el lead o la captación" }
+
+  q = q.or(claves.join(","))
 
   const { data, error } = await q
   if (error) return { interacciones: [], error: error.message }
@@ -201,4 +236,71 @@ export async function getMotivosPerdida(): Promise<Array<{ motivo: string; total
   return [...cuenta.entries()]
     .map(([motivo, total]) => ({ motivo, total }))
     .sort((a, b) => b.total - a.total)
+}
+
+/**
+ * Atender: un botón, y todo lo demás opcional.
+ *
+ * La ficha pedía agente + fecha + hora + recordatorio + estado antes de dejar
+ * apuntar nada, y el resultado medido es que no se apunta: una sola nota a mano
+ * en toda la historia y 735 de 737 captaciones con la agenda en "pendiente". El
+ * agente cuelga el teléfono y tiene diez segundos de ganas; si le pides un
+ * formulario se va al cuaderno. Así que guardar sin nota, sin resultado y sin
+ * recordatorio TIENE que funcionar: es el caso de "no lo coge", el mayoritario.
+ *
+ * El trabajo va entero a la función SQL `atender` (migración 021) y no aquí:
+ * son tres escrituras que se deshacen juntas si una falla —la interacción, el
+ * recordatorio de `agenda` y el sello de la fila—, y eso es una transacción, no
+ * tres viajes desde Node.
+ */
+export async function atender(entrada: {
+  captacionId?: number
+  leadId?: string
+  nota?: string
+  resultado?: string | null
+  /** ISO en UTC. El cliente lo calcula en horario de Madrid antes de mandarlo. */
+  recordarEn?: string | null
+  tipo?: string
+}): Promise<{ ok?: true; interaccionId?: string; agendaId?: string | null; error?: string }> {
+  const sesion = await sesionActual()
+
+  // `sesionActual` ya redirige al login cuando no hay nadie, pero la RPC es
+  // SECURITY DEFINER y se salta las RLS: si esa redirección dejara de cortar,
+  // esto escribiría en nombre de un agente vacío. La puerta se cierra dos veces.
+  if (!sesion?.userId) return { error: "Se ha cerrado la sesión: vuelve a entrar" }
+
+  if (!entrada.captacionId && !entrada.leadId) return { error: "Falta a quién se ha atendido" }
+
+  const supabase = await createAdminClient()
+  const { data, error } = await supabase.rpc("atender", {
+    p_agente_id: sesion.userId,
+    p_captacion_id: entrada.captacionId ?? null,
+    // Los prospectos llegan en la 022; pasarlo no nulo hace reventar la función.
+    p_prospecto_id: null,
+    p_lead_id: entrada.leadId ?? null,
+    p_nota: entrada.nota?.trim() || null,
+    p_tipo: entrada.tipo ?? "llamada",
+    p_resultado: entrada.resultado || null,
+    p_recordar_en: entrada.recordarEn ?? null,
+    // Sin título: la función lo compone con la primera línea de la nota, que es
+    // justo lo que hace que no haya que pedirle un título a nadie.
+    p_recordar_titulo: null,
+    p_todo_el_dia: false,
+  })
+
+  if (error) return { error: error.message }
+
+  const r = (data ?? {}) as { interaccion_id?: string; agenda_id?: string | null }
+
+  // El recordatorio es una fila de `agenda`, así que /calendario también cambia
+  // aunque aquí sólo se haya pulsado un botón en la ficha. Y /dashboard con él:
+  // el bloque de "Mi día" se pinta en el servidor con getAgendaMes(), así que sin
+  // esta línea el recordatorio recién creado no sale en la pantalla que el agente
+  // abre por la mañana — justo donde tiene que salir. Es lo mismo que revalidan
+  // las tres escrituras de lib/actions/agenda.ts.
+  revalidatePath("/captaciones")
+  revalidatePath("/calendario")
+  revalidatePath("/dashboard")
+
+  return { ok: true, interaccionId: r.interaccion_id, agendaId: r.agenda_id ?? null }
 }

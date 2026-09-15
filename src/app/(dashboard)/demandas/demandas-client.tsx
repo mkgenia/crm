@@ -8,7 +8,9 @@ import { toast } from "sonner"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { traerTodo } from "@/lib/supabase/paginar"
 import { cn } from "@/lib/utils"
-import { ESTADOS_DEMANDA, ESTADO_DEMANDA_CFG, FUENTE_CFG } from "@/types/demandas"
+import { getCatalogosActivos } from "@/lib/actions/catalogos"
+import { claseColor, clasePunto, opcionesDe, type Catalogo } from "@/lib/catalogos"
+import { ESTADOS_DEMANDA_FALLBACK, FUENTE_CFG } from "@/types/demandas"
 import type { Demanda, PropiedadDemanda, EstadoDemanda } from "@/types/demandas"
 
 interface PropiedadConConteos extends PropiedadDemanda {
@@ -18,6 +20,32 @@ interface PropiedadConConteos extends PropiedadDemanda {
 
 /** Lo que devuelve la consulta: la propiedad más el agregado `demandas(count)`. */
 type FilaPropiedad = PropiedadDemanda & { demandas?: { count: number }[] | null }
+
+/** Los campos que se editan a mano en la ficha de la propiedad. */
+type CampoEditable =
+  | "tipo" | "accion" | "ciudad" | "zona"
+  | "precio_alquiler" | "precio_venta"
+  | "habitaciones" | "banyos" | "m_construidos"
+
+/**
+ * Las cajas del formulario, con las etiquetas que se leen y cuáles son números.
+ *
+ * Fuera del JSX para que el tipo de `key` sea el de arriba y no `string`: con
+ * `string` había que leer el valor con `(editFields as any)[key]`, y ese `any`
+ * es lo que dejaba pasar sin avisar el fallo de guardar el texto crudo en una
+ * columna numérica.
+ */
+const CAMPOS_EDITABLES: Array<{ label: string; key: CampoEditable; numeric?: boolean }> = [
+  { label: "Tipo",         key: "tipo" },
+  { label: "Acción",       key: "accion" },
+  { label: "Ciudad",       key: "ciudad" },
+  { label: "Zona",         key: "zona" },
+  { label: "Alq. €/mes",   key: "precio_alquiler", numeric: true },
+  { label: "Venta €",      key: "precio_venta",    numeric: true },
+  { label: "Habitaciones", key: "habitaciones",    numeric: true },
+  { label: "Baños",        key: "banyos",          numeric: true },
+  { label: "m² const.",    key: "m_construidos",   numeric: true },
+]
 
 /**
  * El filtro `or` de PostgREST se escribe como una lista separada por comas
@@ -46,7 +74,32 @@ function fmtPrecio(alq: number, venta: number) {
   return null
 }
 
-export default function DemandasPage() {
+export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalogos?: Catalogo[] } = {}) {
+  /**
+   * Los estados de una demanda salen del catálogo `estado_demanda`, no de una
+   * lista escrita en el código: un estado creado desde /configuracion/catalogos
+   * tiene que aparecer aquí sin desplegar nada.
+   *
+   * `catalogos` puede llegar por props —el día que su page.tsx los pida, como
+   * ya hace el de leads— y, mientras no llegue, los pide el efecto de más abajo.
+   *
+   * ESTADOS_UI es lo que se pinta: el catálogo cuando lo hay, y los cuatro de
+   * siempre mientras el INSERT no esté ejecutado. Sin ese respaldo la ficha se
+   * quedaría sin un solo botón de estado, que es peor que enseñar los de antes.
+   * Por eso el nombre y el color se buscan en ESTADOS_UI y no con
+   * `nombreDe`/`colorDe`: con el catálogo vacío esos dos no tienen de dónde
+   * sacarlos.
+   */
+  const [catalogosCargados, setCatalogosCargados] = useState<Catalogo[]>([])
+  const catalogos = catalogosProp.length ? catalogosProp : catalogosCargados
+  const ESTADOS_CAT = opcionesDe(catalogos, "estado_demanda")
+  const ESTADOS_UI = ESTADOS_CAT.length ? ESTADOS_CAT : ESTADOS_DEMANDA_FALLBACK
+
+  const catEstado = (e: string | null) => ESTADOS_UI.find((c) => c.valor === e) ?? null
+  /** Una demanda con un estado retirado se sigue leyendo: cae a su propio valor. */
+  const nombreEstado = (e: string | null) => catEstado(e)?.nombre ?? (e || "Sin estado")
+  const colorEstado = (e: string | null) => catEstado(e)?.color ?? null
+
   const [propiedades, setPropiedades] = useState<PropiedadConConteos[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
@@ -63,7 +116,11 @@ export default function DemandasPage() {
 
   // Edit propiedad
   const [editando, setEditando] = useState(false)
-  const [editFields, setEditFields] = useState<Partial<PropiedadDemanda>>({})
+  // Lo que hay en las cajas es TEXTO, también en las numéricas: un
+  // <input type="number"> devuelve string. Tenerlo tipado como
+  // Partial<PropiedadDemanda> era decir que ahí vivían números, y de esa mentira
+  // salía que al guardar se colara una cadena en `precio_alquiler`.
+  const [editFields, setEditFields] = useState<Partial<Record<CampoEditable, string>>>({})
   const [savingEdit, setSavingEdit] = useState(false)
 
   // Edit demand notes
@@ -72,16 +129,46 @@ export default function DemandasPage() {
   const [savingNota, setSavingNota] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  const supabase = createClient()
+  /**
+   * Una sola instancia, y con la identidad garantizada.
+   *
+   * `createClient()` suelto en el cuerpo del componente devuelve un objeto
+   * nuevo en cada render. En el navegador @supabase/ssr guarda uno y lo
+   * reutiliza, pero eso es un detalle de su implementación, no una promesa: por
+   * si acaso, los `useCallback` de abajo se dejaban sin declararlo en las
+   * dependencias, porque declararlo habría recreado la función en cada render y
+   * el efecto de la lista se habría puesto a pedir páginas sin parar. El
+   * inicializador perezoso de useState lo fija de una vez, así que ya se puede
+   * declarar y el lint deja de avisar de algo real.
+   */
+  const [supabase] = useState(createClient)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const listaRef = useRef<HTMLDivElement | null>(null)
   const peticionRef = useRef(0)
+  /** Cada carga de demandas se queda con su número, como la de propiedades. */
+  const peticionDemandasRef = useRef(0)
   const selectedRef = useRef<PropiedadConConteos | null>(null)
-  selectedRef.current = selected
+  // El canal de realtime se suscribe una vez, así que su callback no vería los
+  // cambios de `selected` si lo leyera de la clausura. Se le deja en una ref,
+  // pero puesta al día en un efecto y no durante el render: escribir una ref
+  // mientras se renderiza es lo que React prohíbe —un render que se descarta
+  // deja la ref apuntando a algo que la pantalla nunca llegó a enseñar— y es
+  // además lo que rechazaba el lint del compilador.
+  useEffect(() => { selectedRef.current = selected }, [selected])
 
   const paginas = Math.max(1, Math.ceil(total / POR_PAGINA))
-  /** La página pedida ya no existe; el efecto de abajo está devolviendo a la última. */
-  const fueraDeRango = pagina > paginas
+  /**
+   * La página que se pide de verdad, ya recortada al número de páginas que hay.
+   *
+   * Borrar o desactivar puede dejar la actual fuera de rango: estabas en la 2
+   * con 51 propiedades, quitas una y quedan 50, o sea una sola página. Antes eso
+   * lo arreglaba un efecto con `setPagina(paginas)` dentro, que es justo lo que
+   * el compilador de React rechaza —un setState en un efecto para calcular algo
+   * que ya se sabe al renderizar— y que además pintaba un "Cargando..." de más
+   * mientras daba la vuelta. Recortando aquí, la lista ya se pide bien a la
+   * primera y no hay estado intermedio que enseñar.
+   */
+  const paginaActual = Math.min(pagina, paginas)
 
   const fetchPropiedades = useCallback(async (pagina: number, termino: string) => {
     // Cada petición se queda con su número. Si mientras va y viene se teclea otra
@@ -155,12 +242,18 @@ export default function DemandasPage() {
         }
       }))
       setTotal(count ?? 0)
+    } catch {
+      // Una excepción —la red, o `traerTodo` quedándose sin páginas— no la
+      // recoge el `if (error)` de arriba, porque ahí no hay respuesta que mirar.
+      // Sin esto la promesa se rechazaba y quien mirase la pantalla sólo veía
+      // la lista anterior sin que nada dijera que la nueva no ha llegado.
+      if (peticion === peticionRef.current) toast.error("No se pudieron cargar las propiedades")
     } finally {
       // Sólo la última petición apaga el indicador: si lo apagase la que llega
       // tarde, la lista se daría por cargada mientras la buena sigue en camino.
       if (peticion === peticionRef.current) setLoading(false)
     }
-  }, [])
+  }, [supabase])
 
   const fetchTotalDemandas = useCallback(async () => {
     // head:true trae sólo la cabecera con el total: la cabecera de la página
@@ -172,45 +265,95 @@ export default function DemandasPage() {
     // que vinimos a quitar.
     if (error || count === null) return
     setTotalDemandas(count)
-  }, [])
+  }, [supabase])
 
   const fetchDemandas = useCallback(async (propiedadId: string) => {
+    // La misma guardia que la lista de propiedades, y por el mismo motivo:
+    // pinchando rápido de una ficha a otra, la respuesta que llegaba tarde
+    // pintaba las demandas de la propiedad anterior debajo de la cabecera de la
+    // nueva, sin que nada en pantalla dijera que no eran las suyas.
+    const peticion = ++peticionDemandasRef.current
     setLoadingDemandas(true)
-    // Esta lista no se pagina: la propiedad más solicitada anda por las 90
-    // demandas y caben de sobra. El count está para que el día que deje de ser
-    // verdad se vea — PostgREST recorta en 1.000 devolviendo 200 OK.
-    const { data, count, error } = await supabase
-      .from("demandas")
-      .select("*", { count: "exact" })
-      .eq("propiedad_id", propiedadId)
-      .order("fecha_creacion", { ascending: false })
-    if (error) {
-      // Sin esto, un fallo de red dejaba el panel con el vacío de "sin demandas"
-      // en una propiedad que sí las tiene.
-      toast.error("No se pudieron cargar las demandas de esta propiedad")
-      setDemandas([])
-      setLoadingDemandas(false)
+    try {
+      // Esta lista no se pagina: la propiedad más solicitada anda por las 90
+      // demandas y caben de sobra. El count está para que el día que deje de ser
+      // verdad se vea — PostgREST recorta en 1.000 devolviendo 200 OK.
+      const { data, count, error } = await supabase
+        .from("demandas")
+        .select("*", { count: "exact" })
+        .eq("propiedad_id", propiedadId)
+        .order("fecha_creacion", { ascending: false })
+
+      if (peticion !== peticionDemandasRef.current) return
+
+      if (error) {
+        // Sin esto, un fallo de red dejaba el panel con el vacío de "sin demandas"
+        // en una propiedad que sí las tiene.
+        toast.error("No se pudieron cargar las demandas de esta propiedad")
+        setDemandas([])
+        return
+      }
+      const filas = (data ?? []) as Demanda[]
+      if (count !== null && count > filas.length) {
+        toast.warning(`Esta propiedad tiene ${count} demandas y sólo se han podido cargar ${filas.length}`)
+      }
+      setDemandas(filas)
+    } catch {
+      // Una excepción —la red, no un error de PostgREST— dejaba el panel
+      // girando para siempre, porque el `setLoadingDemandas(false)` estaba al
+      // final del camino feliz y nunca se llegaba a él.
+      if (peticion === peticionDemandasRef.current) {
+        toast.error("No se pudieron cargar las demandas de esta propiedad")
+        setDemandas([])
+      }
+      return
+    } finally {
+      // Sólo la última apaga el indicador: si lo apagara la que llega tarde, el
+      // panel se daría por cargado mientras la buena sigue en camino.
+      if (peticion === peticionDemandasRef.current) setLoadingDemandas(false)
+    }
+
+    // Marcar como vistas, ya fuera del indicador: es una escritura y no debe
+    // retener el panel. Si falla se deja el contador de "nuevas" como estaba:
+    // ponerlo a 0 diría que se han leído cuando en la base siguen sin marcar y
+    // volverían a salir en cuanto se recargue.
+    try {
+      const { error: errorVisto } = await supabase
+        .from("demandas").update({ visto: true })
+        .eq("propiedad_id", propiedadId).eq("visto", false)
+      if (errorVisto) return
+    } catch {
       return
     }
-    const filas = (data ?? []) as Demanda[]
-    if (count !== null && count > filas.length) {
-      toast.warning(`Esta propiedad tiene ${count} demandas y sólo se han podido cargar ${filas.length}`)
-    }
-    setDemandas(filas)
-    setLoadingDemandas(false)
-
-    // Marcar como vistas
-    await supabase.from("demandas").update({ visto: true }).eq("propiedad_id", propiedadId).eq("visto", false)
     setPropiedades((prev) => prev.map((p) => p.id === propiedadId ? { ...p, noVistas: 0 } : p))
-  }, [])
+  }, [supabase])
+
+  // Los catálogos no dependen de la búsqueda ni de la página: se piden una vez.
+  // Si la lectura falla se dice —en silencio parecería que el CRM sólo tiene
+  // cuatro estados— y se sigue con el respaldo, que al menos deja trabajar.
+  useEffect(() => {
+    if (catalogosProp.length) return
+    let vivo = true
+    ;(async () => {
+      try {
+        const cats = await getCatalogosActivos()
+        if (vivo) setCatalogosCargados(cats)
+      } catch {
+        if (vivo) toast.error("No se pudieron cargar los estados de las demandas")
+      }
+    })().catch(() => {})
+    return () => { vivo = false }
+  }, [catalogosProp.length])
 
   useEffect(() => {
-    fetchTotalDemandas()
+    // Igual que arriba: la cuenta va dentro de una función asíncrona para que el
+    // setState no cuelgue del cuerpo del efecto.
+    ;(async () => { await fetchTotalDemandas() })().catch(() => {})
 
     const channel = supabase
       .channel("demandas-page")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "demandas" }, (payload) => {
-        const nueva = payload.new as any
+        const nueva = payload.new as Demanda
         // Si la propiedad está en la página que se ve, se le suma la demanda. Si
         // no está, no se recarga nada: recargar movería la lista bajo los pies
         // de quien la esté leyendo, y el aviso ya sale por el toast.
@@ -223,7 +366,7 @@ export default function DemandasPage() {
         )
         setTotalDemandas((n) => (n === null ? n : n + 1))
         if (selectedRef.current?.id === nueva.propiedad_id) {
-          setDemandas((prev) => [nueva as Demanda, ...prev])
+          setDemandas((prev) => [nueva, ...prev])
         }
         toast("Nueva demanda recibida", {
           description: `${nueva.nombre ?? "Sin nombre"} · ${nueva.fuente ?? "Portal"}`,
@@ -232,7 +375,7 @@ export default function DemandasPage() {
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [fetchTotalDemandas])
+  }, [fetchTotalDemandas, supabase])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -249,80 +392,146 @@ export default function DemandasPage() {
   }, [search])
 
   useEffect(() => {
-    fetchPropiedades(pagina, termino)
+    // Envuelto en una función asíncrona suelta: `fetchPropiedades` acaba
+    // llamando a setState y llamarla a pelo desde el cuerpo del efecto es lo
+    // que el lint del compilador marca como cascada de renders.
+    ;(async () => { await fetchPropiedades(paginaActual, termino) })().catch(() => {})
     // Al cambiar de página se vuelve arriba: si no, aterrizas a media lista
     // sobre filas que no son las que estabas mirando.
     listaRef.current?.scrollTo({ top: 0 })
-  }, [pagina, termino, fetchPropiedades])
+  }, [paginaActual, termino, fetchPropiedades])
 
-  // Borrar o desactivar puede dejar la página actual fuera de rango: estabas en
-  // la 2 con 51 propiedades, quitas una y quedan 50, o sea una sola página. Sin
-  // esto te quedas mirando una lista vacía con medio centenar de fichas detrás,
-  // que es la misma sensación de "faltan datos" que veníamos a arreglar.
-  useEffect(() => {
-    if (pagina > paginas) setPagina(paginas)
-  }, [pagina, paginas])
+  /** Cierra la ficha y descarta cualquier carga que siga en el aire. */
+  function cerrarFicha() {
+    // Sin subir el contador, una carga lanzada antes de cerrar aún podía llegar
+    // y volver a llenar `demandas` de una ficha que ya no se ve.
+    peticionDemandasRef.current++
+    setSelected(null)
+    setDemandas([])
+    setEditando(false)
+    setLoadingDemandas(false)
+  }
 
   function selectPropiedad(p: PropiedadConConteos) {
     if (selected?.id === p.id) {
-      setSelected(null)
-      setDemandas([])
-      setEditando(false)
+      cerrarFicha()
       return
     }
     setSelected(p)
     setEditando(false)
-    fetchDemandas(p.id)
+    fetchDemandas(p.id).catch(() => {})
   }
 
   function abrirEdicion() {
     if (!selected) return
     setEditFields({
-      tipo:            selected.tipo            ?? "",
-      accion:          selected.accion          ?? "",
-      ciudad:          selected.ciudad          ?? "",
-      zona:            selected.zona            ?? "",
-      precio_alquiler: selected.precio_alquiler,
-      precio_venta:    selected.precio_venta,
-      habitaciones:    selected.habitaciones,
-      banyos:          selected.banyos,
-      m_construidos:   selected.m_construidos,
+      tipo:            selected.tipo   ?? "",
+      accion:          selected.accion ?? "",
+      ciudad:          selected.ciudad ?? "",
+      zona:            selected.zona   ?? "",
+      precio_alquiler: String(selected.precio_alquiler ?? ""),
+      precio_venta:    String(selected.precio_venta    ?? ""),
+      habitaciones:    String(selected.habitaciones    ?? ""),
+      banyos:          String(selected.banyos          ?? ""),
+      m_construidos:   String(selected.m_construidos   ?? ""),
     })
     setEditando(true)
   }
 
   async function guardarEdicion() {
     if (!selected) return
+    const ficha = selected
     setSavingEdit(true)
-    const res = await actualizarPropiedad(selected.id, {
-      tipo:            String(editFields.tipo    ?? "").trim() || undefined,
-      accion:          String(editFields.accion  ?? "").trim() || undefined,
-      ciudad:          String(editFields.ciudad  ?? "").trim() || undefined,
-      zona:            String(editFields.zona    ?? "").trim() || undefined,
-      precio_alquiler: Number(editFields.precio_alquiler) || 0,
-      precio_venta:    Number(editFields.precio_venta)    || 0,
-      habitaciones:    Number(editFields.habitaciones)    || 0,
-      banyos:          Number(editFields.banyos)          || 0,
-      m_construidos:   Number(editFields.m_construidos)   || 0,
-    })
+
+    // Los campos del formulario son texto, siempre, aunque el input sea
+    // `number`. Se normalizan UNA vez y lo mismo que se envía es lo que se
+    // pinta: con `{ ...selected, ...editFields }` se colaban las cadenas
+    // crudas en la fila, y la ficha se quedaba con precio_alquiler = "1200"
+    // —una cadena— que sale sin separador de miles y descuadra cualquier
+    // cuenta que la sume después.
+    const texto = (v: unknown) => String(v ?? "").trim()
+    const numero = (v: unknown) => Number(v) || 0
+    const cambios = {
+      tipo:            texto(editFields.tipo),
+      accion:          texto(editFields.accion),
+      ciudad:          texto(editFields.ciudad),
+      zona:            texto(editFields.zona),
+      precio_alquiler: numero(editFields.precio_alquiler),
+      precio_venta:    numero(editFields.precio_venta),
+      habitaciones:    numero(editFields.habitaciones),
+      banyos:          numero(editFields.banyos),
+      m_construidos:   numero(editFields.m_construidos),
+    }
+
+    // Un texto vacío no borra el valor: la acción no manda la columna y aquí
+    // tampoco se toca, para que la pantalla diga exactamente lo que hay en la
+    // base de datos y no una cosa distinta hasta la próxima recarga.
+    const res = await actualizarPropiedad(ficha.id, {
+      ...cambios,
+      tipo:   cambios.tipo   || undefined,
+      accion: cambios.accion || undefined,
+      ciudad: cambios.ciudad || undefined,
+      zona:   cambios.zona   || undefined,
+    }).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se pudo guardar la propiedad",
+    }))
+    // Fuera del try/finally a propósito: con `.catch` el botón vuelve también
+    // cuando la acción revienta, no sólo cuando devuelve un error.
     setSavingEdit(false)
     if (res.error) { toast.error(res.error); return }
-    const updated = { ...selected, ...editFields } as PropiedadConConteos
+
+    const updated: PropiedadConConteos = {
+      ...ficha,
+      ...cambios,
+      tipo:   cambios.tipo   || ficha.tipo,
+      accion: cambios.accion || ficha.accion,
+      ciudad: cambios.ciudad || ficha.ciudad,
+      zona:   cambios.zona   || ficha.zona,
+    }
     setSelected(updated)
-    setPropiedades((prev) => prev.map((p) => p.id === selected.id ? updated : p))
+    setPropiedades((prev) => prev.map((p) => p.id === ficha.id ? updated : p))
     setEditando(false)
     toast.success("Propiedad actualizada")
   }
 
   async function cambiarEstado(demandaId: string, nuevoEstado: EstadoDemanda) {
-    await supabase.from("demandas").update({ estado: nuevoEstado }).eq("id", demandaId)
+    const anterior = demandas.find((d) => d.id === demandaId)?.estado
+    if (anterior === nuevoEstado) return
+
+    // Se pinta antes de que conteste la base para que la pastilla responda al
+    // clic. Pero si el update falla se deshace y se avisa: hasta ahora el error
+    // ni se miraba, así que la ficha se quedaba enseñando un estado que en la
+    // base de datos nunca llegó a cambiar.
     setDemandas((prev) => prev.map((d) => d.id === demandaId ? { ...d, estado: nuevoEstado } : d))
+
+    // El try envuelve también la excepción de red, no sólo el error que
+    // devuelve PostgREST: sin él, una petición que revienta dejaba la pastilla
+    // marcada en un estado que en la base de datos nunca llegó a cambiar y sin
+    // un aviso en ninguna parte.
+    let fallo = false
+    try {
+      const { error } = await supabase.from("demandas").update({ estado: nuevoEstado }).eq("id", demandaId)
+      fallo = Boolean(error)
+    } catch {
+      fallo = true
+    }
+    if (fallo) {
+      // Se revierte SÓLO si la pastilla sigue en lo que puso esta llamada. Si
+      // mientras iba y venía se ha pulsado otro estado, mandar el de antes
+      // borraría el clic bueno de quien está mirando la pantalla.
+      setDemandas((prev) => prev.map((d) =>
+        d.id === demandaId && d.estado === nuevoEstado ? { ...d, estado: anterior ?? d.estado } : d
+      ))
+      toast.error("No se pudo cambiar el estado de la demanda")
+    }
   }
 
   async function handleDesactivar() {
     if (!selected) return
     if (!window.confirm(`¿Desactivar la propiedad Ref. ${selected.ref}? Desaparecerá de la lista.`)) return
-    const res = await desactivarPropiedad(selected.id)
+    const res = await desactivarPropiedad(selected.id).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se pudo desactivar la propiedad",
+    }))
     if (res.error) { toast.error(res.error); return }
     setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
     // El total es el que cuenta la base de datos, así que al quitar una fila hay
@@ -336,7 +545,9 @@ export default function DemandasPage() {
   async function handleEliminarPropiedad() {
     if (!selected) return
     if (!window.confirm(`¿Eliminar permanentemente la propiedad Ref. ${selected.ref} y todas sus demandas? Esta acción no se puede deshacer.`)) return
-    const res = await eliminarPropiedad(selected.id)
+    const res = await eliminarPropiedad(selected.id).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se pudo eliminar la propiedad",
+    }))
     if (res.error) { toast.error(res.error); return }
     setPropiedades((prev) => prev.filter((p) => p.id !== selected.id))
     setTotal((n) => Math.max(0, n - 1))
@@ -348,7 +559,12 @@ export default function DemandasPage() {
 
   async function handleEliminarDemanda(demandaId: string) {
     setDeletingId(demandaId)
-    const res = await eliminarDemanda(demandaId)
+    // Con `.catch`, una excepción de la acción también devuelve el botón: sin
+    // él, `deletingId` se quedaba con esta demanda y su papelera se quedaba
+    // girando y deshabilitada para siempre.
+    const res = await eliminarDemanda(demandaId).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se pudo eliminar la demanda",
+    }))
     setDeletingId(null)
     if (res.error) { toast.error(res.error); return }
     setDemandas((prev) => prev.filter((d) => d.id !== demandaId))
@@ -363,10 +579,25 @@ export default function DemandasPage() {
   async function guardarNotas(demandaId: string) {
     setSavingNota(true)
     const val = editNotas.trim() || null
-    await supabase.from("demandas").update({ notas: val }).eq("id", demandaId)
-    setDemandas((prev) => prev.map((d) => d.id === demandaId ? { ...d, notas: val } : d))
-    setSavingNota(false)
-    setEditingDemandId(null)
+
+    // El error ni se miraba: la nota se pintaba en la ficha, el recuadro se
+    // cerraba y en la base de datos no se había escrito nada. Y si la petición
+    // reventaba, `savingNota` se quedaba en true y el botón "Guardar" no volvía
+    // nunca. Ahora el recuadro sólo se cierra si se ha guardado de verdad, para
+    // que lo escrito no se pierda al cerrarse.
+    try {
+      const { error } = await supabase.from("demandas").update({ notas: val }).eq("id", demandaId)
+      if (error) {
+        toast.error("No se pudo guardar la nota")
+        return
+      }
+      setDemandas((prev) => prev.map((d) => d.id === demandaId ? { ...d, notas: val } : d))
+      setEditingDemandId(null)
+    } catch {
+      toast.error("No se pudo guardar la nota")
+    } finally {
+      setSavingNota(false)
+    }
   }
 
   const resumen = termino
@@ -384,7 +615,7 @@ export default function DemandasPage() {
             <div className="flex flex-col gap-1">
               <h1 className="text-2xl font-semibold">Demandas</h1>
               <p className="text-sm text-muted-foreground tabular-nums">
-                {loading || fueraDeRango ? "Cargando..." : resumen}
+                {loading ? "Cargando..." : resumen}
               </p>
             </div>
             <div className="relative">
@@ -402,7 +633,7 @@ export default function DemandasPage() {
         </div>
 
         <div ref={listaRef} className="flex-1 overflow-y-auto">
-          {loading || fueraDeRango ? (
+          {loading ? (
             <div className="p-10 text-center text-sm text-muted-foreground">Cargando...</div>
           ) : propiedades.length === 0 ? (
             <div className="p-16 flex flex-col items-center gap-4 text-center">
@@ -437,16 +668,16 @@ export default function DemandasPage() {
                     <div className="h-9 w-9 rounded-md flex items-center justify-center shrink-0 bg-muted border border-border">
                       <Building2 className="h-4 w-4 text-muted-foreground" />
                     </div>
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-xs font-mono text-muted-foreground">Ref. {p.ref}</span>
                         {p.tipo && <span className="text-xs text-foreground font-medium">{p.tipo}</span>}
                         {p.accion && <span className="text-xs text-muted-foreground">· {p.accion}</span>}
                       </div>
-                      <p className="text-sm font-medium text-foreground truncate mt-0.5">
+                      <p className="text-sm font-medium text-foreground truncate">
                         {[p.ciudad, p.zona].filter(Boolean).join(", ") || "Ubicación no disponible"}
                       </p>
-                      <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
                         {precio && <span>{precio}</span>}
                         {p.habitaciones > 0 && <span>{p.habitaciones} hab</span>}
                         {p.m_construidos > 0 && <span>{p.m_construidos} m²</span>}
@@ -473,11 +704,11 @@ export default function DemandasPage() {
         {total > POR_PAGINA && (
           <div className="shrink-0 border-t border-border px-7">
             <Paginador
-              pagina={pagina}
+              pagina={paginaActual}
               porPagina={POR_PAGINA}
               total={total}
               onCambiar={setPagina}
-              cargando={loading || fueraDeRango}
+              cargando={loading}
             />
           </div>
         )}
@@ -510,7 +741,7 @@ export default function DemandasPage() {
                 </button>
               )}
               <button
-                onClick={() => { setSelected(null); setDemandas([]); setEditando(false) }}
+                onClick={cerrarFicha}
                 className="text-muted-foreground hover:text-foreground transition-colors"
               >
                 <X className="h-4 w-4" />
@@ -520,25 +751,15 @@ export default function DemandasPage() {
 
           <div className="flex-1 overflow-y-auto">
             {/* Propiedad info */}
-            <div className="p-5 border-b border-border space-y-3">
+            <div className="p-5 border-b border-border flex flex-col gap-3">
               {editando ? (
                 <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { label: "Tipo", key: "tipo" },
-                    { label: "Acción", key: "accion" },
-                    { label: "Ciudad", key: "ciudad" },
-                    { label: "Zona", key: "zona" },
-                    { label: "Alq. €/mes", key: "precio_alquiler", numeric: true },
-                    { label: "Venta €", key: "precio_venta", numeric: true },
-                    { label: "Habitaciones", key: "habitaciones", numeric: true },
-                    { label: "Baños", key: "banyos", numeric: true },
-                    { label: "m² const.", key: "m_construidos", numeric: true },
-                  ].map(({ label, key, numeric }) => (
-                    <div key={key} className="space-y-0.5">
+                  {CAMPOS_EDITABLES.map(({ label, key, numeric }) => (
+                    <div key={key} className="flex flex-col gap-0.5">
                       <label className="text-[10px] text-muted-foreground">{label}</label>
                       <input
                         type={numeric ? "number" : "text"}
-                        value={String((editFields as any)[key] ?? "")}
+                        value={editFields[key] ?? ""}
                         onChange={(e) => setEditFields((prev) => ({ ...prev, [key]: e.target.value }))}
                         className="w-full h-7 px-2 text-xs rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                       />
@@ -546,7 +767,7 @@ export default function DemandasPage() {
                   ))}
                 </div>
               ) : (
-                <div className="space-y-1.5 text-xs">
+                <div className="flex flex-col gap-1.5 text-xs">
                   {(selected.ciudad || selected.zona) && (
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Ubicación</span>
@@ -583,7 +804,7 @@ export default function DemandasPage() {
                 </div>
               )}
               {!editando && (
-                <div className="flex items-center gap-2 mt-2">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={handleDesactivar}
                     className="flex-1 h-7 rounded border border-border text-xs text-muted-foreground hover:border-amber-400/50 hover:text-amber-400 transition-colors"
@@ -601,7 +822,7 @@ export default function DemandasPage() {
             </div>
 
             {/* Demands list */}
-            <div className="p-5 space-y-4">
+            <div className="p-5 flex flex-col gap-4">
               {loadingDemandas ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -610,21 +831,35 @@ export default function DemandasPage() {
                 <p className="text-xs text-muted-foreground/60 italic">Sin demandas para esta propiedad</p>
               ) : (
                 (() => {
-                  const aprobadas  = demandas.filter((d) => d.estado === "Cualificado")
-                  const descartadas = demandas.filter((d) => d.estado === "Descartado")
-                  const resto       = demandas.filter((d) => d.estado !== "Cualificado" && d.estado !== "Descartado")
-                  const grupos: { label: string; color: string; items: Demanda[] }[] = [
-                    { label: "Aprobadas",   color: "text-emerald-400", items: aprobadas },
-                    { label: "En proceso",  color: "text-muted-foreground", items: resto },
-                    { label: "Descartadas", color: "text-red-400",     items: descartadas },
-                  ].filter((g) => g.items.length > 0)
-                  return grupos.map((grupo) => (
-                    <div key={grupo.label} className="space-y-2">
-                      <p className={`text-[10px] font-semibold uppercase tracking-wider ${grupo.color}`}>
-                        {grupo.label} ({grupo.items.length})
+                  // Un grupo por estado, en el orden del catálogo. Antes eran
+                  // tres grupos fijos —"Aprobadas", "En proceso" y
+                  // "Descartadas"— con "Cualificado" y "Descartado" escritos
+                  // aquí dentro: un estado nuevo caía en "En proceso" sin que
+                  // nadie lo hubiera decidido, y renombrarlo en el panel no
+                  // cambiaba lo que se leía en pantalla. Un estado que no esté
+                  // catalogado tampoco desaparece: hace su propio grupo, con su
+                  // valor por nombre y en gris, al final de la lista.
+                  const posicion = (e: string | null) => {
+                    const i = ESTADOS_UI.findIndex((c) => c.valor === e)
+                    return i === -1 ? ESTADOS_UI.length : i
+                  }
+                  const porEstado = new Map<string, Demanda[]>()
+                  for (const d of demandas) {
+                    const clave = d.estado ?? ""
+                    const lista = porEstado.get(clave)
+                    if (lista) lista.push(d)
+                    else porEstado.set(clave, [d])
+                  }
+                  const grupos = [...porEstado.entries()]
+                    .sort(([a], [b]) => posicion(a) - posicion(b) || a.localeCompare(b))
+                  return grupos.map(([estado, items]) => (
+                    <div key={estado} className="flex flex-col gap-2">
+                      <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", clasePunto(colorEstado(estado)))} />
+                        {nombreEstado(estado)} ({items.length})
                       </p>
-                      {grupo.items.map((d) => (
-                  <div key={d.id} className="rounded-lg border border-border bg-background p-3 space-y-2.5">
+                      {items.map((d) => (
+                  <div key={d.id} className="rounded-lg border border-border bg-background p-3 flex flex-col gap-2.5">
                     {/* Cabecera demanda */}
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
@@ -681,7 +916,7 @@ export default function DemandasPage() {
 
                     {/* Datos cualificación del bot */}
                     {d.datos_cualificacion && Object.keys(d.datos_cualificacion).length > 0 && (
-                      <div className="text-[10px] bg-emerald-500/5 border border-emerald-500/20 rounded p-2 space-y-0.5">
+                      <div className="text-[10px] bg-emerald-500/5 border border-emerald-500/20 rounded p-2 flex flex-col gap-0.5">
                         {Object.entries(d.datos_cualificacion).map(([k, v]) => (
                           <div key={k} className="flex gap-1">
                             <span className="text-emerald-600 capitalize font-medium">{k}:</span>
@@ -693,7 +928,7 @@ export default function DemandasPage() {
 
                     {/* Notas */}
                     {editingDemandId === d.id ? (
-                      <div className="space-y-1.5">
+                      <div className="flex flex-col gap-1.5">
                         <textarea
                           value={editNotas}
                           onChange={(e) => setEditNotas(e.target.value)}
@@ -729,17 +964,18 @@ export default function DemandasPage() {
 
                     {/* Estado */}
                     <div className="flex flex-wrap gap-1 pt-1.5 border-t border-border">
-                      {ESTADOS_DEMANDA.map((e) => (
+                      {ESTADOS_UI.map((c) => (
                         <button
-                          key={e}
-                          onClick={() => cambiarEstado(d.id, e)}
-                          className={`text-[10px] px-1.5 py-0.5 rounded border font-medium transition-all ${
-                            d.estado === e
-                              ? ESTADO_DEMANDA_CFG[e].badge
+                          key={c.id}
+                          onClick={() => cambiarEstado(d.id, c.valor)}
+                          className={cn(
+                            "text-[10px] px-1.5 py-0.5 rounded border font-medium transition-all",
+                            d.estado === c.valor
+                              ? claseColor(c.color)
                               : "border-border text-muted-foreground hover:border-muted-foreground/40"
-                          }`}
+                          )}
                         >
-                          {ESTADO_DEMANDA_CFG[e].label}
+                          {c.nombre}
                         </button>
                       ))}
                     </div>

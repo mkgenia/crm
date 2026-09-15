@@ -4,27 +4,54 @@ import { useEffect, useState, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 import { crearLead, actualizarLead } from "@/lib/actions/leads"
+import { asignarLeadsAMano } from "@/lib/actions/asignacion"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
+import { Atendido } from "@/components/shared/atendido"
 import { cn } from "@/lib/utils"
-import { AlertCircle, Search, X, Plus, UserCircle, Pencil, Check, Loader2, RefreshCw } from "lucide-react"
-import type { EstadoLead } from "@/types/captaciones"
+import { AlertCircle, Search, X, Plus, UserCircle, Pencil, Check, Loader2, RefreshCw, UserPlus } from "lucide-react"
+import { type Catalogo, opcionesDe, nombreDe, colorDe, claseColor, clasePunto } from "@/lib/catalogos"
 
-const ESTADOS: EstadoLead[] = ["Nuevo", "Contactado", "Interesado", "Propuesta", "Negociacion", "Ganado", "Perdido"]
+/**
+ * Estados y fuentes vienen del catálogo, no de una lista escrita aquí.
+ *
+ * Antes eran dos constantes en este fichero, y tenían dos problemas. El visible:
+ * un estado creado desde /configuracion/catalogos no salía por ningún lado, que
+ * es justo lo contrario de para lo que se hizo la tabla. Y el que no se veía:
+ * `ESTADO_CFG[lead.estado].badge` con un estado que no estuviera en el mapa era
+ * `undefined.badge`, o sea la pantalla entera en blanco. Bastaba con asignar a
+ * un lead un estado nuevo para tirarla.
+ *
+ * Además las fuentes ni siquiera coincidían: la lista de aquí decía "Manual",
+ * "Referido" o "Redes sociales", que no existen en el catálogo, mientras que
+ * Instagram o Ficha de propiedad —por donde entran de verdad— no estaban.
+ *
+ * Un valor que no esté catalogado se sigue pintando: `nombreDe` cae al propio
+ * valor y `claseColor` a gris. Una fila vieja con un estado retirado tiene que
+ * poder leerse.
+ */
+type EstadoLead = string
 
-const ESTADO_CFG: Record<EstadoLead, { badge: string; label: string; dot: string }> = {
-  Nuevo:       { badge: "bg-violet-500/10 text-violet-500 border-violet-500/20",    dot: "bg-violet-400",    label: "Nuevo" },
-  Contactado:  { badge: "bg-cyan-500/10 text-cyan-500 border-cyan-500/20",          dot: "bg-cyan-400",      label: "Contactado" },
-  Interesado:  { badge: "bg-blue-500/10 text-blue-500 border-blue-500/20",          dot: "bg-blue-400",      label: "Interesado" },
-  Propuesta:   { badge: "bg-orange-500/10 text-orange-500 border-orange-500/20",    dot: "bg-orange-400",    label: "Propuesta" },
-  Negociacion: { badge: "bg-yellow-500/10 text-yellow-500 border-yellow-500/20",    dot: "bg-yellow-400",    label: "Negociación" },
-  Ganado:      { badge: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20", dot: "bg-emerald-400",   label: "Ganado" },
-  Perdido:     { badge: "bg-muted text-muted-foreground border-border",             dot: "bg-muted-foreground", label: "Perdido" },
-}
-
-const FUENTES = ["Manual", "Web", "Captaciones", "Referido", "Redes sociales", "Llamada", "Otro"]
-
+/**
+ * Un lead tiene DOS personas detrás, y no son la misma (migración 024):
+ *
+ *   agente_id   -> quien lo trabaja hoy. Es lo que se traspasa.
+ *   captado_por -> quien lo trajo. No se pisa nunca.
+ *
+ * Hasta hoy esta pantalla leía `captado_por` y lo llamaba "Agente", que era lo
+ * único que había. Con el reparto de leads en marcha eso enseñaría al captador
+ * de un lead que lleva otro desde hace semanas.
+ *
+ * Las dos relaciones apuntan a `perfiles`, así que PostgREST no puede adivinar
+ * cuál es cuál: hay que nombrarle la clave ajena (`!leads_agente_id_fkey`). Sin
+ * la pista contesta un 300 y la lista entera se queda sin cargar.
+ */
 const COLUMNAS =
-  "id, nombre, apellidos, email, telefono, fuente, estado, notas, fecha_creacion, captado_por, captacion_id, agente:perfiles!leads_captado_por_fkey(nombre, apellidos)"
+  "id, nombre, apellidos, email, telefono, fuente, estado, notas, fecha_creacion, captado_por, captacion_id, agente_id, asignacion_motivo, atendido_en, atendido_por, agente:perfiles!leads_agente_id_fkey(nombre, apellidos), captador:perfiles!leads_captado_por_fkey(nombre, apellidos), atendedor:perfiles!leads_atendido_por_fkey(nombre, apellidos)"
+
+interface Persona {
+  nombre: string | null
+  apellidos: string | null
+}
 
 interface Lead {
   id: string
@@ -38,7 +65,36 @@ interface Lead {
   fecha_creacion: string
   captado_por: string | null
   captacion_id: number | null
-  agente: { nombre: string; apellidos: string | null } | null
+  agente_id: string | null
+  /** Por qué le tocó a quien le tocó, o por qué no le ha tocado a nadie. */
+  asignacion_motivo: string | null
+  /** Cuándo se habló con esta persona por última vez, y quién habló. */
+  atendido_en: string | null
+  atendido_por: string | null
+  agente: Persona | null
+  captador: Persona | null
+  atendedor: Persona | null
+}
+
+/** Lo que hace falta de cada compañero para poder repartirle un lead. */
+interface AgenteOpcion {
+  id: string
+  nombre: string
+}
+
+/** "Nombre Apellidos", sin el hueco suelto cuando falta uno de los dos. */
+function nombrePersona(p: Persona | null): string {
+  if (!p) return "Sin asignar"
+  return `${p.nombre ?? ""} ${p.apellidos ?? ""}`.trim() || "Sin nombre"
+}
+
+/**
+ * Un embebido de PostgREST llega como objeto o como array de uno según cómo
+ * resuelva la relación. Aquí siempre es una persona o ninguna.
+ */
+function unoSolo(valor: unknown): Persona | null {
+  const x = Array.isArray(valor) ? valor[0] : valor
+  return (x as Persona | undefined) ?? null
 }
 
 function timeAgo(date: string) {
@@ -52,19 +108,58 @@ function timeAgo(date: string) {
   return new Date(date).toLocaleDateString("es", { day: "numeric", month: "short" })
 }
 
-export default function LeadsPage() {
+export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { catalogos?: Catalogo[]; fuenteInicial?: string }) {
+  // Activos y en orden, tal y como los dejó el administrador en el panel.
+  const ESTADOS = opcionesDe(catalogos, "estado_lead")
+  const FUENTES = opcionesDe(catalogos, "fuente")
+
+  // Atajos para no repetir el tipo de catálogo en cada sitio donde se pinta.
+  const badgeEstado = (e: string) => claseColor(colorDe(catalogos, "estado_lead", e))
+  const nombreEstado = (e: string) => nombreDe(catalogos, "estado_lead", e)
+
   const [leads, setLeads] = useState<Lead[]>([])
   const [loading, setLoading] = useState(true)
   const [errorCarga, setErrorCarga] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [estadoFilter, setEstadoFilter] = useState<EstadoLead | "">("")
+  /**
+   * De dónde vino. Llega por la URL (`/leads?fuente=Instagram`) desde el resumen
+   * de orígenes de la portada, y el servidor ya lo ha validado contra el
+   * catálogo.
+   *
+   * No lleva una fila de pastillas propia como el estado: serían ocho más, casi
+   * todas a cero para casi todos, y es justo lo que se está quitando de las
+   * pantallas. Cuando hay filtro se enseña una chapa que se puede quitar, y
+   * cuando no hay, no se ve nada.
+   */
+  const [fuenteFilter, setFuenteFilter] = useState<string>(fuenteInicial)
+  /** El filtro de "esto no lo está trabajando nadie". */
+  const [soloSinAsignar, setSoloSinAsignar] = useState(false)
   const [pagina, setPagina] = useState(1)
   /** Total real de leads que cumplen el filtro, contado en la base de datos. */
   const [total, setTotal] = useState(0)
+  /**
+   * Cuántos de los que se están mirando no tienen agente. `null` es "no se ha
+   * podido contar" y NO se pinta: un 0 se lee como "ya está todo repartido",
+   * que es justo lo contrario de lo que estaría pasando.
+   */
+  const [sinAsignar, setSinAsignar] = useState<number | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Lead | null>(null)
+  // `abierto` guarda CUÁL ficha está abierta; `selected` es esa misma ficha
+  // pero leída de `leads`, que es la lista que se recarga. Mantenerlas juntas en
+  // un solo estado dejaba el panel congelado en la copia del momento en que se
+  // pinchó la fila: al pulsar "Atendido", la fila pasaba a "Interesado" y el
+  // panel seguía marcando "Nuevo", sobre el mismo lead y al mismo tiempo.
+  const [abierto, setSelected] = useState<Lead | null>(null)
+  const selected = abierto ? (leads.find((l) => l.id === abierto.id) ?? abierto) : null
   const [updatingId, setUpdatingId] = useState<string | null>(null)
+
+  // El equipo, para repartir desde la ficha. `null` mientras no se ha traído:
+  // así una lista vacía por un fallo de carga no se confunde con "aún viene".
+  const [agentes, setAgentes] = useState<AgenteOpcion[] | null>(null)
+  /** Id del agente al que se está traspasando ahora mismo. */
+  const [asignando, setAsignando] = useState<string | null>(null)
 
   // Panel edición inline
   const [editando, setEditando] = useState(false)
@@ -83,6 +178,8 @@ export default function LeadsPage() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** Número de la última carga pedida. Ver `peticion` dentro de fetchLeads. */
   const peticionRef = useRef(0)
+  /** Para no repetir el aviso de "lista de captaciones cortada" en cada tecla. */
+  const avisoCapsRef = useRef(false)
 
   /**
    * Trae UNA página de leads y, con ella, el total de verdad.
@@ -111,16 +208,29 @@ export default function LeadsPage() {
       setErrorCarga(mensaje)
       setLeads([])
       setTotal(0)
+      // El recuento de sin asignar tampoco vale ya: dejarlo puesto sobre una
+      // pantalla de error es enseñar el número de una lista que no se ha leído.
+      setSinAsignar(null)
       toast.error("No se han podido cargar los leads")
     }
 
     try {
       let capIds: number[] = []
       if (!admin) {
+        // El tope se pide explícito porque PostgREST corta en 1.000 filas EN
+        // SILENCIO y con un 200 OK. Si un agente pasara de mil captaciones, la
+        // lista de ids llegaría cortada, sus leads espejo desaparecerían de la
+        // pantalla y nada fallaría: exactamente la clase de mentira que no nos
+        // podemos permitir aquí. Hoy no llega —737 captaciones activas en toda
+        // la empresa—, así que se avisa en vez de reescribir el filtro: la
+        // solución de verdad es una vista o una RPC en la base, porque un
+        // `in.(...)` con mil ids tampoco cabe en la URL.
+        const TOPE_CAPS = 1000
         const { data: caps, error: errorCaps } = await supabase
           .from("captaciones")
           .select("id")
           .eq("agente_id", uid)
+          .limit(TOPE_CAPS)
         // Si esta falla y la damos por vacía, el agente deja de ver los leads de
         // sus captaciones y la lista parece correcta: hay que decirlo.
         if (errorCaps) {
@@ -128,6 +238,10 @@ export default function LeadsPage() {
           return
         }
         capIds = (caps ?? []).map((c: { id: number }) => c.id)
+        if (capIds.length >= TOPE_CAPS && !avisoCapsRef.current) {
+          avisoCapsRef.current = true
+          toast.error("Tienes más de 1.000 captaciones: puede que falten leads en esta lista. Avisa al administrador.")
+        }
       }
 
       // La consulta se construye más de una vez —la página y, si hace falta, el
@@ -135,18 +249,32 @@ export default function LeadsPage() {
       // no se puede reutilizar una vez lanzado.
       // Genérica en las columnas: supabase-js deduce el tipo de `data` del
       // literal del select, y con un `string` a secas lo da por fallido.
-      const construir = <C extends string>(columnas: C, head = false) => {
+      const construir = <C extends string>(columnas: C, head = false, sinAgente = soloSinAsignar) => {
         let q = supabase.from("leads").select(columnas, { count: "exact", head })
 
         if (!admin) {
+          // "Los suyos" es `agente_id`, el que lo trabaja, y no `captado_por`.
+          // Desde la 024 un traspaso mueve el primero y deja el segundo quieto:
+          // filtrando por el captador, el agente que perdió un lead lo seguiría
+          // viendo en su lista. Los espejos de sus propias captaciones siguen
+          // entrando por `captacion_id`, que es como los ve hoy.
           if (capIds.length > 0) {
-            q = q.or(`captado_por.eq.${uid},captacion_id.in.(${capIds.join(",")})`)
+            q = q.or(`agente_id.eq.${uid},captacion_id.in.(${capIds.join(",")})`)
           } else {
-            q = q.eq("captado_por", uid)
+            q = q.eq("agente_id", uid)
           }
         }
 
+        // Sin agente = sin nadie trabajándolo. Se mira `agente_id` y no
+        // `captado_por` por lo mismo de arriba: un lead que trajo alguien y que
+        // hoy no lleva nadie está sin asignar, por mucho captador que tenga.
+        if (sinAgente) q = q.is("agente_id", null)
+
         if (estadoFilter) q = q.eq("estado", estadoFilter)
+
+        // El origen es una columna, no una relación: se filtra igual que el
+        // estado. El valor ya viene comprobado contra el catálogo.
+        if (fuenteFilter) q = q.eq("fuente", fuenteFilter)
 
         // El valor va entre comillas: PostgREST parte el `or` por comas y
         // paréntesis, así que buscar "Pérez, Juan" sin ellas rompe el filtro y
@@ -163,11 +291,21 @@ export default function LeadsPage() {
       }
 
       const desde = (pag - 1) * POR_PAGINA
-      const { data, error, count } = await construir(COLUMNAS)
-        .order("fecha_creacion", { ascending: false })
-        .range(desde, desde + POR_PAGINA - 1)
+      // Las dos a la vez: la página y cuántos de esos mismos leads están sin
+      // repartir. El recuento se hace EN LA BASE con head:true —sólo viaja la
+      // cabecera con el total, ni una fila—, porque contar los sin agente sobre
+      // las 50 filas cargadas diría "12" habiendo ciento treinta y seis.
+      const [{ data, error, count }, conteoSin] = await Promise.all([
+        construir(COLUMNAS)
+          .order("fecha_creacion", { ascending: false })
+          .range(desde, desde + POR_PAGINA - 1),
+        construir("id", true, true),
+      ])
 
       if (!vigente()) return
+
+      // Si el recuento falla se queda en null y la pastilla sale sin número.
+      setSinAsignar(conteoSin.error ? null : conteoSin.count ?? null)
 
       if (error) {
         // Pedir un rango que empieza más allá del total NO devuelve una lista
@@ -201,7 +339,8 @@ export default function LeadsPage() {
 
       const normalized = (data ?? []).map((row: Record<string, unknown>) => ({
         ...row,
-        agente: Array.isArray(row.agente) ? (row.agente[0] ?? null) : (row.agente ?? null),
+        agente: unoSolo(row.agente),
+        captador: unoSolo(row.captador),
       }))
       setLeads(normalized as Lead[])
       setErrorCarga(null)
@@ -212,20 +351,69 @@ export default function LeadsPage() {
       // parpadear la lista vieja antes de que llegue la buena.
       if (vigente()) setLoading(false)
     }
-  }, [estadoFilter, search])
+  }, [estadoFilter, fuenteFilter, search, soloSinAsignar])
 
   // Init: auth + datos iniciales (una sola vez)
   useEffect(() => {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-      const { data: perfil } = await supabase.from("perfiles").select("rol").eq("id", user.id).single()
+      if (!user) {
+        // Sin sesión no hay nada que pedir, pero dejarlo aquí sin más deja la
+        // pantalla en "Cargando leads..." para siempre, que se lee como "esto
+        // va lento" cuando lo que pasa es que hay que volver a entrar.
+        setLoading(false)
+        setErrorCarga("Tu sesión ha caducado. Vuelve a entrar.")
+        return
+      }
+      const { data: perfil, error: errorPerfil } = await supabase
+        .from("perfiles").select("rol").eq("id", user.id).single()
+      // Un fallo aquí NO puede pasar por "no eres administrador" en silencio: el
+      // dueño se quedaría viendo sólo los leads que lleva él y daría por hecho
+      // que se han perdido los demás. Se degrada al ámbito de agente —que es el
+      // lado seguro— pero contándolo.
+      if (errorPerfil) toast.error("No se ha podido comprobar tu rol: verás sólo tus leads")
       const admin = perfil?.rol === "Admin"
       setIsAdmin(admin)
       setUserId(user.id)
       // No llamamos fetchLeads aquí: el efecto de abajo se dispara al cambiar userId
+
+      // El equipo sólo hace falta para repartir, y repartir sólo lo hace el
+      // administrador: al agente no se le pide esta lista para nada.
+      if (!admin) return
+
+      // Se pide aquí y no con `getAgentes()` a propósito: esa función se traga
+      // el error de la consulta y devuelve `[]` (`const { data } = ...; return
+      // data ?? []`), así que un fallo de red llegaría hasta la ficha disfrazado
+      // de "no hay agentes a los que repartir". Es la misma trampa que un
+      // contador que devuelve 0 cuando en realidad no ha podido contar. Pidiendo
+      // la consulta desde aquí sí se distingue una cosa de la otra.
+      //
+      // `.neq("rol", "Admin")` es el mismo filtro que usa el panel de reparto y
+      // el mismo que aplica `siguiente_agente()` (`p.rol <> 'Admin'`): el
+      // administrador no entra en la rotación, así que tampoco se ofrece para
+      // repartirle a mano.
+      const { data: equipo, error: errorEquipo } = await supabase
+        .from("perfiles")
+        .select("id, nombre, apellidos")
+        .neq("rol", "Admin")
+        .order("nombre")
+      if (errorEquipo) {
+        // Lista vacía Y aviso: sin el aviso, la ficha enseñaría un hueco donde
+        // van los compañeros y parecería que la empresa no tiene agentes.
+        setAgentes([])
+        toast.error("No se ha podido cargar el equipo")
+        return
+      }
+      setAgentes((equipo ?? []).map((a) => ({ id: a.id as string, nombre: nombrePersona(a) })))
     }
-    init()
+    // Si esto revienta, el usuario se queda sin rol y sin `userId`, así que el
+    // efecto de carga no llega a dispararse nunca: hay que apagar el "Cargando"
+    // a mano y contarlo, o la pantalla se queda girando para siempre.
+    init().catch(() => {
+      setLoading(false)
+      setErrorCarga("No se ha podido comprobar tu sesión")
+      toast.error("No se ha podido comprobar tu sesión")
+    })
   }, [])
 
   // Refetch al cambiar filtros, página o al tener userId; debounce solo para búsqueda de texto
@@ -235,7 +423,7 @@ export default function LeadsPage() {
     const delay = search ? 300 : 0
     debounceRef.current = setTimeout(() => fetchLeads(userId, isAdmin, pagina), delay)
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [estadoFilter, search, fetchLeads, userId, isAdmin, pagina])
+  }, [estadoFilter, fuenteFilter, search, soloSinAsignar, fetchLeads, userId, isAdmin, pagina])
 
   // La página que se está mirando, en una ref: el canal de realtime se monta una
   // vez y así la lee sin tener que resuscribirse cada vez que pasas de página.
@@ -300,6 +488,61 @@ export default function LeadsPage() {
     setPagina(1)
   }
 
+  function quitarFuente() {
+    setFuenteFilter("")
+    setPagina(1)
+  }
+
+  function filtrarSinAsignar() {
+    setSoloSinAsignar((v) => !v)
+    setPagina(1)
+  }
+
+  /** Hay algo filtrando: cambia lo que dice la pantalla cuando no sale nada. */
+  const hayFiltros = !!search || !!estadoFilter || !!fuenteFilter || soloSinAsignar
+
+  /**
+   * Traspasar el lead abierto a un compañero.
+   *
+   * Lo escribe la acción de servidor y no un update suelto contra la tabla a
+   * propósito: ahí es donde se comprueba el permiso y donde se deja `captado_por`
+   * en paz —quien lo trajo no cambia porque hoy lo lleve otro— además de apuntar
+   * el motivo del traspaso.
+   */
+  async function asignarA(agenteId: string, nombreAgente: string) {
+    const lead = selected
+    if (!lead || asignando) return
+    setAsignando(agenteId)
+
+    // .catch y no sólo try/finally: si la acción revienta por lo que sea, el
+    // botón tiene que volver a su sitio y contarlo, no quedarse girando.
+    const res = await asignarLeadsAMano([lead.id], agenteId).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se ha podido asignar el lead",
+    }))
+    setAsignando(null)
+
+    if (res?.error) {
+      toast.error(res.error)
+      return
+    }
+
+    // Se pinta ya lo que acaba de pasar y detrás se vuelve a pedir la página: el
+    // filtro "Sin asignar" y su recuento los resuelve la consulta, así que este
+    // lead tiene que desaparecer solo de la lista si ya no le toca estar ahí.
+    const conAgente: Lead = {
+      ...lead,
+      agente_id: agenteId,
+      agente: { nombre: nombreAgente, apellidos: null },
+    }
+    // Sólo si el panel sigue enseñando ESTE lead: entre la petición y la
+    // respuesta se puede haber cerrado la ficha o abierto otra, y escribirle
+    // encima el lead viejo sería enseñar en pantalla algo que no has pedido.
+    setSelected((prev) => (prev && prev.id === lead.id ? conAgente : prev))
+    setLeads((prev) => prev.map((l) => (l.id === lead.id ? conAgente : l)))
+    toast.success(`Lead asignado a ${nombreAgente}`)
+    if (userId) fetchLeads(userId, isAdmin, pagina)
+  }
+
   function abrirEdicion() {
     if (!selected) return
     setEditTel(selected.telefono ?? "")
@@ -308,48 +551,95 @@ export default function LeadsPage() {
     setEditando(true)
   }
 
+  /**
+   * Guardar teléfono, email y notas.
+   *
+   * Antes esto hacía `if (res.error) return` a secas: la acción fallaba, el
+   * panel se quedaba en modo edición sin decir nada y el usuario volvía a
+   * pulsar Guardar pensando que no había llegado a pulsarlo. Y sin `.catch`,
+   * una promesa rechazada se llevaba por delante el `setSavingEdit(false)` y
+   * dejaba el botón girando para siempre.
+   */
   async function guardarEdicion() {
-    if (!selected) return
-    setSavingEdit(true)
-    const res = await actualizarLead(selected.id, {
+    if (!selected || savingEdit) return
+    const leadId = selected.id
+    const cambios = {
       telefono: editTel.trim() || null,
       email: editEmail.trim() || null,
       notas: editNotas.trim() || null,
-    })
-    setSavingEdit(false)
-    if (res.error) return
-    const updated = { ...selected, telefono: editTel.trim() || null, email: editEmail.trim() || null, notas: editNotas.trim() || null }
-    setSelected(updated)
-    setLeads((prev) => prev.map((l) => l.id === selected.id ? updated : l))
-    setEditando(false)
+    }
+    setSavingEdit(true)
+    try {
+      const res = await actualizarLead(leadId, cambios)
+      if (res.error) {
+        toast.error(res.error)
+        return
+      }
+      // Con la ficha que haya abierta AHORA, no con la de hace medio segundo.
+      setSelected((prev) => (prev && prev.id === leadId ? { ...prev, ...cambios } : prev))
+      setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, ...cambios } : l)))
+      setEditando(false)
+    } catch {
+      toast.error("No se han podido guardar los cambios")
+    } finally {
+      setSavingEdit(false)
+    }
   }
 
+  /**
+   * Mover el lead de estado.
+   *
+   * La escritura se comprueba. Antes se pintaba el estado nuevo pasara lo que
+   * pasara con la update, así que un fallo dejaba la pantalla diciendo "Ganado"
+   * con la base de datos diciendo "Nuevo" — y nadie se enteraba hasta que el
+   * lead reaparecía donde no tocaba. El `catch` está por el mismo motivo que en
+   * el resto del fichero: sin él, una promesa rechazada dejaba `updatingId`
+   * puesto y los botones de estado deshabilitados hasta recargar la página.
+   */
   async function cambiarEstado(leadId: string, nuevoEstado: EstadoLead) {
+    if (updatingId) return
     setUpdatingId(leadId)
-    await supabase.from("leads").update({ estado: nuevoEstado }).eq("id", leadId)
-    setLeads((prev) => prev.map((l) => l.id === leadId ? { ...l, estado: nuevoEstado } : l))
-    if (selected?.id === leadId) setSelected((prev) => prev ? { ...prev, estado: nuevoEstado } : null)
-    setUpdatingId(null)
+    try {
+      const { error } = await supabase.from("leads").update({ estado: nuevoEstado }).eq("id", leadId)
+      if (error) {
+        toast.error(`No se ha podido cambiar el estado: ${error.message}`)
+        return
+      }
+      setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, estado: nuevoEstado } : l)))
+      setSelected((prev) => (prev && prev.id === leadId ? { ...prev, estado: nuevoEstado } : prev))
+    } catch {
+      toast.error("No se ha podido cambiar el estado: no hay conexión con el servidor")
+    } finally {
+      setUpdatingId(null)
+    }
   }
 
   async function handleCrearLead(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     setSaving(true)
     setSaveError(null)
+    // `currentTarget` se lee ANTES del await: React lo deja a null al reciclar
+    // el evento y después ya no hay formulario del que sacar los datos.
     const fd = new FormData(e.currentTarget)
-    const result = await crearLead(fd)
-    setSaving(false)
-    if (result.error) {
-      setSaveError(result.error)
-      return
+    try {
+      const result = await crearLead(fd)
+      if (result.error) {
+        setSaveError(result.error)
+        return
+      }
+      setShowModal(false)
+      formRef.current?.reset()
+      // El lead recién creado entra el primero (orden por fecha desc): si estabas
+      // en otra página no lo verías, así que volvemos a la primera. Cambiar de
+      // página ya dispara la recarga; si ya estabas en la 1, hay que pedirla.
+      if (pagina !== 1) setPagina(1)
+      else if (userId) fetchLeads(userId, isAdmin, 1)
+    } catch {
+      // Sin esto el botón se quedaba en "Guardando..." para siempre.
+      setSaveError("No se ha podido crear el lead. Inténtalo otra vez.")
+    } finally {
+      setSaving(false)
     }
-    setShowModal(false)
-    formRef.current?.reset()
-    // El lead recién creado entra el primero (orden por fecha desc): si estabas
-    // en otra página no lo verías, así que volvemos a la primera. Cambiar de
-    // página ya dispara la recarga; si ya estabas en la 1, hay que pedirla.
-    if (pagina !== 1) setPagina(1)
-    else if (userId) fetchLeads(userId, isAdmin, 1)
   }
 
   // Las pastillas ya no llevan número. Se contaba sobre las filas cargadas, así
@@ -400,6 +690,24 @@ export default function LeadsPage() {
 
         {/* Pills filtro estado */}
         <div className="flex items-center gap-2 overflow-x-auto shrink-0">
+          {/* De dónde vienen. Sólo aparece cuando se ha llegado filtrando desde
+              el resumen de orígenes: si no, no se pinta nada. Lleva la X porque
+              un filtro que llega por la URL y no se ve es la forma más rápida de
+              que alguien jure que "faltan leads". */}
+          {fuenteFilter && (
+            <button
+              onClick={quitarFuente}
+              title="Quitar el filtro de origen"
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
+                claseColor(colorDe(catalogos, "fuente", fuenteFilter)),
+              )}
+            >
+              <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(colorDe(catalogos, "fuente", fuenteFilter)))} />
+              {nombreDe(catalogos, "fuente", fuenteFilter)}
+              <X className="h-3 w-3 shrink-0 opacity-70" />
+            </button>
+          )}
           <button
             onClick={() => filtrarPor("")}
             className={cn(
@@ -409,19 +717,47 @@ export default function LeadsPage() {
           >
             Todos
           </button>
-          {ESTADOS.map((e) => (
+          {ESTADOS.map(({ valor: e, nombre, color }) => (
             <button
               key={e}
               onClick={() => filtrarPor(estadoFilter === e ? "" : e)}
               className={cn(
                 "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
-                estadoFilter === e ? ESTADO_CFG[e].badge : "border-border text-muted-foreground hover:border-muted-foreground/40",
+                estadoFilter === e ? claseColor(color) : "border-border text-muted-foreground hover:border-muted-foreground/40",
               )}
             >
-              <span className={cn("h-1.5 w-1.5 rounded-full", ESTADO_CFG[e].dot)} />
-              {ESTADO_CFG[e].label}
+              <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(color))} />
+              {nombre}
             </button>
           ))}
+
+          {/* Los que no está trabajando nadie. El número sale de un count exacto
+              contra la base —no de las filas cargadas—, y si ese recuento falla
+              no se pinta ninguno: un 0 se leería como "ya está todo repartido".
+
+              SÓLO PARA EL ADMINISTRADOR. Un agente ve su propia lista —la
+              consulta de arriba filtra por `agente_id`—, así que "sin asignar"
+              dentro de lo suyo no puede dar más que cero: es una pastilla que no
+              puede hacer nada, que es exactamente lo que se está quitando de las
+              pantallas. Repartir es trabajo del que dirige, y él sí la necesita:
+              hoy hay 1.011 leads sin dueño. */}
+          {isAdmin && (
+            <button
+              onClick={filtrarSinAsignar}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
+                soloSinAsignar
+                  ? "bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/30"
+                  : "border-border text-muted-foreground hover:border-muted-foreground/40",
+              )}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+              Sin asignar
+              {sinAsignar !== null && (
+                <span className="tabular-nums opacity-70">{sinAsignar.toLocaleString("es")}</span>
+              )}
+            </button>
+          )}
         </div>
 
         {/* List card */}
@@ -438,7 +774,10 @@ export default function LeadsPage() {
                 <p className="text-xs text-muted-foreground">{errorCarga}</p>
               </div>
               <button
-                onClick={() => { if (userId) fetchLeads(userId, isAdmin, pagina) }}
+                // Sin `userId` no hay nada que volver a pedir —la sesión no ha
+                // llegado a resolverse—, así que reintentar es recargar. Si no,
+                // este botón no haría absolutamente nada al pulsarlo.
+                onClick={() => { if (userId) fetchLeads(userId, isAdmin, pagina); else window.location.reload() }}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
@@ -452,15 +791,17 @@ export default function LeadsPage() {
               </div>
               <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">
-                  {search || estadoFilter ? "No hay leads con estos filtros" : "Aún no tienes leads"}
+                  {hayFiltros ? "No hay leads con estos filtros" : "Aún no tienes leads"}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {search || estadoFilter
-                    ? "Prueba cambiando los filtros de búsqueda"
+                  {hayFiltros
+                    ? soloSinAsignar
+                      ? "Ninguno de los leads que ves está esperando agente"
+                      : "Prueba cambiando los filtros de búsqueda"
                     : "Los leads se crean automáticamente cuando un propietario responde, o puedes añadir uno manualmente"}
                 </p>
               </div>
-              {!search && !estadoFilter && (
+              {!hayFiltros && (
                 <button
                   onClick={() => setShowModal(true)}
                   className="flex items-center gap-1.5 px-4 py-2 rounded-md bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity"
@@ -490,14 +831,28 @@ export default function LeadsPage() {
                     </p>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       {lead.telefono && <span>{lead.telefono}</span>}
-                      {lead.fuente && <span className="opacity-60">· {lead.fuente}</span>}
-                      {isAdmin && lead.agente && (
-                        <span className="opacity-60">· {lead.agente.nombre}</span>
-                      )}
+                      {lead.fuente && <span className="opacity-60">· {nombreDe(catalogos, "fuente", lead.fuente)}</span>}
+                      {/* En pantalla estrecha no cabe la chapa de la derecha, así
+                          que de quién es el lead se dice aquí. */}
+                      <span className="sm:hidden opacity-60">· {nombrePersona(lead.agente)}</span>
                     </div>
                   </div>
-                  <span className={cn("text-xs px-2 py-0.5 rounded border font-medium shrink-0", ESTADO_CFG[lead.estado].badge)}>
-                    {ESTADO_CFG[lead.estado].label}
+                  {/* De quién es. Se pinta también para el agente, no sólo para el
+                      administrador: en su lista salen los espejos de sus propias
+                      captaciones, que pueden estar todavía sin repartir. */}
+                  <span
+                    className={cn(
+                      "hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded border font-medium shrink-0 max-w-[9rem]",
+                      lead.agente
+                        ? "border-border text-muted-foreground"
+                        : "bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-300",
+                    )}
+                  >
+                    <UserCircle className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{nombrePersona(lead.agente)}</span>
+                  </span>
+                  <span className={cn("text-xs px-2 py-0.5 rounded border font-medium shrink-0", badgeEstado(lead.estado))}>
+                    {nombreEstado(lead.estado)}
                   </span>
                   <span className="text-xs text-muted-foreground/50 w-8 text-right shrink-0 hidden sm:block">
                     {timeAgo(lead.fecha_creacion)}
@@ -518,7 +873,17 @@ export default function LeadsPage() {
         />
       </div>
 
-      {/* ── Right: detail panel ── */}
+      {/* ── Right: detail panel ──
+          `selected` dice CUÁL está abierto; lo que se pinta sale de `leads`, que
+          es la lista fresca. Guardados aparte, la ficha se quedaba con la copia
+          del momento en que se pinchó la fila: al pulsar "Atendido" la fila de
+          la izquierda pasaba a "Interesado" y el panel de la derecha seguía
+          marcando "Nuevo", sobre el mismo lead y a la vez.
+
+          Valor derivado en el render, sin efecto ni setState: el lint de la casa
+          rechaza setState dentro de useEffect, y aquí además sobra. El `??
+          selected` es para el hueco entre que se recarga la lista y llega: mejor
+          el dato de hace un segundo que un panel que desaparece. */}
       {selected && (
         <div className="w-80 shrink-0 rounded-xl border border-border bg-card flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
@@ -551,7 +916,7 @@ export default function LeadsPage() {
               </div>
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-foreground truncate">{selected.nombre} {selected.apellidos}</p>
-                <p className="text-xs text-muted-foreground">{selected.fuente ?? "—"}</p>
+                <p className="text-xs text-muted-foreground">{nombreDe(catalogos, "fuente", selected.fuente)}</p>
               </div>
             </div>
 
@@ -604,7 +969,7 @@ export default function LeadsPage() {
             <div className="space-y-2">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Cambiar estado</p>
               <div className="grid grid-cols-2 gap-1.5">
-                {ESTADOS.map((e) => (
+                {ESTADOS.map(({ valor: e, nombre, color }) => (
                   <button
                     key={e}
                     onClick={() => cambiarEstado(selected.id, e)}
@@ -612,15 +977,114 @@ export default function LeadsPage() {
                     className={cn(
                       "text-xs px-2 py-1.5 rounded border font-medium transition-all",
                       selected.estado === e
-                        ? ESTADO_CFG[e].badge
+                        ? claseColor(color)
                         : "border-border text-muted-foreground hover:border-muted-foreground/40",
                     )}
                   >
-                    {ESTADO_CFG[e].label}
+                    {nombre}
                   </button>
                 ))}
               </div>
             </div>
+
+            {/* ── Quién lo lleva ── */}
+            <div className="flex flex-col gap-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Agente</p>
+
+              <div
+                className={cn(
+                  "flex items-center gap-2 rounded-md border px-3 py-2",
+                  selected.agente ? "border-border bg-muted/40" : "bg-amber-500/10 border-amber-500/30",
+                )}
+              >
+                <UserCircle
+                  className={cn(
+                    "h-4 w-4 shrink-0",
+                    selected.agente ? "text-muted-foreground" : "text-amber-600 dark:text-amber-300",
+                  )}
+                />
+                <div className="min-w-0 flex flex-col">
+                  <span
+                    className={cn(
+                      "text-xs font-medium truncate",
+                      selected.agente ? "text-foreground" : "text-amber-600 dark:text-amber-300",
+                    )}
+                  >
+                    {nombrePersona(selected.agente)}
+                  </span>
+                  {/* Por qué está como está: "esperando asignación" o "nadie
+                      disponible" lo escribe el reparto, y leerlo evita el clásico
+                      "esto está roto" cuando lo que pasa es que el modo es manual. */}
+                  {!selected.agente && selected.asignacion_motivo && (
+                    <span className="text-[11px] text-muted-foreground truncate">{selected.asignacion_motivo}</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Repartir es cosa del administrador: la acción de servidor
+                  rechaza a los demás, así que enseñarles los botones sería
+                  ofrecerles algo que va a fallar. */}
+              {isAdmin && (
+                agentes === null ? (
+                  <p className="text-xs text-muted-foreground/60 italic">Cargando el equipo...</p>
+                ) : agentes.length === 0 ? (
+                  <p className="text-xs text-muted-foreground/60 italic">No hay agentes a los que repartir</p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {agentes.map((a) => (
+                      <button
+                        key={a.id}
+                        onClick={() => asignarA(a.id, a.nombre)}
+                        disabled={asignando !== null || selected.agente_id === a.id}
+                        className={cn(
+                          "flex items-center gap-1.5 text-xs px-2 py-1.5 rounded border font-medium transition-all disabled:opacity-50 disabled:pointer-events-none",
+                          selected.agente_id === a.id
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-500/30"
+                            : "border-border text-muted-foreground hover:border-muted-foreground/40",
+                        )}
+                      >
+                        {asignando === a.id ? (
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                        ) : selected.agente_id === a.id ? (
+                          <Check className="h-3 w-3 shrink-0" />
+                        ) : (
+                          <UserPlus className="h-3 w-3 shrink-0" />
+                        )}
+                        <span className="truncate">{a.nombre}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              )}
+            </div>
+
+            {/* ATENDER.
+                Faltaba, y era el agujero por el que se caía todo el trabajo del
+                agente sobre un lead de Instagram o de la web. El componente
+                acepta `leadId` desde la 021 y la RPC `atender()` lo mueve todo
+                —nota, recordatorio en el calendario y el embudo—, pero sólo lo
+                montaban la ficha de captación y la de prospecto. Aquí no.
+                Resultado: los 137 leads de demanda tenían `atendido_en` a nulo y
+                NO había forma de escribirlo desde ninguna pantalla; en la
+                portada del agente se quedaban para siempre como "sin atender",
+                y el salto Nuevo -> Contactado de la 030 no se podía disparar.
+
+                Va ENCIMA de las notas y no debajo: apuntar lo que acaba de pasar
+                en la llamada es la acción del día; las notas de abajo son lo que
+                ya estaba escrito. */}
+            <Atendido
+              leadId={selected.id}
+              catalogos={catalogos}
+              yaAtendido={
+                selected.atendido_en
+                  ? { en: selected.atendido_en, por: selected.atendedor ? nombrePersona(selected.atendedor) : null }
+                  : null
+              }
+              // Atender mueve el estado del lead (la 030), así que no vale con
+              // refrescar el panel: la pastilla de la fila y los contadores de
+              // arriba se quedarían con lo de antes hasta recargar a mano.
+              onHecho={() => { if (userId) void fetchLeads(userId, isAdmin, pagina) }}
+            />
 
             <div className="space-y-2">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Notas</p>
@@ -646,10 +1110,12 @@ export default function LeadsPage() {
                   {new Date(selected.fecha_creacion).toLocaleDateString("es", { day: "numeric", month: "short", year: "numeric" })}
                 </span>
               </div>
-              {isAdmin && selected.agente && (
+              {/* Quien lo trajo, que ya no es quien lo trabaja: `captado_por` no
+                  se pisa al traspasar, y por eso son dos líneas distintas. */}
+              {isAdmin && selected.captador && (
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Agente</span>
-                  <span className="text-foreground">{selected.agente.nombre}</span>
+                  <span className="text-muted-foreground">Captado por</span>
+                  <span className="text-foreground">{nombrePersona(selected.captador)}</span>
                 </div>
               )}
               {selected.captacion_id && (
@@ -710,10 +1176,14 @@ export default function LeadsPage() {
                 <label className="text-xs font-medium text-muted-foreground">Origen</label>
                 <select
                   name="fuente"
-                  defaultValue="Manual"
+                  // La primera del catálogo, no un "Manual" fijo: ese valor no
+                  // existe en `catalogos`, así que al guardar el lead el trigger
+                  // de la migración 012 lo daba de alta como fuente inactiva y
+                  // ensuciaba la lista con algo que nadie había creado.
+                  defaultValue={FUENTES[0]?.valor ?? ""}
                   className="w-full h-9 px-3 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 >
-                  {FUENTES.map((f) => <option key={f} value={f}>{f}</option>)}
+                  {FUENTES.map((f) => <option key={f.valor} value={f.valor}>{f.nombre}</option>)}
                 </select>
               </div>
 

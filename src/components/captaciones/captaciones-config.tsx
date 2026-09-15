@@ -609,16 +609,16 @@ export function CaptacionesConfig({
               </div>
             </section>
 
-            {/* Info técnica */}
-            <section className="rounded-lg border border-border bg-muted/20 p-4 space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Información técnica</p>
-              <div className="space-y-1.5 text-xs text-muted-foreground">
-                <p>Webhook respuestas WA:</p>
-                <code className="block bg-background border border-border rounded px-2 py-1 text-[10px] break-all">
-                  {process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/webhook/captacion-respuesta
-                </code>
-              </div>
-            </section>
+            {/* Info técnica
+                Aquí se enseñaba la URL de /api/webhook/captacion-respuesta como si
+                fuera el sitio donde configurar las respuestas de WhatsApp. Ese
+                endpoint era un segundo clasificador, por palabras clave, que
+                duplicaba el de IA y que no llamaba nadie: ni n8n ni el CRM. Su
+                propio comentario admitía que estuvo roto meses sin que se notara,
+                porque escribía un estado que ya no existía y no miraba el error.
+                Borrado. Las respuestas las clasifica el workflow
+                "5 · Captador — Clasificar Respuestas WhatsApp" de n8n, que es
+                quien recibe de Evolution a través del dispatcher. */}
           </div>
         ) : (
           /* ── CREATE VIEW: split left/right ── */

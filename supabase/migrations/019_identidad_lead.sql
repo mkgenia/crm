@@ -272,15 +272,16 @@ WHERE i.lead_id = d.id
   AND d.duplicado_de IS NOT NULL
   AND i.meta ->> 'migracion' IS DISTINCT FROM '019';
 
--- Las etiquetas pueden chocar (el bueno ya tiene la misma), así que se tiran
--- las repetidas y se mueven las que no lo son.
+-- Las etiquetas pueden chocar: la clave primaria es (lead_id, etiqueta_id), así
+-- que mover una que el bueno ya tiene rompería. Se tiran las repetidas primero
+-- y se mueven después las que no lo son.
 DELETE FROM public.lead_etiquetas le
 USING public.leads d
 WHERE le.lead_id = d.id
   AND d.duplicado_de IS NOT NULL
   AND EXISTS (
     SELECT 1 FROM public.lead_etiquetas otra
-    WHERE otra.lead_id = d.duplicado_de AND otra.etiqueta = le.etiqueta
+    WHERE otra.lead_id = d.duplicado_de AND otra.etiqueta_id = le.etiqueta_id
   );
 
 UPDATE public.lead_etiquetas le
@@ -292,16 +293,101 @@ WHERE le.lead_id = d.id AND d.duplicado_de IS NOT NULL;
 -- ------------------------------------------------------------
 -- 8. Que no vuelva a pasar
 --
--- Índice único PARCIAL: sólo sobre los contactos vivos. Los marcados como
--- duplicado quedan fuera, que es lo que permite conservarlos sin que estorben.
+-- AQUÍ NO VA UN ÍNDICE ÚNICO, Y ES DELIBERADO.
+--
+-- Lo natural sería rematar con `CREATE UNIQUE INDEX ... ON leads(telefono_norm)`.
+-- Pero hoy los cinco canales insertan DIRECTOS en la tabla vía PostgREST: el
+-- día que exista ese índice, el primer contacto repetido devuelve un 409, el
+-- nodo de n8n se marca como fallado y ESE LEAD SE PIERDE. Un duplicado se
+-- arregla; un lead perdido no vuelve.
+--
+-- Así que el duplicado se sigue aceptando, pero entra ya marcado y con su
+-- interacción puesta. Efecto práctico: desde hoy dejan de ensuciar, sin que
+-- ningún canal tenga que cambiar ni una línea.
+--
+-- El índice único va en la migración siguiente, cuando los cinco canales ya
+-- llamen a `ingresar_lead()` y un repetido deje de ser un error para pasar a
+-- ser lo que debe ser: una interacción sobre quien ya estaba.
 -- ------------------------------------------------------------
-CREATE UNIQUE INDEX IF NOT EXISTS leads_telefono_norm_uq
-  ON public.leads (telefono_norm)
-  WHERE duplicado_de IS NULL AND telefono_norm IS NOT NULL;
+CREATE OR REPLACE FUNCTION public.marcar_duplicado_lead()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+  v_bueno uuid;
+BEGIN
+  -- Sólo al dar de alta. Corregir el teléfono de un lead que ya existe no
+  -- debería convertirlo en duplicado de nadie por sorpresa.
+  IF TG_OP <> 'INSERT' OR NEW.duplicado_de IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.telefono_norm IS NOT NULL THEN
+    SELECT id INTO v_bueno FROM public.leads
+    WHERE telefono_norm = NEW.telefono_norm
+      AND duplicado_de IS NULL
+      AND id <> NEW.id
+    ORDER BY fecha_creacion ASC LIMIT 1;
+  END IF;
+
+  IF v_bueno IS NULL AND NEW.email_norm IS NOT NULL THEN
+    SELECT id INTO v_bueno FROM public.leads
+    WHERE email_norm = NEW.email_norm
+      AND duplicado_de IS NULL
+      AND id <> NEW.id
+    ORDER BY fecha_creacion ASC LIMIT 1;
+  END IF;
+
+  NEW.duplicado_de := v_bueno;
+  RETURN NEW;
+END;
+$fn$;
+
+-- Va DESPUÉS de leads_identidad (los triggers BEFORE corren por orden
+-- alfabético de nombre, y 'leads_identidad' < 'leads_marcar_duplicado'), que es
+-- lo que garantiza que telefono_norm ya esté calculado cuando éste mira.
+DROP TRIGGER IF EXISTS leads_marcar_duplicado ON public.leads;
+CREATE TRIGGER leads_marcar_duplicado
+  BEFORE INSERT ON public.leads
+  FOR EACH ROW EXECUTE FUNCTION public.marcar_duplicado_lead();
+
+
+-- Y la interacción sobre el contacto bueno, para que el agente vea "volvió a
+-- entrar" en la ficha en vez de no enterarse.
+CREATE OR REPLACE FUNCTION public.anotar_reentrada_lead()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $fn$
+BEGIN
+  IF NEW.duplicado_de IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  INSERT INTO public.interacciones
+    (lead_id, tipo, direccion, canal, resumen, detalle, automatica, ocurrida_en, meta)
+  VALUES (
+    NEW.duplicado_de, 'reentrada', 'entrante', NEW.canal,
+    'Volvió a entrar por ' || COALESCE(NULLIF(NEW.fuente, ''), 'origen desconocido'),
+    NULLIF(NEW.notas, ''), true, COALESCE(NEW.recibido_en, now()),
+    jsonb_build_object('lead_duplicado', NEW.id, 'automatico', true)
+  );
+
+  RETURN NULL;
+END;
+$fn$;
+
+DROP TRIGGER IF EXISTS leads_anotar_reentrada ON public.leads;
+CREATE TRIGGER leads_anotar_reentrada
+  AFTER INSERT ON public.leads
+  FOR EACH ROW EXECUTE FUNCTION public.anotar_reentrada_lead();
+
 
 CREATE UNIQUE INDEX IF NOT EXISTS leads_external_id_uq
   ON public.leads (fuente, external_id)
   WHERE external_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS leads_telefono_norm_idx
+  ON public.leads (telefono_norm) WHERE telefono_norm IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS leads_email_norm_idx
   ON public.leads (email_norm) WHERE email_norm IS NOT NULL;
@@ -468,11 +554,18 @@ COMMENT ON FUNCTION public.ingresar_lead IS
 --   SELECT count(*) AS duplicados FROM public.leads WHERE duplicado_de IS NOT NULL;
 --   SELECT count(*) AS reentradas FROM public.interacciones WHERE tipo = 'reentrada';
 --
---   -- Que el índice único hace su trabajo (debe fallar con duplicate key):
+--   -- Que el marcado automático funciona. Esto debe crear la fila, marcarla
+--   -- como duplicada Y dejar una interacción en el contacto bueno:
 --   --   INSERT INTO public.leads (nombre, telefono, fuente, estado)
 --   --   VALUES ('Duplicado de prueba', (SELECT telefono FROM public.leads
 --   --           WHERE duplicado_de IS NULL AND telefono_norm IS NOT NULL LIMIT 1),
---   --           'Web', 'Nuevo');
+--   --           'Web', 'Nuevo')
+--   --   RETURNING id, duplicado_de;   -- duplicado_de NO debe salir NULL
+--
+--   -- Y la puerta, que para el mismo teléfono debe devolver creado=false:
+--   --   SELECT public.ingresar_lead(
+--   --     (SELECT telefono FROM public.leads WHERE duplicado_de IS NULL LIMIT 1),
+--   --     'Web', p_nombre => 'Prueba puerta');
 --
 --   -- Y deshacer el marcado, si hiciera falta:
 --   --   UPDATE public.leads SET duplicado_de = NULL WHERE duplicado_de IS NOT NULL;
