@@ -7,8 +7,10 @@ import { cn } from "@/lib/utils"
 import { crearEntrada, eliminarEntrada, getAgenda, marcarCompletado } from "@/lib/actions/agenda"
 import {
   DIAS_SEMANA, TIPOS, claveDia, esHoy, horaDe, nombreMes, semanasDelMes, tipoDe,
-  type EntradaAgenda, type PersonaAgenda, type TipoEntrada,
+  tiposDesdeCatalogo,
+  type EntradaAgenda, type PersonaAgenda, type TipoAgenda, type TipoEntrada,
 } from "@/lib/agenda"
+import { claseColor, type Catalogo } from "@/lib/catalogos"
 
 /**
  * Agenda del equipo.
@@ -27,6 +29,7 @@ export function AgendaPanel({
   yoId,
   isAdmin,
   grande = false,
+  catalogos,
 }: {
   entradasIniciales: EntradaAgenda[]
   personas: PersonaAgenda[]
@@ -34,6 +37,14 @@ export function AgendaPanel({
   isAdmin: boolean
   /** En su propia pagina caben celdas mas altas y mas entradas a la vista. */
   grande?: boolean
+  /**
+   * Los catálogos, para sacar de ahí los tipos de entrada en vez de la lista
+   * de respaldo de `lib/agenda`. Es OPCIONAL a propósito: las pantallas que ya
+   * los tienen a mano —la portada del agente y /calendario— los pasan y así un
+   * tipo nuevo o renombrado desde /configuracion/catalogos aparece solo en el
+   * desplegable; las que no, siguen funcionando con el respaldo.
+   */
+  catalogos?: Catalogo[]
 }) {
   const [ancla, setAncla] = useState(() => new Date())
   const [entradas, setEntradas] = useState(entradasIniciales)
@@ -43,6 +54,12 @@ export function AgendaPanel({
   const [cargando, startTransition] = useTransition()
 
   const semanas = useMemo(() => semanasDelMes(ancla), [ancla])
+
+  // Los tipos que se ofrecen y con los que se pinta. Del catálogo si ha llegado.
+  const tipos = useMemo(
+    () => (catalogos ? tiposDesdeCatalogo(catalogos) : TIPOS),
+    [catalogos]
+  )
 
   // Al cambiar de mes se piden sus entradas. El primer mes ya viene del servidor.
   const [mesCargado, setMesCargado] = useState(() => claveDia(new Date()).slice(0, 7))
@@ -187,7 +204,7 @@ export function AgendaPanel({
                           key={i.id}
                           className={cn(
                             "h-1 w-1 rounded-full",
-                            tipoDe(i.tipo).punto,
+                            tipoDe(i.tipo, tipos).punto,
                             i.completado && "opacity-30",
                           )}
                         />
@@ -235,18 +252,21 @@ export function AgendaPanel({
               personas={personas}
               yoId={yoId}
               isAdmin={isAdmin}
+              tipos={tipos}
               onHecho={async () => { setAbriendo(false); await recargar() }}
             />
           )}
 
           <div className="flex-1 space-y-1.5 overflow-y-auto scrollbar-thin min-h-0 pr-0.5">
+            {/* Antes decía "Ni citas ni recordatorios", que era enumerar a mano
+                los tipos que había en 2025 y dejaba fuera la visita. */}
             {delDia.length === 0 && !abriendo && (
               <p className="text-xs text-muted-foreground/70 py-6 text-center">
-                Ni citas ni recordatorios para este día.
+                No hay nada apuntado para este día.
               </p>
             )}
             {delDia.map((e) => {
-              const t = tipoDe(e.tipo)
+              const t = tipoDe(e.tipo, tipos)
               const mio = e.agente_id === yoId
               return (
                 <div
@@ -281,12 +301,19 @@ export function AgendaPanel({
                       <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{e.descripcion}</p>
                     )}
                     {/* De quién es y quién la puso: sin esto, a un agente le
-                        aparecen visitas sin saber de dónde salen. */}
+                        aparecen visitas sin saber de dónde salen.
+
+                        El tipo se dice SIEMPRE, no sólo cuando no hay quien la
+                        apuntó. Antes eran excluyentes, y con la visita como
+                        tipo propio eso se notaba justo en el caso que pidió el
+                        dueño: el administrador le pone una visita a un agente y
+                        el agente leía "apuntado por Admin" sin más, con el tipo
+                        reducido a un punto de color de un milímetro. */}
                     <p className="text-[10px] text-muted-foreground/70 mt-1">
                       {isAdmin && !mio && <>Para {nombreDe(e.agente_id)} · </>}
+                      {t.etiqueta}
                       {e.creado_por && e.creado_por !== e.agente_id
-                        ? `apuntado por ${nombreDe(e.creado_por)}`
-                        : t.etiqueta}
+                        && ` · apuntado por ${nombreDe(e.creado_por)}`}
                     </p>
                   </div>
 
@@ -308,17 +335,22 @@ export function AgendaPanel({
 }
 
 function FormularioEntrada({
-  dia, personas, yoId, isAdmin, onHecho,
+  dia, personas, yoId, isAdmin, tipos, onHecho,
 }: {
   dia: string
   personas: PersonaAgenda[]
   yoId: string
   isAdmin: boolean
+  /** Los del catálogo, en su orden. Nunca llega vacío: ver `tiposDesdeCatalogo`. */
+  tipos: TipoAgenda[]
   onHecho: () => void
 }) {
   const [titulo, setTitulo] = useState("")
   const [descripcion, setDescripcion] = useState("")
-  const [tipo, setTipo] = useState<TipoEntrada>("cita")
+  // Arranca en el primero del catálogo (hoy "Cita", orden 10) y no en el
+  // literal "cita": si mañana el dueño archiva ese valor, el formulario se
+  // abriría con un tipo que la base de datos ya no acepta y no dejaría guardar.
+  const [tipo, setTipo] = useState<TipoEntrada>(() => tipos[0].valor)
   const [hora, setHora] = useState("10:00")
   const [todoElDia, setTodoElDia] = useState(false)
   const [para, setPara] = useState(yoId)
@@ -352,18 +384,28 @@ function FormularioEntrada({
         className="w-full h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:border-violet-500/60"
       />
 
-      <div className="flex gap-1.5">
-        {TIPOS.map((t) => (
+      {/* Rejilla de dos columnas y no una fila de botones estirados: con la
+          visita ya son cuatro tipos, y cuatro en fila dentro de la columna
+          estrecha de la portada dejan "Recordatorio" en dos líneas o cortado.
+          Dos columnas aguantan los cuatro de hoy y los que añada el dueño
+          desde /configuracion/catalogos sin rehacer nada.
+
+          El elegido se pinta con SU color, no en violeta para todos: el violeta
+          era el de la cita, así que elegir "Visita" encendía un recuadro
+          violeta encima de un punto verde. `claseColor` trae las clases de un
+          mapa escrito entero —Tailwind purga lo que se arma con plantillas—. */}
+      <div className="grid grid-cols-2 gap-1.5">
+        {tipos.map((t) => (
           <button
             key={t.valor}
             onClick={() => setTipo(t.valor)}
             className={cn(
-              "flex-1 h-7 rounded-md border text-[11px] flex items-center justify-center gap-1 transition-colors",
-              tipo === t.valor ? "border-violet-500/50 bg-violet-500/10" : "border-border hover:bg-muted/60",
+              "h-7 rounded-md border text-[11px] flex items-center justify-center gap-1 transition-colors",
+              tipo === t.valor ? claseColor(t.color) : "border-border hover:bg-muted/60",
             )}
           >
-            <span className={cn("h-1.5 w-1.5 rounded-full", t.punto)} />
-            {t.etiqueta}
+            <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", t.punto)} />
+            <span className="truncate">{t.etiqueta}</span>
           </button>
         ))}
       </div>

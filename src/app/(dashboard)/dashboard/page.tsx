@@ -20,6 +20,27 @@ export const metadata = { title: "Inicio — mkgenia" }
 const TOPE_DIA = 40
 
 /**
+ * LAS FAMILIAS DE `fuente`, que usan LAS DOS portadas.
+ *
+ * Los nombres de `fuente` los escriben workflows distintos y no hay CHECK que
+ * los sujete, así que se agrupan por familias y no por igualdad exacta: hoy
+ * conviven 'Captaciones', 'Web' y 'Propiedades', y mañana aparecerá otro.
+ *
+ * Estaba declarada dentro de `getAdminData` y se sube aquí porque la portada
+ * del agente pinta ahora dos de estas familias —redes sociales y web— y tienen
+ * que ser LAS MISMAS que las del administrador: dos listas separadas se van
+ * separando sin que nadie se entere, y el día que alguien añada 'TikTok' a una
+ * de las dos, los dos números de la misma persona dejan de cuadrar sin que nada
+ * falle.
+ */
+const FAMILIAS_FUENTE: Record<string, string[]> = {
+  web: ["Web", "Propiedades", "Formulario", "Landing"],
+  scraper: ["Captaciones", "Captacion", "Captación"],
+  rrss: ["Instagram", "Facebook", "RRSS", "Redes"],
+  qr: ["QR", "Galeria QR", "Trasteros WhatsApp"],
+}
+
+/**
  * Fechas y relativos SE CALCULAN AQUÍ, en el servidor, no en el componente.
  *
  * "hace 3 h" sale de Date.now(). El servidor pinta en UTC y el navegador hidrata
@@ -241,18 +262,11 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
   const capsActivas = allCaps.filter((c) => c.activo)
   const interesadosTotal = capsActivas.filter((c) => c.senal != null).length
 
-  // De dónde entra cada lead. Los nombres de `fuente` los escriben workflows
-  // distintos y no hay CHECK que los sujete, así que se agrupan por familias y no
-  // por igualdad exacta: hoy conviven 'Captaciones', 'Web' y 'Propiedades', y
-  // mañana aparecerá otro. Lo que no encaje en ninguna familia cae en "otros" en
-  // vez de desaparecer de la suma.
-  const FAMILIAS: Record<string, string[]> = {
-    web: ["Web", "Propiedades", "Formulario", "Landing"],
-    scraper: ["Captaciones", "Captacion", "Captación"],
-    rrss: ["Instagram", "Facebook", "RRSS", "Redes"],
-    qr: ["QR", "Galeria QR", "Trasteros WhatsApp"],
-  }
-  const conocidas = Object.values(FAMILIAS).flat()
+  // De dónde entra cada lead. Las familias están arriba, en `FAMILIAS_FUENTE`,
+  // porque la portada del agente pinta dos de ellas y tienen que ser las
+  // mismas. Lo que no encaje en ninguna familia cae en "otros" en vez de
+  // desaparecer de la suma.
+  const conocidas = Object.values(FAMILIAS_FUENTE).flat()
   const otros = allLeads.filter((l) => !conocidas.includes(l.fuente ?? "")).length
 
 
@@ -291,7 +305,7 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
     serie: serieDe(filas),
   })
   const familia = (fam: string) =>
-    porPeriodo(allLeads.filter((l) => FAMILIAS[fam].includes(l.fuente ?? "")))
+    porPeriodo(allLeads.filter((l) => FAMILIAS_FUENTE[fam].includes(l.fuente ?? "")))
 
   // Un propietario cuenta UNA vez, el día que se interesó por primera vez.
   //
@@ -434,22 +448,12 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
 
   const estadosLead = opcionesDe(catalogos, "estado_lead").map((c) => c.valor)
 
-  // Las fuentes salen del catálogo, una por una y con su nombre y su color.
-  //
-  // NO se copian aquí las FAMILIAS que usa el administrador (205-210): son una
-  // lista escrita a mano, dejan fuera dos de las ocho fuentes —'WhatsApp' y
-  // 'Solicitud valoración' caen en "otros" y pierden hasta el nombre— y meten
-  // 'Trasteros WhatsApp' dentro de 'qr'. El dueño pidió ver de dónde vienen sus
-  // leads nombrándolos uno a uno, que es exactamente lo que ya hay en la 012.
-  const fuentes = opcionesDe(catalogos, "fuente")
-
   /**
    * La fuente del lead ESPEJO de una captación.
    *
-   * Se escribe aquí una sola vez porque la usan dos cosas que tienen que decir
-   * lo mismo: el filtro de `misRepartidos()` y la lista de tarjetas. No sale del
-   * catálogo a propósito —es un valor de sistema que nombran el trigger de
-   * reparto (024:178) y la vista `v_mi_dia` (024:317)—.
+   * Lo usa el filtro de `misRepartidos()`. No sale del catálogo a propósito —es
+   * un valor de sistema que nombran el trigger de reparto (024:178) y la vista
+   * `v_mi_dia` (024:317)—.
    *
    * ARREGLADO EN REVISIÓN: aquí ponía "igual que `getAgentData` ya nombra
    * 'Pendiente' y 'Enviado' más abajo", y esos dos literales se han ido en este
@@ -457,23 +461,6 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
    * buscar algo que ya no está hace dudar del resto del comentario.
    */
   const FUENTE_ESPEJO = "Captaciones"
-
-  /**
-   * Las fuentes que SÍ pueden tener tarjeta.
-   *
-   * ARREGLADO EN REVISIÓN: antes se pintaba una tarjeta por cada fuente del
-   * catálogo, `Captaciones` incluida. Pero `misRepartidos()` excluye justo esa
-   * fuente, así que su contador vale 0 pase lo que pase: a un agente con 140
-   * captaciones se le leía "Todavía no te ha llegado nada por Captador
-   * Idealista", que es exactamente lo contrario de la verdad. Aquí no sale
-   * porque va aparte —lo dice el subtítulo del bloque, con su enlace a
-   * /captaciones—, no porque esté vacía. Dos consultas menos.
-   *
-   * Y esto pesa MÁS desde que los ceros se ven: aquel 0 se recogía en una frase
-   * al pie, y hoy sería una tarjeta apagada de pleno derecho, con su icono de
-   * radar, jurando que el captador no ha traído nada en la vida.
-   */
-  const fuentesVisibles = fuentes.filter((f) => f.valor !== FUENTE_ESPEJO)
 
   const hace7 = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
@@ -548,7 +535,29 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   const inicioManana = inicioDiaMadrid(ahora, 1).toISOString()
   const finSemana = inicioDiaMadrid(ahora, 8).toISOString()
 
-  const [totalesCaps, base, pipelineRes, origenesRes] = await Promise.all([
+  /**
+   * LAS DEMANDAS, QUE NO SON DE NADIE EN PARTICULAR.
+   *
+   * La tabla `demandas` NO TIENE COLUMNA DE AGENTE (id, propiedad_id, nombre,
+   * telefono, email, fuente, mensaje, estado, notas, wa_jid, datos_
+   * cualificacion, visto, fecha_creacion): una demanda es de un PISO, no de una
+   * persona. O sea que este contador da lo mismo —hoy 1.825— para los seis
+   * agentes y para el administrador, y por eso la tarjeta que lo pinta dice "de
+   * toda la empresa" en la línea de debajo del número. Filtrarlo por agente no
+   * es que dé cero: es que no hay por dónde.
+   *
+   * Sin filtro por agente, son los mismos dos números que ya cuenta el
+   * administrador, contados aquí en la base en vez de trayéndose las 1.825
+   * filas como hace él.
+   */
+  const demandas = () =>
+    supabase.from("demandas").select("id", { count: "exact", head: true })
+
+  // CUATRO huecos, contados uno a uno: totalesCaps · base · pipelineRes ·
+  // seisRes. Este reparto es POR POSICIÓN: si se añade una consulta hay que
+  // añadir también su nombre aquí, o cada contador empieza a leer el valor del
+  // de al lado y TypeScript no dice nada.
+  const [totalesCaps, base, pipelineRes, seisRes] = await Promise.all([
     // Las captaciones activas y su desglose por estado de WhatsApp ya se cuentan
     // en la base aquí dentro, con la lista de estados salida del catálogo. Para
     // un agente filtra por `agente_id` solo.
@@ -571,10 +580,11 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       // "la tasa de respuesta saldría inflada", y esa tarjeta ya no existe —se
       // fue con las tres que quitó el dueño—. Quien viniera a limpiar los
       // restos leería que este contador alimenta algo borrado y se lo llevaría
-      // por delante, y con él el hueco "Sin escribir" del bloque de WhatsApp
-      // (AgentDashboard.tsx:406), que es quien lo lee HOY: sin él el desglose
-      // suma menos que el titular "Mis captaciones" y esas filas desaparecen de
-      // la pantalla sin dejar rastro.
+      // por delante, y con él el hueco "Sin escribir" del bloque "Estado
+      // WhatsApp · mis captaciones", que es quien lo lee HOY: sin él el
+      // desglose suma menos que el titular y esas filas desaparecen de la
+      // pantalla sin dejar rastro. (Se nombra el bloque y no su línea: la
+      // portada del agente se acaba de reescribir entera y los números bailan.)
       supabase.from("captaciones").select("id", { count: "exact", head: true })
         .eq("agente_id", userId).eq("activo", true).is("estado_whatsapp", null),
       supabase.from("captaciones")
@@ -629,55 +639,53 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
     // Una consulta por estado del catálogo. Son una decena de contadores
     // diminutos en paralelo, no una fila por lead.
     Promise.all(estadosLead.map((e) => misLeads().eq("estado", e))),
-    // DE DÓNDE VIENEN SUS LEADS. Dos contadores por cada fuente con tarjeta
-    // (hoy siete: las ocho activas del catálogo menos la del espejo), más el
-    // total del bloque y los dos huecos.
+    // LO QUE LE FALTA A LAS SEIS TARJETAS: seis contadores diminutos.
+    //
+    // AQUÍ HABÍA DIECISIETE, dos por cada valor del catálogo `fuente` más el
+    // total del bloque y los dos huecos, que alimentaban una rejilla de siete
+    // tarjetas —cinco a cero— que el dueño ha mandado quitar. Las dos que se
+    // quedan no preguntan por un valor sino por una FAMILIA (`FAMILIAS_FUENTE`,
+    // arriba): Instagram y Facebook son la misma tarjeta, y el nombre de la
+    // fuente lo escriben workflows distintos sin nada que los sujete.
     //
     // Nada de `.length` sobre filas traídas: son todos { count:'exact',
     // head:true }, así que el corte silencioso de PostgREST a 1.000 filas con
-    // 200 OK no puede tocarlos. Son 17 contadores diminutos en paralelo. Si
-    // algún día pesan, la salida es una RPC `mis_leads_por_fuente(uuid)` con
-    // GROUP BY: el contrato de `AgentData.origenes` no cambiaría.
+    // 200 OK no puede tocarlos. Y cada uno falla por su cuenta: un null es una
+    // tarjeta en ámbar, nunca un cero.
     Promise.all([
-      misRepartidos(),                                  // [0] total del bloque
-      misRepartidos().is("fuente", null),               // [1] sin fuente anotada
-      // [2] los que llevan una fuente que no está ACTIVA en el catálogo.
-      // Cada valor va entrecomillado: 'Solicitud valoración' y 'Trasteros
-      // WhatsApp' llevan espacio y 'Captación' lleva tilde; sin comillas el
-      // filtro se rompe o cuenta otra cosa. Y si el catálogo llegara vacío,
-      // `in ()` es sintaxis inválida: se devuelve null, no 0.
-      fuentes.length
-        ? misRepartidos().not("fuente", "is", null)
-            .not("fuente", "in", `(${fuentes.map((f) => `"${f.valor}"`).join(",")})`)
-        : Promise.resolve({ count: null, error: true }),
-      // [3+] pares (total, semana) en el orden de `fuentesVisibles`.
+      // [0][1] REDES SOCIALES: total y lo repartido en los últimos siete días.
       // La semana se mide con `asignado_en`, no con `fecha_creacion`: un lead
       // de marzo que te reparten hoy es nuevo PARA TI. Los repartidos antes de
       // la 013 tienen `asignado_en` a null y no cuentan como recientes, que es
-      // lo correcto. El espejo de captación también recibe `asignado_en` (026),
-      // pero aquí ya está excluido.
-      //
-      // OJO: `fuentesVisibles`, no `fuentes`. La lista de arriba (el `in` de
-      // [2]) sí lleva el catálogo ENTERO: ahí se pregunta qué valores están
-      // catalogados, y `Captaciones` lo está.
-      ...fuentesVisibles.flatMap((f) => [
-        misRepartidos().eq("fuente", f.valor),
-        misRepartidos().eq("fuente", f.valor).gte("asignado_en", hace7),
-      ]),
+      // lo correcto.
+      misRepartidos().in("fuente", FAMILIAS_FUENTE.rrss),
+      misRepartidos().in("fuente", FAMILIAS_FUENTE.rrss).gte("asignado_en", hace7),
+      // [2][3] WEB, lo mismo.
+      misRepartidos().in("fuente", FAMILIAS_FUENTE.web),
+      misRepartidos().in("fuente", FAMILIAS_FUENTE.web).gte("asignado_en", hace7),
+      // [4][5] LAS DEMANDAS DE LA EMPRESA. Sin filtro de agente porque la tabla
+      // no tiene esa columna (ver `demandas`). `visto` a false y no "distinto de
+      // true": un `visto` nulo no es una demanda sin ver, y así cuenta lo mismo
+      // que la portada del administrador.
+      demandas(),
+      demandas().eq("visto", false),
     ]),
   ])
 
-  // OJO: el `recientesRes` que sigue existiendo en este fichero (se pide en la
-  // línea 94 y se mapea en la 361) es el del ADMINISTRADOR, que sí conserva su
-  // lista de últimos leads de TODO el equipo y que AdminDashboard sigue pintando
-  // (AdminDashboard.tsx:318). Son dos consultas distintas con el mismo nombre en
-  // dos funciones distintas; aquí sólo se ha quitado la del agente. Se nombran
-  // las líneas a propósito: "unas líneas más arriba" mandaba a buscar cerca y
-  // está a casi quinientas, así que el siguiente que limpie por aquí se lo
-  // llevaría por delante creyendo que es un resto del borrado.
+  // OJO: el `recientesRes` que sigue existiendo en este fichero (el del
+  // ADMINISTRADOR) conserva su lista de últimos leads de TODO el equipo y
+  // AdminDashboard la sigue pintando. Son dos consultas distintas con el mismo
+  // nombre en dos funciones distintas; aquí sólo se quitó la del agente. Se
+  // nombra la función y no el número de línea a propósito: este fichero se
+  // mueve entero a cada cambio y un número caduca al día siguiente.
   const [capsActivasRes, capsMesRes, capsSinEstadoRes, agendaRes,
     diaRes, diaTotalRes, diaVencidosRes, diaSinAtenderRes,
     tareasVencidasRes, tareasHoyRes, tareasSemanaRes] = base
+  // SEIS contadores, contados uno a uno. El reparto es POR POSICIÓN: si se
+  // añade o se quita una consulta hay que mover también su hueco aquí, o cada
+  // uno empieza a leer el del al lado y TypeScript no lo canta.
+  const [rrssTotalRes, rrssSemanaRes, webTotalRes, webSemanaRes,
+    demandasTotalRes, demandasSinVerRes] = seisRes
 
   type FilaVista = {
     ambito: string
@@ -757,7 +765,15 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   // Lo que NO se ha tocado: `misLeads()` sigue viva —la usan el pipeline y
   // `misRepartidos()`—, `sinEstado` sigue contándose porque es el hueco "Sin
   // escribir" del desglose de WhatsApp, y el `interesadosTotal` del
-  // ADMINISTRADOR (línea 198) es otra variable en otra función y sigue en pie.
+  // ADMINISTRADOR es otra variable en otra función y sigue en pie.
+  //
+  // Y EN EL CAMBIO A SEIS TARJETAS se han ido también: los diecisiete
+  // contadores por fuente del catálogo, la consulta `conDia()` con sus dos
+  // restas —`visitas`, que alimentaba la tarjeta "Visita por programar"— y las
+  // constantes que sólo usaban ellas (`TIPOS_CON_DIA`, `TOPE_CON_DIA`,
+  // `ESTADO_INTERESADO`) y la lista `fuentesVisibles`. En su sitio quedan seis
+  // contadores. `capsMesRes` se ha quedado: es el "N este mes" de la tarjeta
+  // del scraper.
   const capsActivas = cuenta(capsActivasRes)
   const sinEstado = cuenta(capsSinEstadoRes)
 
@@ -787,20 +803,17 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       hoy: cuenta(tareasHoyRes),
       semana: cuenta(tareasSemanaRes),
     },
-    // Nombre y color se resuelven AQUÍ, en el servidor, igual que hace el
-    // administrador con `senal.porValor` (page.tsx:321): así el componente no
-    // necesita recorrer el catálogo entero para pintar la rejilla.
-    origenes: {
-      total: cuenta(origenesRes[0]),
-      sinFuente: cuenta(origenesRes[1]),
-      fueraDeCatalogo: cuenta(origenesRes[2]),
-      porFuente: fuentesVisibles.map((f, i) => ({
-        valor: f.valor,
-        nombre: f.nombre,
-        color: f.color,
-        total: cuenta(origenesRes[3 + i * 2]),
-        semana: cuenta(origenesRes[3 + i * 2 + 1]),
-      })),
+    // Las dos familias que tienen tarjeta, cada contador por su cuenta: una
+    // semana que no se ha podido contar no tiene por qué tumbar el total, que
+    // es el número grande.
+    canales: {
+      rrss: { total: cuenta(rrssTotalRes), semana: cuenta(rrssSemanaRes) },
+      web: { total: cuenta(webTotalRes), semana: cuenta(webSemanaRes) },
+    },
+    // De TODA la empresa: la tabla no tiene agente (ver `demandas`, arriba).
+    demandasEmpresa: {
+      total: cuenta(demandasTotalRes),
+      sinVer: cuenta(demandasSinVerRes),
     },
     pipeline: estadosLead.map((e, i) => ({ estado: e, count: cuenta(pipelineRes[i]) })),
     agenda: (agendaRes.data ?? []).map((a) => ({

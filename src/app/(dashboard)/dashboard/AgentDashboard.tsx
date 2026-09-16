@@ -2,13 +2,17 @@
 
 import Link from "next/link"
 import {
-  Building2, UserCircle, MessageSquare, CalendarClock, CalendarDays,
-  Phone, AlertTriangle, Home, Target, Radar, Share2, Globe, QrCode, Inbox,
+  Building2, UserCircle, CalendarClock, CalendarDays,
+  Phone, AlertTriangle, Home, Target, Radar, Share2, Globe, Inbox, Heart,
 } from "lucide-react"
 import { AgendaPanel } from "@/components/agenda/agenda-panel"
 import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
 import { cn } from "@/lib/utils"
 import { nombreDe, colorDe, claseColor, clasePunto, type Catalogo } from "@/lib/catalogos"
+// LA MISMA TARJETA QUE PINTA EL ADMINISTRADOR. Vivía dentro de
+// `AdminDashboard.tsx` y se ha sacado a un fichero compartido para poder
+// enseñarle al agente sus seis, que son las seis de él.
+import { OrigenCard } from "@/components/dashboard/origen-card"
 
 /**
  * La portada del agente.
@@ -69,11 +73,12 @@ const VISIBLES = 8
  * sistema que escriben el trigger de reparto (024:178) y la propia vista
  * (033:69 y 033:76), igual que `AMBITOS` de aquí arriba nombra los tres ámbitos
  * que une la vista. `page.tsx` lo tiene declarado con el mismo nombre y por el
- * mismo motivo (page.tsx:459).
+ * mismo motivo, dentro de `getAgentData`.
  *
- * ARREGLADO EN REVISIÓN: aquí ponía "(408-411)", que en `page.tsx` cae dentro
- * del mapeo de los leads recientes del ADMINISTRADOR. Quien fuera a comprobar
- * que las dos declaraciones dicen lo mismo aterrizaba en otra función.
+ * ARREGLADO EN REVISIÓN: aquí ponía un número de línea de `page.tsx`, y ese
+ * fichero se ha vuelto a mover entero con las seis tarjetas. Se nombra la
+ * función, que no se desplaza sola; el número mandaba a otra parte al día
+ * siguiente —la primera vez cayó en los leads recientes del ADMINISTRADOR—.
  */
 const FUENTE_ESPEJO = "Captaciones"
 
@@ -120,20 +125,33 @@ export interface AgentData {
     semana: number | null
   }
   /**
-   * De dónde vienen sus leads. Una entrada por valor ACTIVO del catálogo
-   * `fuente`, con nombre y color ya resueltos en el servidor.
+   * SUS LEADS POR FAMILIA DE FUENTE, que son dos de las seis tarjetas.
    *
-   * `total` es el denominador del PROPIO bloque: aquí no entran los leads
-   * espejo de sus captaciones.
+   * No hay una entrada por cada valor del catálogo: hay DOS, las dos que pidió
+   * el dueño. Los nombres de `fuente` los escriben workflows distintos y no hay
+   * CHECK que los sujete, así que cada tarjeta agrupa una familia de valores
+   * (page.tsx) y no un valor suelto: Instagram y Facebook son la misma tarjeta.
+   *
+   * `total` es lo repartido desde el principio y `semana`, lo que le han
+   * repartido en los últimos siete días. Cada uno falla por su cuenta y un null
+   * es un contador roto, nunca un cero.
    */
-  origenes: {
+  canales: {
+    rrss: { total: number | null; semana: number | null }
+    web: { total: number | null; semana: number | null }
+  }
+  /**
+   * LAS DEMANDAS, QUE SON DE LA EMPRESA Y NO SUYAS.
+   *
+   * La tabla `demandas` no tiene columna de agente: una demanda es de un PISO,
+   * no de una persona. O sea que este número es el MISMO para los seis agentes
+   * y para el administrador, y la tarjeta tiene que decirlo con palabras (ver
+   * dónde se pinta). Se llama `demandasEmpresa` y no `demandas` justamente para
+   * que nadie las confunda con algo suyo al leer este contrato.
+   */
+  demandasEmpresa: {
     total: number | null
-    sinFuente: number | null
-    fueraDeCatalogo: number | null
-    porFuente: Array<{
-      valor: string; nombre: string; color: string | null
-      total: number | null; semana: number | null
-    }>
+    sinVer: number | null
   }
   pipeline: Array<{ estado: string; count: number | null }>
   agenda: Array<{
@@ -194,7 +212,8 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
       : null,
   ].filter((t): t is string => t != null)
 
-  // LA TARJETA NUEVA: SUS TAREAS DEL CALENDARIO.
+  // LA TARJETA DEL CALENDARIO, que era "Mis tareas" de la fila de arriba y hoy
+  // es la quinta de las seis.
   //
   // El número grande es lo ACCIONABLE: lo vencido más lo de hoy. No el total
   // histórico de la agenda, que a los seis meses son cientos de tareas hechas y
@@ -203,9 +222,9 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   // justo la que se olvida. Es la misma cuenta que hace el comercial a las
   // nueve de la mañana: qué tengo que despachar antes de irme a casa.
   //
-  // Si CUALQUIERA de los dos sumandos falló, el total es null y la tarjeta
-  // pinta "—" con "no se ha podido contar": media suma no es un número
-  // aproximado, es un número inventado.
+  // Si CUALQUIERA de los dos sumandos falló, el total es null y la tarjeta se
+  // pinta entera como fallo ("No se ha podido contar", en ámbar y sin número):
+  // media suma no es un número aproximado, es un número inventado.
   const { vencidas, hoy, semana } = data.tareas
   const tareasAhora = vencidas == null || hoy == null ? null : vencidas + hoy
 
@@ -216,7 +235,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   // portada llena de números, se lee como que algo no ha cargado.
   const subTareas =
     vencidas == null || hoy == null
-      ? "" // no llega a pintarse: KpiCard dice "no se ha podido contar"
+      ? "" // no llega a pintarse: la tarjeta dice "No se ha podido contar"
       : vencidas > 0
         ? `${vencidas} ${plural(vencidas, "vencida", "vencidas")} · ${hoy} para hoy`
         : hoy > 0
@@ -309,43 +328,120 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
         )}
       </section>
 
-      {/* LAS TARJETAS DE ARRIBA. Eran cuatro y ahora son dos: se han quitado
-          "Mis leads", "Interesados" y "Tasa respuesta" —los tres los pidió
-          quitar el dueño— y ha entrado la cuenta de sus tareas del calendario.
+      {/* LAS SEIS TARJETAS, LAS MISMAS QUE TIENE EL ADMINISTRADOR.
+          Las pidió así el dueño, una por una: redes sociales, web, scraper,
+          demandas, calendario y matches. Seis y ni una más.
 
-          LA REJILLA SIGUE SIENDO `grid-cols-2 lg:grid-cols-4`, la misma que la
-          de los orígenes de aquí abajo, y las dos tarjetas ocupan las dos
-          primeras casillas. No es un descuido que la mitad derecha quede
-          libre en pantalla ancha: es la alternativa a que cada tarjeta se
-          coma media fila.
+          AQUÍ HABÍA DIEZ COSAS: dos tarjetas arriba ("Mis captaciones" y "Mis
+          tareas") y debajo una rejilla con UNA TARJETA POR CADA VALOR del
+          catálogo `fuente`, cinco de ellas a cero. Las dos de arriba no se han
+          perdido: son la de scraper —sus captaciones— y la del calendario, que
+          ahora están DENTRO de las seis. Dejarlas también arriba sería contar
+          lo mismo dos veces a dos centímetros.
 
-          Con `lg:grid-cols-2` estas dos tarjetas medirían el DOBLE que las de
-          los orígenes que tienen justo debajo —mismo tipo de tarjeta, mismo
-          número grande, dos anchos distintos— y el 3xl del número se quedaría
-          flotando en medio de una caja de medio metro. Compartiendo las
-          columnas con la fila de abajo, cada tarjeta cae exactamente encima de
-          su vecina y las dos filas se leen como una sola cuadrícula.
+          MISMO COMPONENTE Y MISMA REJILLA que la portada del administrador
+          (`grid-cols-2 lg:grid-cols-3`): seis tarjetas son dos filas de tres
+          exactas, sin huecos que rellenar.
 
-          El `gap` sube de 3 a 4 por lo mismo: para que sea el de abajo. */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          href="/captaciones"
-          icon={Building2} label="Mis captaciones" value={data.captaciones}
-          sub={data.captacionesEsteMes != null ? `${data.captacionesEsteMes} este mes` : "activas"} holo
-        />
-        {/* "Mis tareas" y no "Tareas del calendario": a un cuarto de fila esa
-            etiqueta se parte en dos líneas y empuja el número hacia abajo, con
-            lo que los dos números de la fila dejan de estar a la misma altura.
-            Lo que la etiqueta no dice lo dicen el icono, la línea de abajo y el
-            enlace, que va al calendario. */}
-        <KpiCard
-          href="/calendario"
-          icon={CalendarDays} label="Mis tareas" value={tareasAhora}
-          sub={subTareas}
-        />
-      </div>
-
-      <SeccionOrigenes data={data} />
+          SIN SELECTOR DE PERIODO Y SIN BARRAS, que es la única diferencia con
+          la de él y es a propósito. El administrador mueve miles de leads y sus
+          catorce barras contestan a "¿este canal sigue vivo?"; un agente mueve
+          dos leads por semana, y catorce barras casi planas no dicen nada —
+          dicen que no trabaja. Además tres de estas seis no tienen barras
+          posibles: el calendario mira hacia delante, las demandas son de la
+          empresa y matches todavía no existe. Así que las seis enseñan el
+          MISMO tipo de número —lo acumulado— y lo de esta semana va en palabras
+          en la línea de abajo, que es donde se lee sin interpretar un dibujo. */}
+      <section className="flex flex-col gap-4">
+        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+          De un vistazo
+        </h2>
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+          {/* Una familia de valores por tarjeta, no un valor: Instagram y
+              Facebook son la misma pregunta. El enlace va a /leads sin filtro
+              justamente por eso —`?fuente=` sólo admite UN valor del catálogo—. */}
+          <OrigenCard
+            href="/leads" icon={Share2} label="Redes sociales"
+            datos={data.canales.rrss.total ?? 0}
+            fallo={data.canales.rrss.total == null}
+            tono="rosa"
+            extra={textoCanal(data.canales.rrss, "todavía no te han repartido ninguno")}
+          />
+          <OrigenCard
+            href="/leads" icon={Globe} label="Web"
+            datos={data.canales.web.total ?? 0}
+            fallo={data.canales.web.total == null}
+            tono="cyan"
+            extra={textoCanal(data.canales.web, "todavía no te han repartido ninguno")}
+          />
+          {/* SUS CAPTACIONES, no "el scraper con señal" del administrador. Es
+              el cambio que pidió el dueño: al agente no le sirve saber cuánta
+              gente ha dicho que sí en toda la empresa, le sirve saber cuántas
+              fichas suyas tiene que trabajar. Se llama "Scraper" porque es de
+              donde salen y porque así la nombra él. */}
+          <OrigenCard
+            href="/captaciones" icon={Radar} label="Scraper · mis captaciones"
+            datos={data.captaciones ?? 0}
+            fallo={data.captaciones == null}
+            tono="violeta"
+            extra={
+              data.captaciones === 0
+                ? "todavía no te han asignado ninguna"
+                : data.captacionesEsteMes == null
+                  ? "— este mes"
+                  : data.captacionesEsteMes > 0
+                    ? `${data.captacionesEsteMes} este mes`
+                    : "ninguna nueva este mes"
+            }
+          />
+          {/* LAS DEMANDAS SON DE LA EMPRESA Y LA TARJETA LO DICE SIEMPRE.
+              La tabla `demandas` no tiene columna de agente —una demanda es de
+              un piso, no de una persona—, así que este número es idéntico para
+              los seis agentes. El aviso va en la línea de abajo y no sólo en la
+              etiqueta a propósito: la etiqueta se corta con puntos suspensivos
+              en el móvil (dos tarjetas por fila) y la línea de abajo se parte en
+              dos, que es lo que se quiere cuando lo que no puede perderse es
+              justo esa advertencia. */}
+          <OrigenCard
+            href="/demandas" icon={Inbox} label="Demandas"
+            datos={data.demandasEmpresa.total ?? 0}
+            fallo={data.demandasEmpresa.total == null}
+            tono="verde"
+            extra={
+              data.demandasEmpresa.total === 0
+                ? "de toda la empresa · todavía no ha entrado ninguna"
+                : data.demandasEmpresa.sinVer == null
+                  // El "—" y no callarse: el contador de las que faltan por ver
+                  // ha fallado, y "todas vistas" sería inventárselo.
+                  ? "de toda la empresa · — sin ver"
+                  : data.demandasEmpresa.sinVer > 0
+                    ? `de toda la empresa · ${data.demandasEmpresa.sinVer} sin ver`
+                    : "de toda la empresa · todas vistas"
+            }
+          />
+          {/* EL CALENDARIO. El número es lo ACCIONABLE —lo vencido más lo de
+              hoy—, que es la misma cuenta que hacía la tarjeta "Mis tareas" que
+              acaba de desaparecer de arriba: ni el total histórico, que a los
+              seis meses son cientos de tareas hechas, ni sólo las de hoy,
+              porque una tarea de ayer sin hacer sigue siendo trabajo de hoy. */}
+          <OrigenCard
+            href="/calendario" icon={CalendarDays} label="Mi calendario"
+            datos={tareasAhora ?? 0}
+            fallo={tareasAhora == null}
+            tono="ambar"
+            extra={subTareas}
+          />
+          {/* La tabla `matches` NO EXISTE todavía. `datos` a null es "en
+              desarrollo", que es una tercera cosa distinta de un cero y de un
+              fallo. Exactamente lo mismo que hace la portada del
+              administrador: aquí no se inventa un número. */}
+          <OrigenCard
+            href="/matches" icon={Heart} label="Matches"
+            datos={null}
+            tono="granate"
+          />
+        </div>
+      </section>
 
       {/* WA stats + Pipeline */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -476,6 +572,10 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
           personas={agendaEquipo.personas}
           yoId={yoId}
           isAdmin={false}
+          // El catálogo ya está aquí para el resto de la pantalla, así que el
+          // desplegable de tipos sale de él: es lo que hace que "Visita" se
+          // pueda elegir desde la portada sin lista escrita en el código.
+          catalogos={catalogos}
         />
       ) : null}
 
@@ -695,298 +795,38 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
   )
 }
 
-// El `suffix` se ha ido con la tarjeta de la tasa de respuesta, que era la
-// única que pintaba un "%". Un parámetro que ya no usa nadie es una promesa que
-// hay que seguir manteniendo a cambio de nada.
-function KpiCard({ href, icon: Icon, label, value, sub, holo }: {
-  href?: string; icon: React.ElementType; label: string; value: number | null; sub: string; holo?: boolean
-}) {
-  const inner = (
-    <div className={cn(
-      "relative rounded-lg border p-5 flex flex-col gap-3 bg-card overflow-hidden transition-all",
-      holo ? "holo-border holo-glow border-transparent" : "border-border",
-      href && "hover:bg-muted/40 cursor-pointer",
-    )}>
-      {holo && (
-        <div className="absolute inset-0 bg-gradient-to-br from-[oklch(0.65_0.22_295/0.06)] via-[oklch(0.80_0.15_200/0.04)] to-transparent pointer-events-none" />
-      )}
-      <div className="flex items-center justify-between relative">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-widest">{label}</span>
-        <Icon className="h-3.5 w-3.5 text-muted-foreground/40" />
-      </div>
-      <div className="relative flex flex-col gap-0.5">
-        {/* Un contador que no se ha podido contar enseña una raya, no un cero.
-            El cero de un fallo se lee como "no tienes ninguno". */}
-        <p className={cn("text-3xl font-semibold tracking-tight", holo ? "holo-text" : "text-foreground")}>
-          {value != null ? value.toLocaleString("es") : "—"}
-        </p>
-        <p className="text-xs text-muted-foreground">{value != null ? sub : "no se ha podido contar"}</p>
-      </div>
-    </div>
-  )
-  if (href) return <Link href={href}>{inner}</Link>
-  return inner
-}
-
 /**
- * Los iconos son un mapa a mano y no salen del catálogo porque la tabla
- * `catalogos` no tiene columna de icono (es {id,tipo,valor,nombre,color,orden,
- * activo,sistema}). Lo que SÍ sale del catálogo es lo que importa: el nombre y
- * el color, que ya están puestos desde la migración 012. Se indexa por `valor`,
- * que es la clave estable, y NO por `nombre`, que el administrador edita. Una
- * fuente nueva sale con `Inbox` y con su nombre y su color buenos: nunca un
- * hueco. El arreglo definitivo sería una columna `icono` en `catalogos`, y no
- * toca hacerla hoy.
+ * La línea de debajo del número en las dos tarjetas de canal.
+ *
+ * Es palabra por palabra la que tenían las tarjetas por fuente que había aquí
+ * antes, y se conserva porque distingue las tres cosas que esta portada no
+ * puede confundir: un canal vacío ("todavía no te han repartido ninguno"), una
+ * semana medida y a cero ("nada nuevo esta semana") y una semana que NO se ha
+ * podido contar ("— esta semana"). Un espacio en blanco se colapsaría dentro
+ * del <p> y el fallo se leería igual que el cero.
+ *
+ * El total roto no llega hasta aquí: esa tarjeta se pinta entera como fallo.
  */
-const ICONO_FUENTE: Record<string, React.ElementType> = {
-  Captaciones: Radar,
-  Instagram: Share2,
-  Propiedades: Building2,
-  Web: Globe,
-  WhatsApp: MessageSquare,
-  QR: QrCode,
-  "Solicitud valoración": Home,
-  "Trasteros WhatsApp": Inbox,
-}
-
-function SeccionOrigenes({ data }: { data: AgentData }) {
-  const o = data.origenes
-  const enFallo = o.porFuente.filter((f) => f.total == null)
-  // LOS RESTOS, por dos caminos.
-  //
-  // El bueno es el par de contadores. Pero si UNO de los dos falla, el residuo
-  // se DEDUCE del total: lo repartido menos lo que han contado las fuentes. Sin
-  // esa segunda vía, un solo contador caído se llevaba por delante la línea que
-  // hace cuadrar la suma: las tarjetas enseñando 5 debajo de un titular que
-  // dice 7, y nada que lo explique. El número deducido es el mismo siempre que
-  // todas las fuentes se hayan podido contar, que es justo lo que se comprueba.
-  const sumaFuentes = o.porFuente.reduce((s, f) => s + (f.total ?? 0), 0)
-  const restos =
-    o.sinFuente != null && o.fueraDeCatalogo != null
-      ? o.sinFuente + o.fueraDeCatalogo
-      : o.total != null && enFallo.length === 0
-        ? o.total - sumaFuentes
-        : null
-  // `> 0` y no `!= null`: un residuo negativo sólo puede salir de que un lead
-  // cambie de fuente entre dos de las diecinueve consultas, y eso no se pinta.
-  const hayRestos = restos != null && restos > 0
-  // Sin catálogo de fuentes no hay nada con lo que desglosar, y eso NO es "no
-  // te han repartido nada": con `fuentes` vacío page.tsx deja `fueraDeCatalogo`
-  // en null a propósito y aquí no llegaría ni una tarjeta, así que el bloque se
-  // callaría los leads que ese agente sí tiene. Por eso, con leads y sin
-  // catálogo, se pinta el fallo; el recuadro de "no hay ninguna fuente activa"
-  // queda para cuando el total es un cero medido.
-  const todoRoto = o.porFuente.length > 0
-    ? enFallo.length === o.porFuente.length
-    : o.total == null || o.total > 0
-
-  // UNA TARJETA POR CADA FUENTE DEL CATÁLOGO, TAMBIÉN LAS QUE ESTÁN A CERO.
-  //
-  // Antes sólo entraban las que tenían número y las rotas, y los ceros se
-  // recogían en una frase al pie ("Todavía no te ha llegado nada por Formulario
-  // web, WhatsApp entrante…"). Lo pidió cambiar el dueño y tiene razón: ver el
-  // hueco es la mitad de la información, y un canal nombrado en una frase de
-  // pie de página se deja de mirar. La pantalla del administrador ya lo hace
-  // así desde su `OrigenCard` (AdminDashboard.tsx:458): la tarjeta a cero SE
-  // PINTA, apagada —el icono en gris y el número en gris—, pero se pinta.
-  //
-  // El orden es el del catálogo, que ya viene aplicado por `opcionesDe` en el
-  // servidor. NO por número descendente: con 7 leads un lead nuevo reordena las
-  // tarjetas entre recargas y la pantalla parece otra. Ahora importa todavía
-  // más, porque con las siete fijas el sitio de cada canal ES su identidad.
-  //
-  // `Captaciones` sigue sin estar: no es una fuente vacía, es la de los leads
-  // espejo y va aparte. Lo dice el subtítulo del bloque.
-  //
-  // ARREGLADO EN REVISIÓN: el filtro que la deja fuera está en `page.tsx:476`
-  // (`fuentesVisibles`), no en la 424, que es el comentario de cabecera de
-  // `getAgentData`. Y esta nota importa justo por lo que acaba de cambiar: si
-  // esa fuente llegara, ya no se recogería en una frase al pie sino que sería
-  // una tarjeta apagada jurando que el captador no ha traído nada nunca.
-  const tarjetas = o.porFuente
-
-  return (
-    <section className="flex flex-col gap-4">
-      <div className="flex flex-col gap-0.5">
-        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-          De dónde vienen tus leads
-        </h2>
-        {/* El bloque declara SU PROPIO denominador, contado con sus mismos
-            filtros: aquí NO entran los leads espejo de sus captaciones, y la
-            segunda frase lo dice en vez de dejar un descuadre sin explicar.
-
-            ARREGLADO EN REVISIÓN: esto decía "no es el KPI 'Mis leads' de
-            arriba", y ese KPI ya no está —se fue con las tres tarjetas que
-            quitó el dueño—. Un comentario que se defiende de una tarjeta que no
-            existe manda a buscar arriba algo que no se va a encontrar; lo que
-            importa sigue siendo con qué filtros está contado ESTE total. */}
-        {o.total != null && (
-          <p className="text-xs text-muted-foreground">
-            {/* Con las siete tarjetas siempre en pantalla, el cero se lee aquí
-                con palabras. "0 leads repartidos" encima de siete tarjetas
-                apagadas —la cuenta de Ana hoy mismo— parece una pantalla que no
-                ha cargado; "todavía no te han repartido ningún lead" dice que
-                está bien, que es lo que hay. */}
-            {o.total === 0
-              ? "Todavía no te han repartido ningún lead"
-              : `${o.total.toLocaleString("es")} ${o.total === 1 ? "lead repartido" : "leads repartidos"}`}
-            {data.captaciones != null && data.captaciones > 0 && (
-              <> · tus captaciones van aparte, en <Link href="/captaciones" className="hover:text-foreground underline underline-offset-2">captaciones</Link></>
-            )}
-          </p>
-        )}
-      </div>
-
-      {todoRoto ? (
-        // ESTADO ROTO. Calcado del recuadro de `data.dia.error` de "Lo que
-        // toca hoy", más arriba en este mismo fichero.
-        // Cero y fallo no comparten pintura nunca.
-        //
-        // ARREGLADO EN REVISIÓN: ponía "(línea 178)" y ese recuadro está casi
-        // cien líneas más abajo. Un número de línea del PROPIO fichero se cae
-        // solo cada vez que se toca la pantalla —y esta se acaba de tocar
-        // entera—, así que se nombra la sección, que no se mueve.
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-5 flex items-start gap-3">
-          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-muted-foreground">
-            No se ha podido contar de dónde vienen tus leads. Vuelve a entrar en un momento;
-            si sigue igual, avisa: es un fallo de la consulta, no que no tengas leads.
-          </p>
-        </div>
-      ) : tarjetas.length === 0 ? (
-        // ESTADO VACÍO, que ya NO quiere decir "no tienes leads" —eso lo dice
-        // ahora el subtítulo, con las tarjetas a cero debajo— sino que no hay
-        // catálogo de fuentes con el que desglosar nada. Se llega aquí con
-        // `fuente` vacío o con todo archivado desde /configuracion/catalogos.
-        // Mismo `border-dashed` que el vacío de "Lo que toca hoy".
-        <div className="border border-dashed border-border rounded-lg p-10 text-center flex flex-col gap-2">
-          <p className="text-sm text-muted-foreground">
-            No hay ninguna fuente activa en el catálogo.
-          </p>
-          <p className="text-xs text-muted-foreground/70">
-            Sin fuentes no se puede decir por dónde entra cada lead. Se encienden
-            desde Configuración → Catálogos.
-          </p>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {/* grid-cols-2 en móvil y lg:grid-cols-4: las mismas columnas que la
-              fila de tarjetas de arriba, para que las dos filas se lean como
-              una sola cuadrícula.
-              Hoy son siete tarjetas —las ocho fuentes activas menos la del
-              espejo—, o sea dos filas de cuatro con una casilla libre al final.
-              Es la misma media fila libre que arriba y por el mismo motivo: no
-              se estiran las tarjetas para tapar un hueco. */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {tarjetas.map((f) => {
-              const Icono = ICONO_FUENTE[f.valor] ?? Inbox
-              // TRES ESTADOS QUE NO SE CONFUNDEN NUNCA, y ahora menos que
-              // nunca, porque los ceros ya no se esconden en una frase:
-              //   · con leads  → icono con el color de su catálogo
-              //   · a cero     → apagada: icono gris y número gris. Está vacía,
-              //                  no rota, y la línea de abajo lo dice con
-              //                  palabras.
-              //   · rota       → ámbar, que es el color con el que esta portada
-              //                  cuenta los fallos (los dos recuadros de arriba).
-              //                  Sin esto, "—" en gris se leería como un cero
-              //                  más apagado.
-              const roto = f.total == null
-              const vacia = f.total === 0
-              return (
-                // El número lleva a SUS leads de ESE canal, no a la lista
-                // entera. /leads ya lee `?fuente=` en el servidor y valida el
-                // valor contra el catálogo (leads/page.tsx:36), así que aquí
-                // basta con pasar el `valor` —la clave estable, no el nombre,
-                // que el administrador edita—. Sin esto, pulsar "Instagram 121"
-                // abría los 1.021 leads sin filtrar: un contador que no lleva a
-                // ninguna parte se deja de mirar a la semana.
-                <Link key={f.valor} href={`/leads?fuente=${encodeURIComponent(f.valor)}`}
-                  className={cn(
-                    "rounded-xl border bg-card px-4 py-4 flex flex-col gap-3 transition-colors hover:bg-muted/20",
-                    roto ? "border-amber-500/30" : "border-border",
-                  )}>
-                  <div className="flex items-center gap-2.5">
-                    <span className={cn(
-                      "h-8 w-8 rounded-lg flex items-center justify-center shrink-0 border",
-                      // Las clases van escritas enteras o salen de un mapa
-                      // explícito (`claseColor`): Tailwind purga lo que se
-                      // construye con plantillas.
-                      roto ? "bg-amber-500/10 text-amber-500 border-amber-500/30"
-                        : vacia ? "bg-muted text-muted-foreground/50 border-transparent"
-                        : claseColor(f.color),
-                    )}>
-                      <Icono className="h-4 w-4" />
-                    </span>
-                    <span className={cn(
-                      "text-[13px] font-medium truncate",
-                      vacia ? "text-muted-foreground" : "text-foreground/90",
-                    )}>{f.nombre}</span>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    {/* Misma fórmula que KpiCard: un contador que falló enseña
-                        una raya, no un cero. Y el cero, que ahora SÍ llega a
-                        una tarjeta, se pinta en gris claro: se ve que está,
-                        pero no compite con los canales que sí traen gente. */}
-                    {/* ARREGLADO EN REVISIÓN: el "—" de la tarjeta rota se
-                        pintaba en el MISMO gris al 35 % que el cero. Los demás
-                        avisos de la rota (borde ámbar, pastilla ámbar, "no se
-                        ha podido contar") estaban bien, pero lo que el ojo mira
-                        primero en esta rejilla es el número grande, y ahí un
-                        fallo y un cero se veían iguales: una raya gris apagada
-                        entre seis tarjetas apagadas se lee como un canal vacío
-                        más. Va en ámbar —a media fuerza, para no gritar más que
-                        los canales que sí traen gente— y así el fallo se
-                        reconoce sin leer la letra pequeña. */}
-                    <p className={cn(
-                      "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
-                      roto ? "text-amber-500/60"
-                        : f.total ? "text-foreground" : "text-muted-foreground/35",
-                    )}>
-                      {f.total != null ? f.total.toLocaleString("es") : "—"}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground leading-snug">
-                      {/* Las tres frases de los tres estados. La de cero es la
-                          que antes vivía en el pie del bloque, ahora en su
-                          propia tarjeta y en singular.
-                          La semana que NO se ha podido contar también lo dice:
-                          antes pintaba un espacio, y un espacio dentro de un
-                          <p> se colapsa —la línea desaparecía y el fallo se
-                          leía igual que "nada nuevo esta semana", que es cero—. */}
-                      {f.total == null
-                        ? "no se ha podido contar"
-                        : f.total === 0
-                          ? "todavía no te ha llegado nada por aquí"
-                          : f.semana == null
-                            ? "— esta semana"
-                            : f.semana > 0
-                              ? `${f.semana} esta semana`
-                              : "nada nuevo esta semana"}
-                    </p>
-                  </div>
-                </Link>
-              )
-            })}
-          </div>
-
-          {/* LA LÍNEA DE LOS RESTOS. Es lo que hace que la suma cuadre con el
-              total del bloque. Si alguno de sus dos contadores falló, se calla:
-              no se pinta un '—' para un residuo. */}
-          {hayRestos && (
-            <p className="text-[11px] text-muted-foreground/70">
-              {restos.toLocaleString("es")} {restos === 1 ? "lead" : "leads"} con un origen que
-              no está en el catálogo o sin origen anotado.
-            </p>
-          )}
-        </div>
-      )}
-    </section>
-  )
+function textoCanal(canal: { total: number | null; semana: number | null }, vacio: string) {
+  if (canal.total === 0) return vacio
+  if (canal.semana == null) return "— esta semana"
+  return canal.semana > 0 ? `${canal.semana} esta semana` : "nada nuevo esta semana"
 }
 
 /*
-  AQUÍ ESTABA `listaEs`, que unía con comas y un "ni" final los nombres de los
-  canales a cero para la frase del pie del bloque ("Todavía no te ha llegado
-  nada por Formulario web, WhatsApp entrante ni Código QR"). Esa frase se ha ido
-  con este cambio: cada canal a cero tiene ya su tarjeta apagada y lo dice él
-  solo, así que no queda ninguna lista que enredar en una oración.
+  AQUÍ ESTABAN `KpiCard`, `SeccionOrigenes`, `TarjetaFuente`, `TarjetaVisita`,
+  `ICONO_FUENTE`, `FUENTE_SIN_TARJETA` y el tipo `Origen`, y se han ido enteros
+  con el cambio que dejó la portada en seis tarjetas.
+
+  Lo que pintaban: la fila de dos KPIs de arriba y una rejilla con una tarjeta
+  por cada valor del catálogo `fuente` —siete, cinco de ellas a cero— más la de
+  "Visita por programar" intercalada. Las dos preguntas que de verdad
+  contestaban siguen en pantalla: "Mis captaciones" es ahora la tarjeta del
+  scraper y "Mis tareas", la del calendario.
+
+  Lo que se pierde a sabiendas: la tarjeta "Visita por programar" (a quién le
+  falta día) y el desglose lead a lead de las fuentes menores —QR, valoración,
+  trasteros—, que quedan fuera de las familias `rrss` y `web`. El dueño ha
+  pedido SEIS tarjetas y ha nombrado las seis; quien las quiera de vuelta tiene
+  que decidir cuál de las seis se va.
 */

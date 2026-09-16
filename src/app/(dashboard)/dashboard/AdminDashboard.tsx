@@ -12,6 +12,11 @@ import { AgendaPanel } from "@/components/agenda/agenda-panel"
 import { SeccionesOrdenables, SeccionOrdenable } from "@/components/shared/secciones-ordenables"
 import { claseColor, clasePunto } from "@/lib/catalogos"
 import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
+// La tarjeta de canal, sus tonos, sus barras y el tipo de los periodos se han
+// ido a `@/components/dashboard/origen-card` SIN TOCAR NADA de lo que pintan:
+// la portada del agente enseña ahora las mismas seis tarjetas que ésta y el
+// componente no podía seguir viviendo dentro de este fichero.
+import { OrigenCard, PERIODOS, type ClavePeriodo, type Periodos } from "@/components/dashboard/origen-card"
 
 /*
  * Ni los nombres de los estados ni sus colores se escriben aquí.
@@ -33,49 +38,6 @@ function timeAgo(date: string) {
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h`
   return `${Math.floor(hrs / 24)}d`
-}
-
-export interface Periodos {
-  hoy: number; semana: number; mes: number; total: number
-  serie: number[]
-}
-
-export type ClavePeriodo = "hoy" | "semana" | "mes" | "total"
-
-export const PERIODOS: Array<{ valor: ClavePeriodo; etiqueta: string; frase: string }> = [
-  { valor: "hoy", etiqueta: "Hoy", frase: "Entrados hoy" },
-  { valor: "semana", etiqueta: "7 días", frase: "En los últimos 7 días" },
-  { valor: "mes", etiqueta: "30 días", frase: "En los últimos 30 días" },
-  { valor: "total", etiqueta: "Todo", frase: "Desde el principio" },
-]
-
-/**
- * Barras de los últimos catorce días. SVG a mano y no una librería: son
- * catorce rectángulos, y meter recharts en una tarjeta de este tamaño cuesta
- * más de lo que aporta.
- */
-function Barras({ serie, color }: { serie: number[]; color: string }) {
-  const max = Math.max(...serie, 1)
-  return (
-    <svg viewBox="0 0 100 28" preserveAspectRatio="none" className="w-full h-8" aria-hidden="true">
-      {serie.map((v, i) => {
-        const ancho = 100 / serie.length
-        const alto = v === 0 ? 1.5 : Math.max(2.5, (v / max) * 26)
-        return (
-          <rect
-            key={i}
-            x={i * ancho + ancho * 0.18}
-            y={28 - alto}
-            width={ancho * 0.64}
-            height={alto}
-            rx={1}
-            className={color}
-            opacity={v === 0 ? 0.18 : 0.45 + (v / max) * 0.55}
-          />
-        )
-      })}
-    </svg>
-  )
 }
 
 export interface AdminData {
@@ -433,97 +395,6 @@ function SenalPanel({ senal }: { senal: AdminData["senal"] }) {
         </div>
       </Link>
     </div>
-  )
-}
-
-/**
- * Tarjeta de canal. Un canal que todavía no produce nada se pinta igual pero
- * apagado y con la etiqueta: saber que RRSS está a cero es tan útil como saber que
- * el scraper trae 838, y esconderlo daría la impresión de que no existe.
- */
-/**
- * Cada canal con su tono completo: el icono metido en una pastilla de color, el
- * borde con presencia y un lavado muy suave de fondo. Un borde al 25 % y un
- * número fino no sostienen una tarjeta de este tamaño — se quedan flotando.
- */
-const TONOS = {
-  cyan:    { chip: "bg-cyan-500/15 text-cyan-500",       borde: "border-cyan-500/40",    wash: "from-cyan-500/[0.08]",    barra: "fill-cyan-500" },
-  violeta: { chip: "bg-violet-500/15 text-violet-500",   borde: "border-violet-500/40",  wash: "from-violet-500/[0.08]",  barra: "fill-violet-500" },
-  verde:   { chip: "bg-emerald-500/15 text-emerald-500", borde: "border-emerald-500/40", wash: "from-emerald-500/[0.08]", barra: "fill-emerald-500" },
-  rosa:    { chip: "bg-pink-500/15 text-pink-500",       borde: "border-pink-500/40",    wash: "from-pink-500/[0.08]",    barra: "fill-pink-500" },
-  ambar:   { chip: "bg-amber-500/15 text-amber-500",     borde: "border-amber-500/40",   wash: "from-amber-500/[0.08]",   barra: "fill-amber-500" },
-  granate: { chip: "bg-rose-500/15 text-rose-500",       borde: "border-rose-500/40",    wash: "from-rose-500/[0.08]",    barra: "fill-rose-500" },
-} as const
-
-function OrigenCard({ href, icon: Icon, label, datos, periodo, tono, extra }: {
-  href: string
-  icon: React.ComponentType<{ className?: string }>
-  label: string
-  datos: Periodos | null
-  periodo: ClavePeriodo
-  tono: keyof typeof TONOS
-  extra?: string
-}) {
-  // `datos` a null significa "esta sección todavía no existe", que no es lo
-  // mismo que un canal montado y a cero. Se distinguen a propósito.
-  const enDesarrollo = datos === null
-  const valor = datos ? datos[periodo] : 0
-  const sinUsar = !enDesarrollo && datos!.total === 0
-  const apagado = enDesarrollo || sinUsar
-  const t = TONOS[tono]
-
-  return (
-    <Link
-      href={href}
-      className={cn(
-        "group relative overflow-hidden rounded-xl border bg-card px-4 py-4 flex flex-col gap-3 transition-all",
-        apagado ? "border-border hover:border-border" : `${t.borde} hover:bg-muted/20`,
-      )}
-    >
-      {/* Lavado de color muy tenue: da cuerpo a la tarjeta sin gritar. */}
-      {!apagado && (
-        <div className={cn("absolute inset-0 bg-gradient-to-br to-transparent pointer-events-none", t.wash)} />
-      )}
-
-      <div className="relative flex items-center gap-2.5">
-        <span className={cn(
-          "h-8 w-8 rounded-lg flex items-center justify-center shrink-0",
-          apagado ? "bg-muted text-muted-foreground/50" : t.chip,
-        )}>
-          <Icon className="h-4 w-4" />
-        </span>
-        <span className="text-[13px] font-medium text-foreground/90 truncate">{label}</span>
-      </div>
-
-      {enDesarrollo ? (
-        <p className="relative text-xs text-muted-foreground/50 leading-snug pb-1">En desarrollo</p>
-      ) : (
-        // El número a la izquierda y los catorce días a la derecha: la tarjeta
-        // es ancha, y dejar ese hueco vacío es lo que la hacía parecer pobre.
-        <div className="relative flex items-end justify-between gap-4">
-          <div className="shrink-0 flex flex-col gap-2">
-            <p className={cn(
-              "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
-              valor === 0 ? "text-muted-foreground/35" : "text-foreground",
-            )}>
-              {valor}
-            </p>
-            <p className="text-[11px] text-muted-foreground leading-snug">
-              {extra ?? (sinUsar
-                ? "Aún sin usar"
-                : periodo === "total"
-                  ? "desde el principio"
-                  : `${datos!.total.toLocaleString("es")} en total`)}
-            </p>
-          </div>
-
-          <div className="flex-1 min-w-0 max-w-[13rem] flex flex-col items-end gap-1">
-            <Barras serie={datos!.serie} color={t.barra} />
-            <span className="text-[10px] text-muted-foreground/50">últimos 14 días</span>
-          </div>
-        </div>
-      )}
-    </Link>
   )
 }
 
