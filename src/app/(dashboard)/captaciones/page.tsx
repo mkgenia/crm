@@ -12,37 +12,83 @@ import { getCatalogosActivos } from "@/lib/actions/catalogos"
 export const metadata = { title: "Captaciones — mkgenia" }
 
 /**
- * Cómo se lee el periodo con el que venía la portada del agente.
+ * Cómo se lee el periodo con el que venía la portada.
  *
- * Las mismas palabras que sus botones, porque el agente acaba de pulsar uno: si
- * allí ponía "7 días" y aquí pusiera otra cosa, parecería otro filtro.
+ * Las mismas palabras que sus botones, porque se acaba de pulsar uno: si allí
+ * ponía "7 días" y aquí pusiera otra cosa, parecería otro filtro.
  */
 const ETIQUETA_PERIODO: Record<string, string> = {
   hoy: "hoy",
-  semana: "los últimos 7 días",
-  mes: "los últimos 30 días",
+  semana: "en los últimos 7 días",
+  mes: "en los últimos 30 días",
 }
+
+/**
+ * LAS DOS PREGUNTAS QUE PUEDE TRAER `?fecha=`, y lo que cada una dice en la chapa.
+ *
+ * Las dos tarjetas del scraper NO CUENTAN LO MISMO, así que no basta con un
+ * `?desde=` como el de /leads: hace falta saber CONTRA QUÉ se compara.
+ *
+ *   · `entrada` — la tarjeta del AGENTE, que son sus captaciones asignadas y se
+ *     fechan por cuándo entró el anuncio (`created_at`).
+ *   · `senal`   — la tarjeta del ADMINISTRADOR, que no cuenta anuncios sino
+ *     propietarios que dijeron que sí, fechados por cuándo lo dijeron
+ *     (`senal_en`).
+ *
+ * Y por eso la chapa dice una cosa distinta en cada caso: "entradas en los
+ * últimos 7 días" y "se interesaron en los últimos 7 días" son dos listas
+ * distintas —hoy 98 y 13— y quien mira la pantalla tiene que saber cuál está
+ * viendo.
+ *
+ * La URL nombra la PREGUNTA y no la columna a propósito: lo que se escribe en
+ * la barra del navegador no tiene por qué saber cómo se llaman las columnas de
+ * la tabla, y así un `?fecha=` inventado no llega ni a parecerse a una.
+ */
+const FILTROS_FECHA: Record<string, { campo: "created_at" | "senal_en"; frase: string }> = {
+  entrada: { campo: "created_at", frase: "Entradas" },
+  senal: { campo: "senal_en", frase: "Se interesaron" },
+}
+
+/**
+ * Para cuando llega un corte sin su palabra: se escribe la fecha.
+ *
+ * Zona y formato fijos porque este texto se calcula en el SERVIDOR y baja ya
+ * escrito: el navegador lo pinta tal cual, así que no hay dos versiones que
+ * puedan no coincidir al hidratar.
+ */
+const FECHA_CORTA = new Intl.DateTimeFormat("es-ES", {
+  day: "2-digit", month: "2-digit", timeZone: "Europe/Madrid",
+})
 
 export default async function CaptacionesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ id?: string; periodo?: string }>
+  searchParams: Promise<{ id?: string; periodo?: string; fecha?: string; desde?: string }>
 }) {
   const { userId, isAdmin } = await exigirModulo("captaciones")
 
   /**
    * LO QUE ESTA PANTALLA ACEPTA POR LA URL, y de dónde viene.
    *
-   * Lo escribe la portada del agente: la fila de una captación en "lo que toca
-   * hoy" (`?id=`) y la tarjeta del scraper (`?periodo=`). Se lee AQUÍ, en el
-   * servidor, y baja como prop — con `useSearchParams` habría que envolver media
-   * pantalla en un Suspense, y leyendo `window.location` el primer render sería
-   * distinto del segundo, que es un desajuste de hidratación.
+   * Lo escriben LAS DOS portadas: la fila de una captación en "lo que toca hoy"
+   * (`?id=`) y las dos tarjetas del scraper (`?fecha=`, `?desde=`, `?periodo=`).
+   * Se lee AQUÍ, en el servidor, y baja como prop — con `useSearchParams` habría
+   * que envolver media pantalla en un Suspense, y leyendo `window.location` el
+   * primer render sería distinto del segundo, que es un desajuste de hidratación.
+   *
+   *   · `id`      una ficha concreta, la de la fila que se ha pulsado.
+   *   · `fecha`   CONTRA QUÉ se compara: si entró el anuncio o si el
+   *               propietario se interesó (ver `FILTROS_FECHA`).
+   *   · `desde`   el instante en que empieza el periodo que estaba puesto, ya
+   *               calculado en la portada con el MISMO corte con el que se contó
+   *               el número de la tarjeta. Es lo que evita que la tarjeta diga
+   *               13 y aquí salgan 759.
+   *   · `periodo` sólo para poder escribir la chapa con palabras.
    *
    * `id` se valida como entero: `captaciones.id` es un número, y lo que llegue
    * escrito a mano en la barra del navegador no puede colarse hasta la consulta.
    */
-  const { id, periodo } = await searchParams
+  const { id, periodo, fecha, desde } = await searchParams
   const idPedido = id && /^\d+$/.test(id) ? Number(id) : null
 
   /**
@@ -79,36 +125,65 @@ export default async function CaptacionesPage({
   }
 
   /**
-   * Y EL AVISO DEL PERIODO, que es lo que esta pantalla no puede hacer.
+   * Y EL CORTE DE FECHA, que es lo que esta pantalla SÍ hace desde hoy.
    *
-   * La tarjeta del scraper enseña las captaciones del periodo que el agente
-   * tenga puesto, pero esta lista la trae `getCaptaciones` con tres filtros
-   * —pastilla, búsqueda y página— y ninguno es la fecha, así que aquí salen
-   * todas. Un número que promete tres y una lista de 759 sin explicación es
-   * exactamente lo que no vale, así que se dice con palabras en la cabecera: es
-   * media línea de texto contra reescribir la consulta de la lista.
+   * Aquí había un cartel de texto avisando de que esta lista no se filtraba por
+   * fecha. El dueño no quería el cartel, quería el filtro: pulsar una tarjeta
+   * que dice 13 tiene que enseñar esas 13, y volver a verlas todas es quitar la
+   * chapa. Así que el aviso se va y en su sitio queda el corte de verdad.
+   *
+   * Las dos mitades se validan por separado y hacen falta LAS DOS:
+   *
+   *   · La pregunta, contra `FILTROS_FECHA` y con `Object.hasOwn`, no leyendo la
+   *     clave a pelo: `FILTROS_FECHA["toString"]` no vale undefined, vale la
+   *     función heredada del prototipo, y con `?fecha=toString` esa función
+   *     llegaría hasta el `.campo` de la consulta.
+   *   · La fecha, normalizada a ISO en vez de pasar el texto tal cual: así lo
+   *     que viaja a la consulta es siempre algo que Postgres entiende.
+   *
+   * Y lo que no cuadra NO filtra: sale la lista entera, que es menos malo que
+   * una pantalla vacía sin explicación o que un 400 de PostgREST disfrazado de
+   * "no tienes captaciones". `getCaptaciones` lo vuelve a comprobar por su
+   * cuenta —es una acción que puede llamar el navegador—, pero aquí hay que
+   * saberlo igual para escribir la chapa.
    */
-  //
-  // ARREGLADO EN REVISIÓN: la clave se busca con `Object.hasOwn` y no leyéndola
-  // a pelo. `ETIQUETA_PERIODO["toString"]` no vale undefined: vale la función
-  // heredada del prototipo, y con `?periodo=toString` esa función bajaba hasta
-  // el `<p>` de aquí abajo. React no pinta una función como hijo: deja el hueco
-  // y avisa por consola, o sea una frase a medias en mitad de la cabecera.
-  const avisoPeriodo =
-    periodo && Object.hasOwn(ETIQUETA_PERIODO, periodo) ? ETIQUETA_PERIODO[periodo] : null
+  const filtroFecha = fecha && Object.hasOwn(FILTROS_FECHA, fecha) ? FILTROS_FECHA[fecha] : null
+  const ms = desde ? new Date(desde).getTime() : NaN
+
+  // La palabra del periodo, con `Object.hasOwn` por lo mismo que la de arriba:
+  // `ETIQUETA_PERIODO["toString"]` no vale undefined, vale la función heredada
+  // del prototipo, y con `?periodo=toString` se colaría dentro de la frase de la
+  // chapa como si fuera texto. Cuando no hay palabra que valga la chapa escribe
+  // la fecha, que dice lo mismo y nunca falta.
+  const palabraPeriodo =
+    periodo && Object.hasOwn(ETIQUETA_PERIODO, periodo) ? ETIQUETA_PERIODO[periodo] : ""
+
+  const corte = filtroFecha && !Number.isNaN(ms)
+    ? { campo: filtroFecha.campo, desde: new Date(ms).toISOString() }
+    : null
+
+  // "Se interesaron en los últimos 7 días" / "Entradas desde el 09/09". La frase
+  // entera se escribe en el servidor: el navegador la pinta tal cual y no hay
+  // dos versiones que puedan no coincidir al hidratar.
+  const etiquetaFecha = corte && filtroFecha
+    ? `${filtroFecha.frase} ${palabraPeriodo || `desde el ${FECHA_CORTA.format(ms)}`}`
+    : ""
 
   const [primeraPagina, eliminadas, config, agentes, cola, reparto, totales, catalogos] = await Promise.all([
     // Sólo la primera página: el resto las pide la lista al cambiar de página o
     // de filtro. getCaptaciones resuelve por su cuenta quién eres, así que ya no
     // hay que pasarle el rol ni el id del agente.
-    getCaptaciones(),
+    getCaptaciones(corte ? { corte } : {}),
     isAdmin ? getCaptacionesEliminadas() : getCaptacionesEliminadasPorAgente(userId),
     isAdmin ? getAutoContactoConfig() : null,
     isAdmin ? getAgentes() : [],
     isAdmin ? getEstadoCola() : { enCola: 0, enviadasHoy: 0 },
     // Sólo el administrador ve el panel de reparto, así que sólo para él se pide.
     isAdmin ? getEstadoAsignacion() : null,
-    getTotalesCaptaciones(),
+    // Con el MISMO corte que la lista: si la cabecera y las pastillas contaran
+    // la tabla entera mientras la lista enseña trece fichas, la pantalla se
+    // contradiría sola.
+    getTotalesCaptaciones(corte ? { corte } : {}),
     // De aquí salen las pastillas de la lista: nombre, color y orden de cada
     // estado, tal y como estén en /configuracion/catalogos.
     getCatalogosActivos(),
@@ -145,15 +220,6 @@ export default async function CaptacionesPage({
             {total.toLocaleString("es")} {isAdmin ? "propiedades" : "captaciones asignadas"}
             {interesados !== null && ` · ${interesados.toLocaleString("es")} interesados`}
           </p>
-          {/* Vienes de pulsar una tarjeta que contaba un periodo; aquí no hay
-              filtro de fecha y se dice, en vez de dejar que el número de arriba
-              contradiga al que acabas de pulsar. */}
-          {avisoPeriodo && (
-            <p className="text-xs text-muted-foreground">
-              Vienes de tu portada mirando {avisoPeriodo}. Esta lista no se filtra por fecha:
-              aquí salen todas tus captaciones.
-            </p>
-          )}
         </div>
         {isAdmin && config && reparto && (
           <CaptacionesConfig
@@ -170,6 +236,16 @@ export default async function CaptacionesPage({
       </div>
 
       <CaptacionesList
+        // LA CLAVE CAMBIA CON EL CORTE, y hace falta.
+        //
+        // La chapa se suelta volviendo a /captaciones sin parámetros, o sea una
+        // navegación: el servidor vuelve a contar y bajan unas props nuevas.
+        // Pero la lista guarda sus filas en estado —las pide ella al paginar—,
+        // así que sin cambiar la clave React reusaría la misma instancia y se
+        // quedarían en pantalla las trece viejas mientras la cabecera dice 759.
+        // Con la clave se monta de cero y todo lo que se ve sale de la misma
+        // consulta.
+        key={corte ? `${corte.campo}:${corte.desde}` : "sin-corte"}
         initialData={primeraPagina.filas}
         initialTotal={primeraPagina.total}
         eliminadas={eliminadas}
@@ -183,6 +259,15 @@ export default async function CaptacionesPage({
         // de "lo que toca hoy". La ficha se trae sola de la base por su id, así
         // que da igual que esa captación no esté en la primera página.
         capInicial={capInicial}
+        // El corte ya validado, para que la lista lo siga llevando cuando pida
+        // otra página o cambie de pastilla: si no, pasar a la página 2 devolvería
+        // las 759 y el filtro se habría evaporado a la primera.
+        corteFecha={corte}
+        // Y la frase de la chapa, escrita arriba. Va aparte del corte porque el
+        // corte es lo que se consulta y esto es lo que se lee: "se interesaron en
+        // los últimos 7 días" no es lo mismo que "entradas en los últimos 7
+        // días", y quien mira tiene que saber cuál de las dos está viendo.
+        etiquetaFecha={etiquetaFecha}
       />
     </div>
   )

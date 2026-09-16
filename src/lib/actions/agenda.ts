@@ -3,7 +3,24 @@
 import { createAdminClient } from "@/lib/supabase/server"
 import { sesionActual } from "@/lib/auth/acceso"
 import { revalidatePath } from "next/cache"
-import type { EntradaAgenda, TipoEntrada } from "@/lib/agenda"
+import {
+  desdeHace, inicioDiaMadrid,
+  type EntradaAgenda, type EntradaVencida, type TipoEntrada,
+} from "@/lib/agenda"
+
+/** Las columnas de una entrada, en un solo sitio: las piden tres consultas. */
+const CAMPOS =
+  "id, titulo, descripcion, tipo, fecha, todo_el_dia, agente_id, creado_por, completado, created_at"
+
+/**
+ * Cuántas vencidas se bajan como mucho.
+ *
+ * Es una lista de una columna lateral, no un listado: veinte filas ya obligan a
+ * rodar. Lo que no quepa se dice en pantalla —`vencidasOcultas`—, porque un tope
+ * callado es exactamente el mismo engaño que esto viene a arreglar: un número
+ * arriba que abajo no aparece.
+ */
+const TOPE_VENCIDAS = 20
 
 /**
  * Quién puede ver y tocar qué:
@@ -17,10 +34,18 @@ import type { EntradaAgenda, TipoEntrada } from "@/lib/agenda"
  */
 
 /**
- * Las seis semanas que pinta la rejilla del mes, más la lista de personas.
+ * Las seis semanas que pinta la rejilla del mes, lo VENCIDO sin completar, y la
+ * lista de personas.
  *
  * Se piden seis semanas completas y no del 1 al 31: los días de los meses
  * vecinos que se ven en las esquinas del calendario saldrían siempre vacíos.
+ *
+ * Lo vencido va en CONSULTA APARTE y no ensanchando esa ventana. La tarjeta "Mi
+ * calendario" de la portada cuenta todo lo pendiente del agente sin mirar el
+ * mes, así que decía 1 por una cita del 20/05 que el calendario —plantado en
+ * septiembre— ni siquiera se bajaba: el contador prometía y la pantalla no
+ * entregaba. Ensanchar la ventana lo habría tapado a costa de arrastrar meses
+ * enteros de citas pasadas y ya hechas para no pintar ninguna.
  *
  * Si la tabla no existe todavía (migración 009 sin ejecutar) devuelve
  * `disponible: false` en vez de reventar: la página se enseña igual.
@@ -39,15 +64,49 @@ export async function getAgendaMes(anclaISO?: string) {
 
   let q = supabase
     .from("agenda")
-    .select("id, titulo, descripcion, tipo, fecha, todo_el_dia, agente_id, creado_por, completado, created_at")
+    .select(CAMPOS)
     .gte("fecha", desde.toISOString())
     .lte("fecha", hasta.toISOString())
     .order("fecha", { ascending: true })
 
   if (!sesion.isAdmin) q = q.eq("agente_id", sesion.userId)
 
-  const [{ data: entradas, error }, { data: perfiles }] = await Promise.all([
+  /**
+   * Lo vencido, DE LO MÁS VIEJO A LO MÁS RECIENTE.
+   *
+   * El orden lo decide el tope: con quince vencidas sólo caben las primeras, y
+   * de las quince la que nadie recuerda es la de hace cuatro meses, no la de
+   * ayer. Ascendente, lo que se corta es lo reciente —lo que además sigue
+   * fresco en la cabeza de quien lo apuntó— y lo podrido queda siempre arriba.
+   * Es el mismo orden con el que la portada saca los próximos toques.
+   *
+   * `count: "exact"` junto al `limit` para saber CUÁNTAS hay de verdad sin una
+   * segunda consulta, y sin medir un select sin paginar con `.length`, que
+   * PostgREST corta a 1.000 con un 200 tan tranquilo.
+   *
+   * El corte es la MEDIANOCHE DE MADRID, no `ahora`. Dos motivos: una entrada
+   * de "todo el día" se guarda a las 00:00 y con `ahora` se declararía vencida
+   * a sí misma a las 00:01 del propio día que le toca; y lo de hoy ya tiene su
+   * sitio, arriba del todo de "Lo que viene" y en violeta. Así los dos bloques
+   * encajan sin solaparse: aquí lo de días pasados, allí de hoy en adelante.
+   */
+  let qVencidas = supabase
+    .from("agenda")
+    .select(CAMPOS, { count: "exact" })
+    .lt("fecha", inicioDiaMadrid(new Date()).toISOString())
+    .eq("completado", false)
+    .order("fecha", { ascending: true })
+    .limit(TOPE_VENCIDAS)
+
+  if (!sesion.isAdmin) qVencidas = qVencidas.eq("agente_id", sesion.userId)
+
+  const [
+    { data: entradas, error },
+    { data: filasVencidas, count: totalVencidas, error: errorVencidas },
+    { data: perfiles },
+  ] = await Promise.all([
     q,
+    qVencidas,
     supabase.from("perfiles").select("id, nombre, apellidos, rol")
       .order("rol", { ascending: false }).order("nombre"),
   ])
@@ -58,8 +117,20 @@ export async function getAgendaMes(anclaISO?: string) {
     esAdmin: p.rol === "Admin",
   }))
 
+  // El relativo se escribe AQUÍ, en el servidor, y baja ya hecho: ver
+  // `EntradaVencida` en lib/agenda.
+  const vencidas: EntradaVencida[] = errorVencidas
+    ? []
+    : ((filasVencidas ?? []) as EntradaAgenda[]).map((e) => ({
+        ...e,
+        desdeHaceTexto: desdeHace(e.fecha),
+      }))
+
   return {
     entradas: error ? [] : ((entradas ?? []) as EntradaAgenda[]),
+    vencidas,
+    /** Las que no han cabido en el tope. Se dicen en pantalla, no se callan. */
+    vencidasOcultas: Math.max(0, (totalVencidas ?? 0) - vencidas.length),
     personas: sesion.isAdmin ? todas : todas.filter((p) => p.id === sesion.userId),
     disponible: !error,
     yoId: sesion.userId,
@@ -73,7 +144,7 @@ export async function getAgenda(desdeISO: string, hastaISO: string) {
 
   let q = supabase
     .from("agenda")
-    .select("id, titulo, descripcion, tipo, fecha, todo_el_dia, agente_id, creado_por, completado, created_at")
+    .select(CAMPOS)
     .gte("fecha", desdeISO)
     .lte("fecha", hastaISO)
     .order("fecha", { ascending: true })

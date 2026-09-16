@@ -289,6 +289,33 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
     return `/leads?${q.toString()}`
   }
 
+  /**
+   * Y EL DE LA TARJETA DEL SCRAPER, que va a otra pantalla y pregunta otra cosa.
+   *
+   * Mismo corte y mismo motivo que el de arriba —pulsar una tarjeta que dice 11
+   * tiene que enseñar esas 11—, pero /captaciones necesita además saber CONTRA
+   * QUÉ columna comparar, y por eso va el `fecha=entrada`: esta tarjeta cuenta
+   * SUS CAPTACIONES ASIGNADAS por cuándo entró el anuncio (`created_at`), que no
+   * es lo que cuenta la del administrador —propietarios que se interesaron, por
+   * cuándo dijeron que sí—. Medido: 98 entradas contra 13 interesados en los
+   * mismos siete días, así que cortar por la columna de la otra tarjeta sería
+   * prometer 11 y enseñar cien.
+   *
+   * El instante sale de `data.cortes`, calculado en el servidor con la MISMA
+   * función con la que se contó el número. Sacarlo de Date.now() aquí serían dos
+   * enlaces distintos, el del servidor y el del navegador: desajuste de
+   * hidratación.
+   */
+  const enlaceCaptaciones = () => {
+    if (periodo === "total") return "/captaciones"
+    const q = new URLSearchParams({
+      fecha: "entrada",
+      periodo,
+      desde: data.cortes[periodo],
+    })
+    return `/captaciones?${q.toString()}`
+  }
+
   const { filas } = data.dia
   const primeras = filas.slice(0, VISIBLES)
   const resto = filas.slice(VISIBLES)
@@ -538,15 +565,16 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               fichas suyas tiene que trabajar. Se llama "Scraper" porque es de
               donde salen y porque así la nombra él.
 
-              EL ENLACE NO LLEVA EL CORTE DEL PERIODO, y es la única de las tres
-              que no puede: la lista de /captaciones la trae una acción de
-              servidor con tres filtros y ninguno es la fecha. En vez de
-              callarlo, se le manda la PALABRA del periodo y esa pantalla lo
-              dice en su cabecera ("vienes de tu portada mirando los últimos 7
-              días · aquí salen todas"). Lo que no vale es que el número prometa
-              tres y salgan 759 sin explicación; dicho, se entiende. */}
+              EL ENLACE LLEVA YA EL CORTE DEL PERIODO. Aquí ponía que era la
+              única de las tres que no podía, porque la lista de /captaciones se
+              traía con tres filtros y ninguno era la fecha, y que en su sitio se
+              mandaba la palabra del periodo para que esa pantalla lo dijera en
+              un cartel. El dueño no quería el cartel: quería el filtro. Ahora
+              `getCaptaciones` corta por fecha y la pantalla enseña las mismas
+              que promete el número, con una chapa que se quita para volver a
+              verlas todas. */}
           <OrigenCard
-            href={periodo === "total" ? "/captaciones" : `/captaciones?periodo=${periodo}`}
+            href={enlaceCaptaciones()}
             icon={Radar} label="Scraper · mis captaciones"
             datos={data.origenes.scraper} periodo={periodo}
             fallo={data.origenes.scraper == null}

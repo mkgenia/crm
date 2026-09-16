@@ -48,6 +48,14 @@ export interface AdminData {
     qr: Periodos
     otros: number
   }
+  /**
+   * Dónde empieza cada periodo corto, en ISO y calculado en el servidor con el
+   * mismo reloj con el que se contó la tarjeta del scraper.
+   *
+   * Lo único que lee de aquí esta pantalla es el enlace de esa tarjeta. Es un
+   * dato, no algo que se pinte: ningún número de la portada cambia por esto.
+   */
+  cortes: { hoy: string; semana: string; mes: string }
   demandas: Periodos & { sinVer: number; cualificadas: number }
   leads: number
   leadsEsteMes: number
@@ -93,6 +101,29 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
 }) {
   const totalPipeline = data.pipeline.reduce((s, p) => s + p.count, 0)
   const [periodo, setPeriodo] = useState<ClavePeriodo>("hoy")
+
+  /**
+   * EL ENLACE DE LA TARJETA DEL SCRAPER, y sólo eso de esta portada.
+   *
+   * Pulsar un número que dice 13 tiene que llevar a esos 13, no a las 759.
+   * /captaciones necesita dos cosas para conseguirlo: el instante en que empieza
+   * el periodo puesto (`desde`, calculado en el servidor con el mismo reloj con
+   * el que se contó la tarjeta) y CONTRA QUÉ compararlo.
+   *
+   * `fecha=senal` porque ESTA tarjeta no cuenta anuncios, cuenta propietarios
+   * que se interesaron, y los fecha por cuándo dijeron que sí. La del agente
+   * cuenta sus captaciones asignadas por cuándo entró el anuncio y manda
+   * `fecha=entrada`. Son dos listas distintas —el mismo día, 13 y 98—, así que
+   * cada enlace tiene que traer la suya o el número promete una cosa y la
+   * pantalla enseña otra.
+   *
+   * "Todo" no tiene corte: lleva a la lista entera, que es lo que dice.
+   */
+  const enlaceScraper = () => {
+    if (periodo === "total") return "/captaciones"
+    const q = new URLSearchParams({ fecha: "senal", periodo, desde: data.cortes[periodo] })
+    return `/captaciones?${q.toString()}`
+  }
 
   return (
     <div className="p-8 space-y-8">
@@ -170,7 +201,7 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
               sección nueva se le añade al final: este número no puede depender
               de que baje a buscarlo. */}
           <OrigenCard
-            href="/captaciones" icon={Radar} label="Scraper · con señal"
+            href={enlaceScraper()} icon={Radar} label="Scraper · con señal"
             datos={data.origenes.scraper} periodo={periodo}
             tono="violeta"
             extra={

@@ -260,6 +260,24 @@ function porPeriodo(filas: Array<{ fecha_creacion?: string | null }>, reloj?: Da
 
 async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
   const supabase = await createAdminClient()
+
+  /**
+   * UN SOLO RELOJ para la tarjeta del scraper y para su enlace.
+   *
+   * Es lo mismo que ya se arregló en la portada del agente: el enlace lleva el
+   * corte del periodo a /captaciones, así que el número y la lista de destino
+   * tienen que contarse con EL MISMO instante. Dejando que `porPeriodo` se leyera
+   * su propio `new Date()`, el corte del enlace se escribiría antes de esperar a
+   * todas las consultas y el de la cuenta medio segundo después: un propietario
+   * que se interesara justo en esa rendija de hace siete días saldría en la
+   * lista y no en la tarjeta.
+   *
+   * Sólo lo toma la tarjeta del scraper, que es la única cuyo enlace lleva el
+   * corte. Las demás siguen llamando a `porPeriodo` sin reloj —cae a
+   * `new Date()`— y cuentan exactamente lo que contaban ayer.
+   */
+  const ahora = new Date()
+
   const inicioMes = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString()
 
   const hace30dias = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
@@ -441,13 +459,30 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
       // luego se cayeron no deben seguir sumando. Por eso los dos números no
       // tienen por qué cuadrar, y está bien que no cuadren.
       scraper: {
-        ...porPeriodo(primerInteres.map((e) => ({ fecha_creacion: e.fecha }))),
+        ...porPeriodo(primerInteres.map((e) => ({ fecha_creacion: e.fecha })), ahora),
         total: interesadosTotal,
       },
       rrss: familia("rrss"),
       qr: familia("qr"),
       otros,
     },
+    // DÓNDE EMPIEZA CADA PERIODO CORTO, ya calculado aquí y con el mismo reloj
+    // con el que se ha contado la tarjeta del scraper.
+    //
+    // Es el mismo campo que ya lleva la portada del agente y está aquí por lo
+    // mismo: el enlace de esa tarjeta se lo pasa a /captaciones para que la lista
+    // enseñe a los MISMOS propietarios que promete el número. Calcularlo en el
+    // componente sería calcularlo con Date.now() durante el render, y el
+    // servidor y el navegador escribirían dos enlaces distintos: desajuste de
+    // hidratación.
+    cortes: (() => {
+      const c = cortesPeriodo(ahora)
+      return {
+        hoy: new Date(c.hoy).toISOString(),
+        semana: new Date(c.semana).toISOString(),
+        mes: new Date(c.mes).toISOString(),
+      }
+    })(),
     demandas: {
       ...porPeriodo(demandas),
       sinVer: demandas.filter((d) => d.visto === false).length,
@@ -570,8 +605,18 @@ async function getAgentData(userId: string): Promise<AgentData> {
    * de un count exacto, que no crece con la tabla. Así la portada del agente
    * nunca se trae el histórico entero de nada —y las demandas son 1.825 filas
    * iguales para los seis agentes—.
+   *
+   * ARREGLADO EN REVISIÓN: se restaba de `Date.now()` y tiene que restarse de
+   * `ahora`, que es el reloj con el que se trocean los periodos (`porPeriodo`) y
+   * con el que se escribe el `desde` que viaja en el enlace de las tarjetas.
+   * Leído aquí, `Date.now()` es unos milisegundos MÁS TARDE que `ahora`, o sea
+   * que esta ventana empezaba un pelo después del corte de "30 días": una fila
+   * caída justo en esa rendija de hace treinta días entraba en la lista de
+   * destino —que corta por `desde`— y no en el número de la tarjeta, que sólo
+   * puede contar lo que hay en esta ventana. Es la misma rendija que ya se cerró
+   * pasándole el reloj a `porPeriodo`, y quedaba abierta por este lado.
    */
-  const hace30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+  const hace30 = new Date(ahora.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
   /**
    * Lo poco que hace falta de un constructor de supabase para ponerle filtros.

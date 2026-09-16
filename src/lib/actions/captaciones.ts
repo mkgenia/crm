@@ -22,6 +22,73 @@ export async function getCaptacionByTelefono(telefono: string) {
 }
 
 /**
+ * LAS DOS COLUMNAS DE FECHA POR LAS QUE SE PUEDE CORTAR LA LISTA.
+ *
+ * Son dos y no una porque las dos tarjetas de la portada NO CUENTAN LO MISMO, y
+ * cada enlace tiene que traer aquí SU pregunta:
+ *
+ *   · `created_at` — CUÁNDO ENTRÓ EL ANUNCIO. Es lo que cuenta la tarjeta del
+ *     agente ("Scraper · mis captaciones"), que son sus fichas asignadas.
+ *   · `senal_en`   — CUÁNDO DIJO QUE SÍ EL PROPIETARIO. Es lo que cuenta la
+ *     tarjeta del administrador ("Scraper · con señal"), que no mide anuncios
+ *     sino gente que ha levantado la mano.
+ *
+ * Medido el día de escribir esto: 13 captaciones con señal en los últimos 7
+ * días contra 98 creadas en los últimos 7 días. O sea que cortar por la columna
+ * equivocada no es un matiz: es que la tarjeta diga 13 y salgan 98.
+ *
+ * La lista vive aquí y no en la pantalla porque esta función está exportada
+ * desde un fichero "use server": la puede llamar cualquiera desde el navegador
+ * con el nombre de columna que se invente, y `.gte()` con una columna que no
+ * existe es un 400 de PostgREST disfrazado de "no tienes captaciones".
+ */
+const CAMPOS_FECHA = ["created_at", "senal_en"] as const
+type CampoFecha = (typeof CAMPOS_FECHA)[number]
+
+/** El corte de fecha tal y como viaja: la columna y desde cuándo, juntas. */
+type CorteFecha = { campo: CampoFecha; desde: string }
+
+/**
+ * Pone el corte de fecha a una consulta de captaciones, si es que hay corte y
+ * si es que se puede creer.
+ *
+ * Va en UNA función porque la usan los dos sitios que cuentan —la página de la
+ * lista y los contadores de las pastillas— y escrita dos veces se irían
+ * separando: el día que alguien cambiara aquí el criterio de la señal, la
+ * pastilla diría un número y la lista enseñaría otro.
+ *
+ * Lo que no cuadra NO filtra, en vez de reventar: una columna inventada o una
+ * fecha ilegible dejan la consulta como estaba y sale la lista entera, que es
+ * menos malo que una pantalla vacía sin explicación.
+ *
+ * Y con `senal_en` se exige además `senal IS NOT NULL`: la pregunta de la
+ * tarjeta del administrador es "quién se interesó", y a quien se le quitó la
+ * señal después —contestó que no— ya no se interesa, aunque conserve la fecha
+ * en que un día lo hizo. Es el mismo criterio con el que cuenta esa tarjeta.
+ *
+ * Los dos métodos se declaran en una interfaz aparte y se entra y se sale con
+ * una conversión, en vez de atar el genérico a ellos: los constructores de
+ * supabase se tipan a sí mismos de forma recursiva y TypeScript se rinde con
+ * "Type instantiation is excessively deep" (TS2589). Devolviendo el tipo de
+ * entrada, quien llama conserva su `.range()`, su `.or()` y su `count`. La
+ * conversión es cierta: los dos métodos devuelven el MISMO constructor.
+ */
+interface FiltrablePorFecha {
+  gte(columna: string, valor: string): FiltrablePorFecha
+  not(columna: string, operador: "is", valor: null): FiltrablePorFecha
+}
+
+function conCorte<Q>(query: Q, corte: CorteFecha | undefined): Q {
+  if (!corte) return query
+  if (!(CAMPOS_FECHA as readonly string[]).includes(corte.campo)) return query
+  const ms = new Date(corte.desde).getTime()
+  if (Number.isNaN(ms)) return query
+  const q = (query as unknown as FiltrablePorFecha)
+    .gte(corte.campo, new Date(ms).toISOString())
+  return (corte.campo === "senal_en" ? q.not("senal", "is", null) : q) as unknown as Q
+}
+
+/**
  * Una página de la lista de captaciones, con el total de verdad.
  *
  * Antes acababa en `.limit(500)` y devolvía el array pelado. Con 1.031 activas
@@ -39,6 +106,7 @@ export async function getCaptacionByTelefono(telefono: string) {
 export async function getCaptaciones({
   filtro,
   search,
+  corte,
   pagina = 1,
   // Replica POR_PAGINA de shared/paginador. No se importa de allí porque ese
   // módulo es "use client" y un módulo de servidor no puede leer sus constantes.
@@ -46,6 +114,18 @@ export async function getCaptaciones({
 }: {
   filtro?: string
   search?: string
+  /**
+   * EL CORTE DE FECHA, cuando se llega pulsando una tarjeta de la portada.
+   *
+   * Un solo parámetro con la columna DENTRO, y no dos sueltos (`desde` +
+   * `campoFecha`), porque los dos datos no significan nada por separado: una
+   * fecha sin columna no se sabe contra qué comparar y una columna sin fecha no
+   * filtra nada. Con dos parámetros opcionales, `{ campoFecha: "senal_en" }` a
+   * secas es una llamada legal que no hace nada —y lo que no hace nada en una
+   * lista es enseñar 759 filas donde la tarjeta prometía 13—. Juntos, esa
+   * combinación no se puede ni escribir.
+   */
+  corte?: CorteFecha
   /** Empieza en 1. */
   pagina?: number
   porPagina?: number
@@ -71,6 +151,11 @@ export async function getCaptaciones({
   if (!isAdmin) {
     query = query.eq("agente_id", userId)
   }
+
+  // El corte de fecha de la tarjeta que se ha pulsado. Lo valida `conCorte`, que
+  // es también quien lo pone en los contadores de las pastillas: los dos tienen
+  // que estar mirando las mismas filas.
+  query = conCorte(query, corte)
 
   if (search) {
     // Las comas y los paréntesis son la sintaxis del propio `.or()`: sin
@@ -148,8 +233,24 @@ export async function getCaptaciones({
  * exportado desde un fichero "use server", así que cualquiera puede llamarlo
  * desde el navegador: con `soloAgenteId` a elección de quien llamara, un agente
  * podía pedir los totales de otro.
+ *
+ * ARREGLADO EN REVISIÓN: el párrafo del corte llegó como un SEGUNDO bloque
+ * pegado justo debajo de éste, y dos bloques seguidos no son dos párrafos: el
+ * editor sólo enseña el que toca la declaración, así que todo lo de arriba
+ * —incluida la nota de por qué el rol ya no llega por parámetro— desaparecía
+ * del tooltip de quien fuera a llamar esta función, que es justo quien tiene
+ * que leerla. Va todo en un bloque.
+ *
+ * `corte` es el MISMO que se le pasa a `getCaptaciones`, y por el mismo motivo.
+ *
+ * Si la lista se corta por fecha y estos contadores no, la pantalla se
+ * contradice sola: la cabecera diría "759 propiedades · 97 interesados", la
+ * pastilla "Todas 759" y debajo saldrían trece fichas. El número de la tarjeta
+ * que se acaba de pulsar es el único que importa, y aquí tienen que salir todos
+ * de las mismas filas. Quitar el corte es pulsar la chapa, que vuelve a esta
+ * pantalla sin parámetros y lo cuenta todo otra vez.
  */
-export async function getTotalesCaptaciones() {
+export async function getTotalesCaptaciones({ corte }: { corte?: CorteFecha } = {}) {
   const { userId, isAdmin } = await sesionActual()
   const supabase = isAdmin ? await createAdminClient() : await createClient()
 
@@ -163,7 +264,9 @@ export async function getTotalesCaptaciones() {
   const base = () => {
     let q = supabase.from("captaciones").select("id", { count: "exact", head: true }).eq("activo", true)
     if (!isAdmin) q = q.eq("agente_id", userId)
-    return q
+    // El corte va en `base()` y no en cada contador: así lo llevan los doce a la
+    // vez y no hay ninguno que se quede contando la tabla entera.
+    return conCorte(q, corte)
   }
 
   // `head: true`, así que viajan los contadores y no las filas: da igual que la

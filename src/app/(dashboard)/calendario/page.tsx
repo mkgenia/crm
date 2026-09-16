@@ -4,7 +4,7 @@ import { getAgendaMes } from "@/lib/actions/agenda"
 import { getCatalogosActivos } from "@/lib/actions/catalogos"
 import { opcionesDe } from "@/lib/catalogos"
 import { AgendaPanel } from "@/components/agenda/agenda-panel"
-import { ProximasEntradas } from "@/components/agenda/proximas-entradas"
+import { EntradasVencidas, ProximasEntradas } from "@/components/agenda/proximas-entradas"
 
 export const metadata = { title: "Calendario — mkgenia" }
 
@@ -59,12 +59,26 @@ export default async function CalendarioPage() {
             grande
             catalogos={catalogos}
           />
-          <ProximasEntradas
-            entradas={agenda.entradas}
-            personas={agenda.personas}
-            yoId={agenda.yoId}
-            isAdmin={agenda.isAdmin}
-          />
+          {/* Lo vencido, POR ENCIMA de lo que viene: es lo urgente y es lo
+              único que la rejilla del mes no puede enseñar, porque una cita de
+              mayo no sale mirando septiembre. Sin vencidas el bloque no se
+              pinta y aquí queda sólo "Lo que viene", sin hueco: el espacio lo
+              pone el gap del padre, no un margen del hijo. */}
+          <div className="flex flex-col gap-6">
+            <EntradasVencidas
+              entradas={agenda.vencidas}
+              ocultas={agenda.vencidasOcultas}
+              personas={agenda.personas}
+              yoId={agenda.yoId}
+              isAdmin={agenda.isAdmin}
+            />
+            <ProximasEntradas
+              entradas={agenda.entradas}
+              personas={agenda.personas}
+              yoId={agenda.yoId}
+              isAdmin={agenda.isAdmin}
+            />
+          </div>
         </div>
       ) : (
         <div className="rounded-xl border border-dashed border-border p-8 text-sm text-muted-foreground max-w-lg">

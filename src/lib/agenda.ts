@@ -38,10 +38,86 @@ export interface EntradaAgenda {
   created_at: string
 }
 
+/**
+ * Una entrada pasada de fecha y sin completar, con el "hace 4 meses" YA ESCRITO.
+ *
+ * El texto viaja hecho desde el servidor a propósito. Sale de `Date.now()`, y
+ * calculado durante el render el servidor y el navegador escribirían cosas
+ * distintas: React lo canta como desajuste de hidratación. Es el mismo trato
+ * que la portada del agente le da a `toqueTexto` y `esperaTexto`.
+ */
+export interface EntradaVencida extends EntradaAgenda {
+  desdeHaceTexto: string
+}
+
 export interface PersonaAgenda {
   id: string
   nombre: string
   esAdmin: boolean
+}
+
+/**
+ * Las piezas de una fecha vistas desde MADRID. Sólo la usa `inicioDiaMadrid`.
+ *
+ * `en-CA` no es idioma: se leen las piezas una a una con `formatToParts`, así
+ * que lo único que importa es que el formato pida las siete en 24 horas.
+ */
+const PARTES_MADRID = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Madrid", hour12: false,
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+})
+
+/**
+ * El instante en que empieza (00:00 de MADRID) el día de `base`.
+ *
+ * NO vale cortar el día con `setHours(0, 0, 0, 0)`, que es la hora del
+ * SERVIDOR. En producción el servidor va en UTC y Madrid va una o dos horas por
+ * delante, y eso rompe justo el caso más común: una entrada de "todo el día" la
+ * crea el navegador como `new Date("2026-09-16T00:00:00")` con la hora de
+ * Madrid (agenda-panel.tsx:362), o sea que se guarda como 2026-09-15T22:00Z.
+ * Cortando por la medianoche de UTC, la tarea de HOY caería del lado de ayer y
+ * el bloque la cantaría como vencida un día antes de tiempo.
+ *
+ * Está copiada de la portada del agente —donde es privada de la página— por lo
+ * mismo que `desdeHace`: allí no es una librería de la que se pueda importar.
+ */
+export function inicioDiaMadrid(base: Date): Date {
+  const p: Record<string, string> = {}
+  for (const parte of PARTES_MADRID.formatToParts(base)) p[parte.type] = parte.value
+  // Con `hour12: false` algunas versiones de Node escriben la medianoche como
+  // "24" en vez de "00"; sin esto el desfase saldría 24 h torcido esa hora.
+  const hora = p.hour === "24" ? "00" : p.hour
+  // El mismo reloj leído como si fuera UTC. No es una fecha de verdad: sólo
+  // sirve para restar y saber cuánto va Madrid por delante de UTC ahora mismo.
+  const comoUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hora, +p.minute, +p.second)
+  const desfase = comoUTC - base.getTime()
+  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day) - desfase)
+}
+
+/**
+ * "hace 4 meses". Sólo se llama DESDE EL SERVIDOR (ver `EntradaVencida`).
+ *
+ * Está copiada de la portada del agente —donde es privada del módulo— en vez de
+ * importada porque aquel fichero es una página, no una librería. Cuando haya un
+ * sitio común para el tiempo, las dos se van allí.
+ *
+ * Se redondea a la baja sin pasar de "meses": una cita de hace medio año no se
+ * lee mejor en años, y quien la tiene vencida ya ha entendido el mensaje.
+ */
+export function desdeHace(iso: string): string {
+  const ms = new Date(iso).getTime()
+  if (Number.isNaN(ms)) return "hace tiempo"
+
+  const min = Math.floor((Date.now() - ms) / 60000)
+  if (min < 2) return "hace un momento"
+  if (min < 60) return `hace ${min} min`
+  const horas = Math.floor(min / 60)
+  if (horas < 24) return `hace ${horas} h`
+  const dias = Math.floor(horas / 24)
+  if (dias < 31) return `hace ${dias} ${dias === 1 ? "día" : "días"}`
+  const meses = Math.floor(dias / 30)
+  return `hace ${meses} ${meses === 1 ? "mes" : "meses"}`
 }
 
 /** Un tipo de agenda listo para pintar: su nombre y sus clases de color. */

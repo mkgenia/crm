@@ -1,9 +1,10 @@
 "use client"
 
 import { Fragment, useEffect, useRef, useState, type ComponentProps } from "react"
+import Link from "next/link"
 import { DetailPanel } from "./detail-panel"
 import { PapeleraList } from "./papelera-list"
-import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, Trash2, Loader2, CheckSquare, Square, Trash, Building2, UserMinus } from "lucide-react"
+import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, Trash2, Loader2, CheckSquare, Square, Trash, Building2, UserMinus, X } from "lucide-react"
 import { CaptacionesPipeline } from "./captaciones-pipeline"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { ESTADO_COLORS, AGENDA_COLORS, type EstadoAgenda } from "@/types/captaciones"
@@ -14,6 +15,16 @@ import { darDeBajaMasivo, asignarAgentesMasivo, getCaptaciones } from "@/lib/act
 import { quitarAgenteCaptaciones } from "@/lib/actions/asignacion"
 
 type Captacion = Awaited<ReturnType<typeof getCaptaciones>>["filas"][number]
+
+/**
+ * El corte de fecha, con la forma exacta que pide la acción.
+ *
+ * Se saca de ella con `Parameters` en vez de volver a escribirlo aquí: es el
+ * mismo truco que ya usa `Captacion` un poco más arriba, y lo que impide que el
+ * día que se añada una tercera columna de fecha esta pantalla siga creyendo que
+ * sólo hay dos.
+ */
+type CorteFecha = NonNullable<NonNullable<Parameters<typeof getCaptaciones>[0]>["corte"]>
 type AgenteInfo = { id: string; nombre: string; apellidos: string | null; avatar_url: string | null }
 
 /**
@@ -450,9 +461,21 @@ interface Props {
    * trae ella sola de la base a partir del id.
    */
   capInicial?: number | null
+  /**
+   * EL CORTE DE FECHA CON EL QUE SE HA LLEGADO, ya validado en el servidor.
+   *
+   * Lo estrenan las dos tarjetas del scraper de las portadas. Hace falta aquí
+   * —y no sólo en la primera consulta de la página— porque esta lista se pide
+   * ella sola cada vez que se cambia de pastilla, se busca o se pasa de página:
+   * sin llevarlo, la página 2 devolvería las 759 y el filtro se habría
+   * evaporado a la primera.
+   */
+  corteFecha?: CorteFecha | null
+  /** Y cómo se lee ese corte ("Se interesaron en los últimos 7 días"). */
+  etiquetaFecha?: string
 }
 
-export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalesEstado, totalesSenal, catalogos = [], isAdmin = true, agentes = [], capInicial = null }: Props) {
+export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalesEstado, totalesSenal, catalogos = [], isAdmin = true, agentes = [], capInicial = null, corteFecha = null, etiquetaFecha = "" }: Props) {
   /*
    * Las pastillas, en dos grupos y en este orden a propósito:
    *
@@ -570,6 +593,13 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
     return () => clearTimeout(t)
   }, [texto])
 
+  // El corte se parte en sus dos piezas sueltas para poder ponerlas en las
+  // dependencias del efecto: el objeto entero se compara por identidad, y basta
+  // con que el servidor vuelva a renderizar para que sea otro y la lista se
+  // recargue sin que haya cambiado nada.
+  const campoFecha = corteFecha?.campo ?? null
+  const desdeFecha = corteFecha?.desde ?? null
+
   const primeraCarga = useRef(true)
   useEffect(() => {
     // La primera página ya llega renderizada desde el servidor: volver a pedirla
@@ -581,7 +611,16 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
 
     let cancelado = false
     setCargando(true)
-    getCaptaciones({ filtro, search, pagina, porPagina: POR_PAGINA })
+    getCaptaciones({
+      filtro,
+      search,
+      pagina,
+      porPagina: POR_PAGINA,
+      // Se rearma aquí a partir de las dos piezas, en vez de mandar el objeto de
+      // la prop: así lo que se consulta es exactamente lo que está en las
+      // dependencias de abajo.
+      corte: campoFecha && desdeFecha ? { campo: campoFecha, desde: desdeFecha } : undefined,
+    })
       .then((res) => {
         if (cancelado) return
         setFilas(res.filas)
@@ -608,7 +647,7 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
     // Da por obsoleta la respuesta anterior: tecleando o pasando páginas deprisa
     // llegan desordenadas, y la última en llegar no tiene por qué ser la buena.
     return () => { cancelado = true }
-  }, [filtro, search, pagina, recarga])
+  }, [filtro, search, pagina, recarga, campoFecha, desdeFecha])
 
   // Volver a la página 1 se hace aquí y no en un efecto sobre [filtro, search]:
   // ese efecto correría con la página vieja todavía puesta y dispararía una
@@ -808,6 +847,41 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
 
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-2 flex-wrap">
+            {/* LA CHAPA DEL CORTE DE FECHA, con su X, igual que las de /leads.
+
+                Sólo sale si se ha llegado pulsando una tarjeta del scraper. Y
+                dice QUÉ está filtrando, no sólo que filtra: "entradas en los
+                últimos 7 días" y "se interesaron en los últimos 7 días" son dos
+                listas distintas —hoy 98 y 13— y son justo las dos tarjetas que
+                traen aquí, una de cada portada.
+
+                Es un enlace y no un botón, que es lo único en lo que se separa
+                del patrón de /leads. Allí la lista, su total y sus contadores los
+                pide el propio navegador con el mismo constructor, así que soltar
+                el filtro es un setState y todo se recalcula solo. Aquí los
+                contadores los cuenta el SERVIDOR y bajan como props: un setState
+                movería la lista y dejaría la cabecera y las pastillas contando
+                otra cosa. Quitar el filtro es quitarlo de la URL, que es de
+                donde viene, y volver a esta misma pantalla sin él.
+
+                ARREGLADO EN REVISIÓN: la chapa la decide `corteFecha` —lo que
+                de verdad recorta la lista— y no `etiquetaFecha`, que es sólo
+                cómo se lee. Colgada del texto, una etiqueta que llegara vacía
+                dejaba una lista filtrada SIN chapa: trece fichas donde hay 759,
+                sin decir por qué y sin X que pulsar, que es justo lo contrario
+                del "yo ya después pondré verlas todas". El texto pasa a ser el
+                relleno y no la condición, igual que la chapa de fecha de
+                /leads, que cuelga de `desde` y cae en "Con filtro de fecha". */}
+            {corteFecha && (
+              <Link
+                href="/captaciones"
+                title="Ver todas, sin filtro de fecha"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border border-border text-muted-foreground font-medium whitespace-nowrap transition-colors hover:border-muted-foreground/40 hover:text-foreground"
+              >
+                {etiquetaFecha || "Con filtro de fecha"}
+                <X className="h-3 w-3 shrink-0 opacity-70" />
+              </Link>
+            )}
             {pastillas.map((f, i) => (
               <Fragment key={`${f.grupo}:${f.key}`}>
                 {haySenal && i === primerEstado && <span aria-hidden className="h-5 w-px bg-border" />}
@@ -1012,12 +1086,29 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
           {filas.length === 0 && !cargando && totalFiltrado === 0 && (
             <div className="py-20 text-center space-y-2">
               <Home className="h-8 w-8 text-muted-foreground/20 mx-auto" />
+              {/* UNA LISTA VACÍA TIENE QUE DECIR POR QUÉ ESTÁ VACÍA, y el corte
+                  de fecha es la razón que menos se ve: la pastilla pulsada y el
+                  texto del buscador están a la vista, pero "sólo los de los
+                  últimos 7 días" llega por la URL. Sin nombrarlo, una pantalla
+                  en blanco se lee como "no tengo captaciones" —y el día que el
+                  dueño vacíe la tabla para arrancar limpio, eso es lo único que
+                  se va a ver aquí—. La frase es la misma de la chapa, así que
+                  quien la lea sabe también qué X hay que pulsar.
+
+                  Y se pregunta por `corteFecha` y no por la etiqueta por lo
+                  mismo que la chapa: quien vacía la lista es el corte. Sin
+                  etiqueta, esta pantalla caería en "Aún no hay captaciones" —o
+                  en "no tienes ninguna asignada"— con el filtro puesto, que el
+                  día que el dueño arranque limpio es exactamente la frase que
+                  no se puede confundir. */}
               <p className="text-sm text-muted-foreground">
-                {texto || filtro !== "todas"
-                  ? "No hay captaciones con estos filtros"
-                  : isAdmin
-                    ? "Aún no hay captaciones. El scraper las importará automáticamente."
-                    : "No tienes captaciones asignadas. El admin te asignará propiedades."}
+                {corteFecha
+                  ? `No hay captaciones${texto || filtro !== "todas" ? " con estos filtros" : ""} · ${(etiquetaFecha || "con filtro de fecha").toLocaleLowerCase("es")}`
+                  : texto || filtro !== "todas"
+                    ? "No hay captaciones con estos filtros"
+                    : isAdmin
+                      ? "Aún no hay captaciones. El scraper las importará automáticamente."
+                      : "No tienes captaciones asignadas. El admin te asignará propiedades."}
               </p>
             </div>
           )}
