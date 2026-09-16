@@ -129,9 +129,26 @@ interface ZonaMapProps {
 export function ZonaViewMap({ existingCoords, fitBounds }: ZonaMapProps) {
   return (
     <MapContainer center={[39.469907, -0.376288]} zoom={13} zoomControl={false} style={{ height: "100%", width: "100%" }}>
+      {/* EL MAPA DE FONDO, Y POR QUÉ YA NO ES CARTO.
+          CARTO dejó de servir sus mapas oscuros sin registro. Las teselas siguen
+          llegando con un 200 tan normal, pero con "API KEY REQUIRED" estampado en
+          diagonal por toda la pantalla: no es un error que se vea en la consola,
+          es una marca dentro de la propia imagen.
+      
+          Esri "Dark Gray Canvas" no pide clave y además es lo que toca aquí: los
+          basemaps "canvas" están hechos para llevar datos encima. Van las DOS capas
+          que publica Esri por separado —el fondo debajo del dato y las etiquetas
+          ENCIMA— para que los nombres de las calles no queden tapados por los
+          colores que se pintan sobre el mapa.
+      
+          Ojo al orden de la URL: Esri la sirve como {z}/{y}/{x}, no {z}/{x}/{y}. */}
+<TileLayer
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; Esri, HERE, Garmin'
+      />
+      {/* Las etiquetas, encima del dato. */}
       <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
       />
       {existingCoords && <ZonaPolygon key={JSON.stringify(existingCoords?.[0])} coords={existingCoords} fitBounds={fitBounds} />}
     </MapContainer>
@@ -147,9 +164,15 @@ interface ZonaDrawMapProps {
 export function ZonaDrawMap({ onCreated, onClear, clearSignal }: ZonaDrawMapProps) {
   return (
     <MapContainer center={[39.469907, -0.376288]} zoom={13} zoomControl={false} style={{ height: "100%", width: "100%" }}>
+      {/* Mismo fondo que el mapa de al lado: si uno lleva marca de agua y el
+          otro no, el que dibuja la zona parece de otra aplicación. */}
       <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &middot; Esri, HERE, Garmin'
+      />
+      {/* Las etiquetas, encima del dato. */}
+      <TileLayer
+        url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
       />
       <DrawControls onCreated={onCreated} onClear={onClear} clearSignal={clearSignal} />
     </MapContainer>

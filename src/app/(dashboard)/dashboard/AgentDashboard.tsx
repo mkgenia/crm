@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { useState } from "react"
 import {
   Building2, UserCircle, CalendarClock, CalendarDays,
   Phone, AlertTriangle, Home, Target, Radar, Share2, Globe, Inbox, Heart,
@@ -9,10 +10,12 @@ import { AgendaPanel } from "@/components/agenda/agenda-panel"
 import type { EntradaAgenda, PersonaAgenda } from "@/lib/agenda"
 import { cn } from "@/lib/utils"
 import { nombreDe, colorDe, claseColor, clasePunto, type Catalogo } from "@/lib/catalogos"
-// LA MISMA TARJETA QUE PINTA EL ADMINISTRADOR. Vivía dentro de
-// `AdminDashboard.tsx` y se ha sacado a un fichero compartido para poder
-// enseñarle al agente sus seis, que son las seis de él.
-import { OrigenCard } from "@/components/dashboard/origen-card"
+// LA MISMA TARJETA QUE PINTA EL ADMINISTRADOR, y desde ahora también su mismo
+// selector de periodo. Vivía dentro de `AdminDashboard.tsx` y se sacó a un
+// fichero compartido para poder enseñarle al agente sus seis, que son las seis
+// de él; los cuatro botones salen de la misma lista `PERIODOS` para que "7 días"
+// signifique lo mismo en las dos pantallas.
+import { OrigenCard, PERIODOS, type ClavePeriodo, type Periodos } from "@/components/dashboard/origen-card"
 
 /**
  * La portada del agente.
@@ -105,7 +108,6 @@ export interface FilaDia {
 
 export interface AgentData {
   captaciones: number | null
-  captacionesEsteMes: number | null
   wa: Array<{ valor: string; nombre: string; color: string | null; count: number | null }>
   /** Las captaciones activas a las que todavía no se ha escrito: no son de
    *  ningún valor del catálogo y sin esto no salían en ninguna pastilla. */
@@ -125,33 +127,33 @@ export interface AgentData {
     semana: number | null
   }
   /**
-   * SUS LEADS POR FAMILIA DE FUENTE, que son dos de las seis tarjetas.
+   * LAS CUATRO TARJETAS QUE RESPONDEN AL SELECTOR DE PERIODO.
    *
-   * No hay una entrada por cada valor del catálogo: hay DOS, las dos que pidió
-   * el dueño. Los nombres de `fuente` los escriben workflows distintos y no hay
-   * CHECK que los sujete, así que cada tarjeta agrupa una familia de valores
-   * (page.tsx) y no un valor suelto: Instagram y Facebook son la misma tarjeta.
+   * Cada una trae sus cuatro números —hoy, 7 días, 30 días y el total— y los
+   * catorce días de las barras, calculados en el servidor de una pasada: pulsar
+   * "7 días" no consulta nada, y por eso el cambio es instantáneo.
    *
-   * `total` es lo repartido desde el principio y `semana`, lo que le han
-   * repartido en los últimos siete días. Cada uno falla por su cuenta y un null
-   * es un contador roto, nunca un cero.
+   * No hay una entrada por cada valor del catálogo `fuente`: los nombres los
+   * escriben workflows distintos y no hay CHECK que los sujete, así que cada
+   * tarjeta agrupa una FAMILIA de valores (page.tsx) y no un valor suelto —
+   * Instagram y Facebook son la misma tarjeta—.
+   *
+   * `null` significa "no se ha podido contar" y NUNCA cero: la tarjeta se pinta
+   * entera en ámbar. No es tampoco "en desarrollo", que es lo que dice un
+   * `datos={null}` suelto — de distinguirlas se encarga `fallo`, que manda sobre
+   * `datos` en la tarjeta.
+   *
+   * LAS DEMANDAS SON DE LA EMPRESA Y NO SUYAS: la tabla no tiene columna de
+   * agente —una demanda es de un PISO, no de una persona—, así que ese número es
+   * idéntico para los seis agentes y para el administrador, y la tarjeta tiene
+   * que decirlo con palabras. `sinVer` viaja pegado a los periodos porque lo
+   * pinta la misma tarjeta, y puede fallar por su cuenta sin tumbarla.
    */
-  canales: {
-    rrss: { total: number | null; semana: number | null }
-    web: { total: number | null; semana: number | null }
-  }
-  /**
-   * LAS DEMANDAS, QUE SON DE LA EMPRESA Y NO SUYAS.
-   *
-   * La tabla `demandas` no tiene columna de agente: una demanda es de un PISO,
-   * no de una persona. O sea que este número es el MISMO para los seis agentes
-   * y para el administrador, y la tarjeta tiene que decirlo con palabras (ver
-   * dónde se pinta). Se llama `demandasEmpresa` y no `demandas` justamente para
-   * que nadie las confunda con algo suyo al leer este contrato.
-   */
-  demandasEmpresa: {
-    total: number | null
-    sinVer: number | null
+  origenes: {
+    rrss: Periodos | null
+    web: Periodos | null
+    scraper: Periodos | null
+    demandas: (Periodos & { sinVer: number | null }) | null
   }
   pipeline: Array<{ estado: string; count: number | null }>
   agenda: Array<{
@@ -175,12 +177,37 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   agendaEquipo: { entradas: EntradaAgenda[]; personas: PersonaAgenda[]; disponible: boolean }
   yoId: string
 }) {
+  /**
+   * EL AGENTE ARRANCA EN "TODO", NO EN "HOY" COMO EL ADMINISTRADOR.
+   *
+   * Son la misma lista de botones y la misma frase, pero no el mismo arranque, y
+   * es por el volumen: el administrador ve entrar leads de seis agentes y su
+   * "Hoy" casi nunca es cero, así que abrirle la portada en el día es abrirle lo
+   * que está pasando ahora. Un agente mueve dos o tres leads por semana —el de
+   * pruebas tiene 3 de Instagram, 3 de web y 1 captación—, o sea que su "Hoy" es
+   * cero la mayoría de los días POR DISEÑO, no por avería. Cuatro ceros nada más
+   * abrir el CRM no se leen como "hoy todavía no ha entrado nada": se leen como
+   * que la pantalla está rota.
+   *
+   * Arrancando en "Todo" ve lo que tiene, que es lo que un comercial quiere
+   * saber al sentarse, y el día sigue estando a un clic. Y lo de "¿ha entrado
+   * algo últimamente?" ya lo contestan las catorce barras de cada tarjeta, que
+   * se pintan mire uno el periodo que mire.
+   */
+  const [periodo, setPeriodo] = useState<ClavePeriodo>("total")
+
   // Sólo suma lo que se ha podido contar. Si TODOS los contadores fallaron no se
   // pinta la barra: una barra vacía dice "no tienes leads", que es distinto de
   // "no se han podido contar".
   const conteos = data.pipeline.map((p) => p.count).filter((c): c is number => c != null)
   const totalPipeline = conteos.reduce((s, c) => s + c, 0)
-  const pipelineMedido = conteos.length > 0
+  // ARREGLADO EN REVISIÓN: la condición era "se ha medido ALGUNO" y eso sólo
+  // cubría el fallo TOTAL. Con un estado caído de los ocho y los demás a cero,
+  // el bloque escribía "Aún no tienes leads asignados": un cero que se traga un
+  // contador roto, que es justo lo que esta pantalla no puede hacer. Basta UNO
+  // sin contar para que no se pueda afirmar que no hay nada, así que lo que se
+  // mira es si queda algún hueco, no si se midió alguno.
+  const pipelineRoto = data.pipeline.some((p) => p.count == null)
 
   // El bloque de WhatsApp sólo existe si tiene captaciones. Si el contador
   // falló (null) el bloque SÍ se pinta, para poder decir que falló.
@@ -233,7 +260,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   // mira a la semana que viene en vez de dejar un cero sin explicar. Un cero
   // con "no tienes nada pendiente" se lee como lo que es; un cero solo, en una
   // portada llena de números, se lee como que algo no ha cargado.
-  const subTareas =
+  const detalleTareas =
     vencidas == null || hoy == null
       ? "" // no llega a pintarse: la tarjeta dice "No se ha podido contar"
       : vencidas > 0
@@ -249,6 +276,20 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               // tarea apuntada para dentro de tres semanas existe y este cero
               // no puede negarla.
               : "nada para hoy ni esta semana"
+
+  // Y LA CUESTIÓN DEL PERIODO, DICHA EN LA PROPIA TARJETA.
+  //
+  // El calendario es la única de las seis que tiene un número y no se mueve al
+  // cambiar de periodo, y sin decirlo eso se lee como que está rota. No es que
+  // no sepa contar hacia atrás: es que mira hacia DELANTE. "Cuántas tareas me
+  // entraron hoy" no es una pregunta que se haga nadie; la pregunta es "qué
+  // tengo que despachar", y eso no depende de si arriba pone 7 días o 30.
+  //
+  // Va siempre y no sólo cuando hay un periodo corto elegido: la frase de
+  // encima habla de fechas de entrada también en "Todo", así que la advertencia
+  // vale igual. Y va al final porque lo primero que se quiere leer es el
+  // desglose del número.
+  const subTareas = detalleTareas && `${detalleTareas} · al margen del periodo`
 
   return (
     <div className="p-8 flex flex-col gap-8">
@@ -343,36 +384,74 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
           (`grid-cols-2 lg:grid-cols-3`): seis tarjetas son dos filas de tres
           exactas, sin huecos que rellenar.
 
-          SIN SELECTOR DE PERIODO Y SIN BARRAS, que es la única diferencia con
-          la de él y es a propósito. El administrador mueve miles de leads y sus
-          catorce barras contestan a "¿este canal sigue vivo?"; un agente mueve
-          dos leads por semana, y catorce barras casi planas no dicen nada —
-          dicen que no trabaja. Además tres de estas seis no tienen barras
-          posibles: el calendario mira hacia delante, las demandas son de la
-          empresa y matches todavía no existe. Así que las seis enseñan el
-          MISMO tipo de número —lo acumulado— y lo de esta semana va en palabras
-          en la línea de abajo, que es donde se lee sin interpretar un dibujo. */}
+          Y EL MISMO SELECTOR DE PERIODO, que lo pidió el dueño después: los
+          mismos cuatro botones, la misma frase encima y los mismos cuatro
+          números por tarjeta. Aquí decía que el agente iba SIN selector y sin
+          barras porque un agente mueve dos leads por semana y catorce barras
+          casi planas no dicen nada; lo que se ha visto es que sin ellas la
+          tarjeta tampoco decía si el canal sigue vivo, y con el selector puesto
+          las barras son además lo que salva un "Hoy" a cero de parecer una
+          avería. Lo que sí se mantiene es que no todas responden: DOS de las
+          seis lo ignoran a propósito —el calendario mira hacia delante y
+          matches todavía no existe— y las dos lo dicen en su línea de abajo en
+          vez de quedarse quietas sin explicar por qué. */}
       <section className="flex flex-col gap-4">
-        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-          De un vistazo
-        </h2>
+        <div className="flex items-end justify-between gap-4 flex-wrap">
+          <div className="flex flex-col gap-0.5">
+            <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+              De un vistazo
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {PERIODOS.find((p) => p.valor === periodo)!.frase}
+            </p>
+          </div>
+
+          {/* El selector no consulta nada: los cuatro periodos y las barras
+              vienen calculados del servidor, así que el cambio es instantáneo,
+              sin consulta ni spinner. Mismos botones y mismo violeta que el del
+              administrador, y salidos de la misma lista. */}
+          <div className="flex rounded-lg border border-border bg-card p-0.5">
+            {PERIODOS.map((p) => (
+              <button
+                key={p.valor}
+                onClick={() => setPeriodo(p.valor)}
+                className={cn(
+                  "px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+                  periodo === p.valor
+                    ? "bg-violet-500/15 text-violet-600 dark:text-violet-300"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {p.etiqueta}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           {/* Una familia de valores por tarjeta, no un valor: Instagram y
               Facebook son la misma pregunta. El enlace va a /leads sin filtro
-              justamente por eso —`?fuente=` sólo admite UN valor del catálogo—. */}
+              justamente por eso —`?fuente=` sólo admite UN valor del catálogo—.
+
+              El `extra` sólo se escribe cuando el canal está a cero: con
+              números, la línea de abajo la pone la tarjeta y dice "N en total",
+              que es justo lo que hace falta al mirar un periodo corto —un cero
+              en "Hoy" con "7 en total" debajo se lee como lo que es—. A cero se
+              prefiere esta frase a la de la tarjeta ("Aún sin usar"), porque a
+              un agente no le han faltado ganas: no le han repartido nada. */}
           <OrigenCard
             href="/leads" icon={Share2} label="Redes sociales"
-            datos={data.canales.rrss.total ?? 0}
-            fallo={data.canales.rrss.total == null}
+            datos={data.origenes.rrss} periodo={periodo}
+            fallo={data.origenes.rrss == null}
             tono="rosa"
-            extra={textoCanal(data.canales.rrss, "todavía no te han repartido ninguno")}
+            extra={data.origenes.rrss?.total === 0 ? "todavía no te han repartido ninguno" : undefined}
           />
           <OrigenCard
             href="/leads" icon={Globe} label="Web"
-            datos={data.canales.web.total ?? 0}
-            fallo={data.canales.web.total == null}
+            datos={data.origenes.web} periodo={periodo}
+            fallo={data.origenes.web == null}
             tono="cyan"
-            extra={textoCanal(data.canales.web, "todavía no te han repartido ninguno")}
+            extra={data.origenes.web?.total === 0 ? "todavía no te han repartido ninguno" : undefined}
           />
           {/* SUS CAPTACIONES, no "el scraper con señal" del administrador. Es
               el cambio que pidió el dueño: al agente no le sirve saber cuánta
@@ -381,18 +460,10 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               donde salen y porque así la nombra él. */}
           <OrigenCard
             href="/captaciones" icon={Radar} label="Scraper · mis captaciones"
-            datos={data.captaciones ?? 0}
-            fallo={data.captaciones == null}
+            datos={data.origenes.scraper} periodo={periodo}
+            fallo={data.origenes.scraper == null}
             tono="violeta"
-            extra={
-              data.captaciones === 0
-                ? "todavía no te han asignado ninguna"
-                : data.captacionesEsteMes == null
-                  ? "— este mes"
-                  : data.captacionesEsteMes > 0
-                    ? `${data.captacionesEsteMes} este mes`
-                    : "ninguna nueva este mes"
-            }
+            extra={data.origenes.scraper?.total === 0 ? "todavía no te han asignado ninguna" : undefined}
           />
           {/* LAS DEMANDAS SON DE LA EMPRESA Y LA TARJETA LO DICE SIEMPRE.
               La tabla `demandas` no tiene columna de agente —una demanda es de
@@ -404,26 +475,22 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               justo esa advertencia. */}
           <OrigenCard
             href="/demandas" icon={Inbox} label="Demandas"
-            datos={data.demandasEmpresa.total ?? 0}
-            fallo={data.demandasEmpresa.total == null}
+            datos={data.origenes.demandas} periodo={periodo}
+            fallo={data.origenes.demandas == null}
             tono="verde"
-            extra={
-              data.demandasEmpresa.total === 0
-                ? "de toda la empresa · todavía no ha entrado ninguna"
-                : data.demandasEmpresa.sinVer == null
-                  // El "—" y no callarse: el contador de las que faltan por ver
-                  // ha fallado, y "todas vistas" sería inventárselo.
-                  ? "de toda la empresa · — sin ver"
-                  : data.demandasEmpresa.sinVer > 0
-                    ? `de toda la empresa · ${data.demandasEmpresa.sinVer} sin ver`
-                    : "de toda la empresa · todas vistas"
-            }
+            extra={textoDemandas(data.origenes.demandas)}
           />
           {/* EL CALENDARIO. El número es lo ACCIONABLE —lo vencido más lo de
               hoy—, que es la misma cuenta que hacía la tarjeta "Mis tareas" que
               acaba de desaparecer de arriba: ni el total histórico, que a los
               seis meses son cientos de tareas hechas, ni sólo las de hoy,
-              porque una tarea de ayer sin hacer sigue siendo trabajo de hoy. */}
+              porque una tarea de ayer sin hacer sigue siendo trabajo de hoy.
+
+              NO RECIBE `periodo` Y ES A PROPÓSITO: manda un contador suelto
+              (`number`), que es la forma con la que la tarjeta no pinta ni
+              periodo ni barras. No sabría qué hacer con él —mira hacia delante,
+              no hacia atrás— y por eso su línea de abajo lo dice con palabras
+              en vez de quedarse quieta como si se hubiera colgado. */}
           <OrigenCard
             href="/calendario" icon={CalendarDays} label="Mi calendario"
             datos={tareasAhora ?? 0}
@@ -502,7 +569,15 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
                       </div>
                     ))}
                     {/* El hueco de las que aún no tienen estado. Sin esto el
-                        desglose suma menos que 'Mis captaciones'. */}
+                        desglose suma menos que el titular.
+
+                        ARREGLADO EN REVISIÓN: aquí ponía "suma menos que 'Mis
+                        captaciones'", y esa tarjeta se ha ido con la fila de
+                        arriba en este mismo cambio. El número con el que este
+                        desglose tiene que cuadrar es hoy el de la tarjeta
+                        'Scraper · mis captaciones', que cuenta exactamente las
+                        mismas filas (suyas y activas). Un comentario que manda
+                        a buscar algo que ya no está hace dudar del resto. */}
                     {data.waSinEstado != null && data.waSinEstado > 0 && (
                       <div className="flex items-center gap-1.5">
                         <span className="h-2 w-2 rounded-full shrink-0 border border-muted-foreground/40" />
@@ -524,7 +599,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
             Mi pipeline de leads
           </h2>
           <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-4 h-[calc(100%-2.5rem)]">
-            {pipelineMedido && totalPipeline > 0 ? (
+            {totalPipeline > 0 ? (
               <>
                 {/* El color de cada tramo sale del catálogo (clasePunto), no de
                     una paleta escrita aquí que no tenía por qué coincidir con la
@@ -557,7 +632,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
             ) : (
               <div className="flex flex-col items-center justify-center h-full gap-2 py-6">
                 <p className="text-sm text-muted-foreground text-center">
-                  {pipelineMedido ? "Aún no tienes leads asignados" : "No se ha podido contar tu pipeline"}
+                  {pipelineRoto ? "No se ha podido contar tu pipeline" : "Aún no tienes leads asignados"}
                 </p>
                 <Link href="/leads" className="text-xs text-primary hover:underline">Ver todos los leads →</Link>
               </div>
@@ -796,21 +871,35 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
 }
 
 /**
- * La línea de debajo del número en las dos tarjetas de canal.
+ * La línea de debajo del número en la tarjeta de DEMANDAS.
  *
- * Es palabra por palabra la que tenían las tarjetas por fuente que había aquí
- * antes, y se conserva porque distingue las tres cosas que esta portada no
- * puede confundir: un canal vacío ("todavía no te han repartido ninguno"), una
- * semana medida y a cero ("nada nuevo esta semana") y una semana que NO se ha
- * podido contar ("— esta semana"). Un espacio en blanco se colapsaría dentro
- * del <p> y el fallo se leería igual que el cero.
+ * Dice siempre "de toda la empresa", y por eso esta tarjeta es la única de las
+ * cuatro con periodo que se escribe su línea entera en vez de dejar que la
+ * tarjeta ponga "N en total". La tabla `demandas` no tiene columna de agente
+ * —una demanda es de un PISO, no de una persona—, así que el número es idéntico
+ * para los seis agentes, y el aviso va aquí abajo y no sólo en la etiqueta a
+ * propósito: la etiqueta se corta con puntos suspensivos en el móvil (dos
+ * tarjetas por fila) y esta línea se parte en dos, que es lo que se quiere
+ * cuando lo que no puede perderse es justo esa advertencia.
  *
- * El total roto no llega hasta aquí: esa tarjeta se pinta entera como fallo.
+ * Distingue además las tres cosas que esta portada no puede confundir: ninguna
+ * demanda todavía, unas cuantas sin ver, y un contador de "sin ver" que ha
+ * fallado ("— sin ver"), que NO es "todas vistas". El total roto no llega hasta
+ * aquí: esa tarjeta se pinta entera como fallo.
+ *
+ * AQUÍ ESTABA `textoCanal`, la línea de las tarjetas de redes y web. Se va con
+ * el selector: lo que decía —cuántos de esta semana— es ahora uno de los cuatro
+ * botones, y lo que hacía falta debajo del número (el total, para que un cero en
+ * "Hoy" se entienda) lo pone ya la propia tarjeta.
  */
-function textoCanal(canal: { total: number | null; semana: number | null }, vacio: string) {
-  if (canal.total === 0) return vacio
-  if (canal.semana == null) return "— esta semana"
-  return canal.semana > 0 ? `${canal.semana} esta semana` : "nada nuevo esta semana"
+function textoDemandas(d: (Periodos & { sinVer: number | null }) | null) {
+  // Un total roto no llega aquí: la tarjeta se pinta entera en ámbar.
+  if (d == null) return undefined
+  if (d.total === 0) return "de toda la empresa · todavía no ha entrado ninguna"
+  if (d.sinVer == null) return "de toda la empresa · — sin ver"
+  return d.sinVer > 0
+    ? `de toda la empresa · ${d.sinVer.toLocaleString("es")} sin ver`
+    : "de toda la empresa · todas vistas"
 }
 
 /*

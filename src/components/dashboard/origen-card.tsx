@@ -10,9 +10,9 @@ import { cn } from "@/lib/utils"
  * que se saca aquí con lo que necesita para funcionar: los tonos, las barras y
  * el tipo de los periodos. La del administrador NO cambia: las mismas clases,
  * los mismos textos y los mismos datos que antes. Todo lo que entra por el
- * agente —un contador suelto en vez de los cuatro periodos, y el estado de
- * fallo— llega por parámetros OPCIONALES que el administrador no pasa, así que
- * su rama de render es la de siempre, línea por línea.
+ * agente —el contador suelto de las dos tarjetas que ignoran el periodo, y el
+ * estado de fallo— llega por parámetros OPCIONALES que el administrador no
+ * pasa, así que su rama de render es la de siempre, línea por línea.
  */
 
 export interface Periodos {
@@ -59,11 +59,6 @@ function Barras({ serie, color }: { serie: number[]; color: string }) {
 }
 
 /**
- * Tarjeta de canal. Un canal que todavía no produce nada se pinta igual pero
- * apagado y con la etiqueta: saber que RRSS está a cero es tan útil como saber que
- * el scraper trae 838, y esconderlo daría la impresión de que no existe.
- */
-/**
  * Cada canal con su tono completo: el icono metido en una pastilla de color, el
  * borde con presencia y un lavado muy suave de fondo. Un borde al 25 % y un
  * número fino no sostienen una tarjeta de este tamaño — se quedan flotando.
@@ -77,6 +72,11 @@ export const TONOS = {
   granate: { chip: "bg-rose-500/15 text-rose-500",       borde: "border-rose-500/40",    wash: "from-rose-500/[0.08]",    barra: "fill-rose-500" },
 } as const
 
+/**
+ * Tarjeta de canal. Un canal que todavía no produce nada se pinta igual pero
+ * apagado y con la etiqueta: saber que RRSS está a cero es tan útil como saber que
+ * el scraper trae 838, y esconderlo daría la impresión de que no existe.
+ */
 export function OrigenCard({ href, icon: Icon, label, datos, periodo = "total", tono, extra, fallo }: {
   href: string
   icon: React.ComponentType<{ className?: string }>
@@ -86,10 +86,12 @@ export function OrigenCard({ href, icon: Icon, label, datos, periodo = "total", 
    * esta pantalla no puede confundir nunca:
    *
    *   · `Periodos` → los cuatro periodos y las barras de catorce días. Es lo que
-   *     manda el administrador, que tiene el selector arriba.
-   *   · `number` → UN contador y ya: ni periodo ni barras. Es lo que manda el
-   *     agente, cuyos números son de dos cifras y a quien catorce barras casi
-   *     planas sólo le dirían que no trabaja.
+   *     mandan LAS DOS portadas desde sus tarjetas con selector.
+   *   · `number` → UN contador y ya: ni periodo ni barras. Es para una tarjeta
+   *     que no puede responder al selector aunque lo tenga al lado —el
+   *     calendario del agente, que mira hacia DELANTE—, y la forma del dato es
+   *     lo que le impide fingir que responde. Quien la manda se encarga de
+   *     decir en su `extra` por qué ese número no se mueve.
    *   · `null` → esta sección todavía no existe ("En desarrollo"), que NO es lo
    *     mismo que un canal montado y a cero. Se distinguen a propósito.
    *
@@ -157,7 +159,19 @@ export function OrigenCard({ href, icon: Icon, label, datos, periodo = "total", 
               "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
               valor === 0 ? "text-muted-foreground/35" : "text-foreground",
             )}>
-              {valor}
+              {/* Sólo se escriben los miles con punto en la rama del CONTADOR
+                  SUELTO (`unico`). Se hizo por la tarjeta de demandas del
+                  agente, que eran 1.825 y se leían "1825" justo encima de una
+                  línea que sí los separa; esa tarjeta ha pasado después a
+                  `Periodos` con el selector de periodo, así que hoy la rama la
+                  usa sólo el calendario del agente, con números de dos cifras.
+                  Se queda porque el día que vuelva a entrar por aquí un número
+                  de cuatro cifras estará bien escrito.
+
+                  La rama de `Periodos` va CRUDA a propósito: es por donde
+                  entran las seis tarjetas del administrador, y formatearla
+                  cambiaría su portada, que no se toca. */}
+              {unico ? valor.toLocaleString("es") : valor}
             </p>
             <p className="text-[11px] text-muted-foreground leading-snug">
               {extra ?? (sinUsar
