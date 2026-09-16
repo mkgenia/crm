@@ -1100,7 +1100,17 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                         <button
                           onClick={() => setConfirmProspecto(true)}
                           disabled={promocionando}
-                          className="w-full flex items-center justify-center gap-2 h-9 rounded-md border border-violet-500/30 text-xs font-medium text-violet-400 transition-colors hover:bg-violet-500/10 hover:border-violet-500/60 disabled:opacity-40 disabled:pointer-events-none"
+                          // SÓLIDO, no de contorno. Estaba como borde violeta al
+                          // 30% sobre fondo oscuro y el dueño lo leyó como
+                          // "desactivado, sale en gris claro apenas se ve". No lo
+                          // estaba: es que un contorno translúcido sobre negro se
+                          // parece demasiado a un botón apagado, y éste es LA
+                          // acción de la ficha —el propietario ha dicho que sí—.
+                          // Mismo violeta relleno que el botón de confirmar del
+                          // diálogo, que es como esta casa pinta la acción
+                          // principal. Clases escritas enteras: Tailwind purga las
+                          // construidas con plantilla.
+                          className="w-full flex items-center justify-center gap-2 h-9 rounded-md bg-violet-500 text-xs font-medium text-white transition-colors hover:bg-violet-600 disabled:opacity-40 disabled:pointer-events-none"
                         >
                           {promocionando
                             ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Pasando a prospecto…</>

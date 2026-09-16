@@ -43,26 +43,52 @@ import { OrigenCard, PERIODOS, type ClavePeriodo, type Periodos } from "@/compon
 const AMBITOS: Record<string, {
   etiqueta: string
   catalogo: string
-  href: string
+  /**
+   * A dónde lleva la fila: a su pantalla CON SU FICHA ABIERTA, no a la lista a
+   * secas. Hasta hoy era un `href` fijo por ámbito, y eso dejaba al agente
+   * buscando a mano en /captaciones el nombre que acababa de leer, entre 759.
+   *
+   * `null` es "esta fila no enlaza a ninguna parte": un enlace que lleva a
+   * /sin-acceso es peor que ninguno.
+   */
+  enlace: (id: string) => string | null
   icono: React.ElementType
   chip: string
 }> = {
   captacion: {
-    etiqueta: "Captación", catalogo: "estado_whatsapp", href: "/captaciones", icono: Building2,
+    etiqueta: "Captación", catalogo: "estado_whatsapp", icono: Building2,
+    // El id de una captación es un número; /captaciones lo valida como tal y
+    // abre su ficha, que se trae sola de la base: no hace falta que la fila
+    // esté en la página que se ve.
+    enlace: (id) => `/captaciones?id=${encodeURIComponent(id)}`,
     chip: "bg-violet-500/10 text-violet-600 dark:text-violet-300 border-violet-500/20",
   },
   prospecto: {
-    etiqueta: "Prospecto", catalogo: "estado_prospecto", href: "/prospectos", icono: Home,
+    etiqueta: "Prospecto", catalogo: "estado_prospecto", icono: Home,
+    // /prospectos no sabe abrir una ficha concreta —no es pantalla de este
+    // encargo—, así que lleva a la lista, igual que antes. Y sólo se pinta si
+    // el agente tiene el módulo: ver `FilaDelDia`.
+    enlace: () => "/prospectos",
     chip: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-300 border-cyan-500/20",
   },
   lead: {
-    etiqueta: "Lead", catalogo: "estado_lead", href: "/leads", icono: Target,
+    etiqueta: "Lead", catalogo: "estado_lead", icono: Target,
+    enlace: (id) => `/leads?lead=${encodeURIComponent(id)}`,
     chip: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/20",
   },
 }
 
+// Un ámbito que no es ninguno de los tres de la vista no puede tener ficha que
+// abrir: no se sabe ni en qué tabla mirar.
+//
+// ARREGLADO EN REVISIÓN: aquí ponía que el enlace viejo llevaba "a /contactos,
+// que no existe", y esa ruta SÍ existe — es la pantalla "En desarrollo" de la
+// ficha única de cada persona. El enlace se quita igual, y por un motivo que
+// además es cierto: mandaba a un marcador de posición que no enseña la fila que
+// se acaba de pulsar. Un porqué falso es lo que hace que el siguiente lo
+// "arregle" de vuelta.
 const AMBITO_DESCONOCIDO = {
-  etiqueta: "Contacto", catalogo: "estado_lead", href: "/contactos", icono: UserCircle,
+  etiqueta: "Contacto", catalogo: "estado_lead", enlace: () => null, icono: UserCircle,
   chip: "bg-muted text-muted-foreground border-border",
 }
 
@@ -87,6 +113,12 @@ const FUENTE_ESPEJO = "Captaciones"
 
 export interface FilaDia {
   clave: string
+  /**
+   * El id en SU tabla, tal y como lo devuelve la vista: texto, porque una misma
+   * columna tiene que valer para el número de una captación y para la uuid de
+   * un lead. Es lo que hace que la fila lleve a su ficha y no a la lista.
+   */
+  id: string
   ambito: string
   titulo: string
   barrio: string | null
@@ -107,11 +139,40 @@ export interface FilaDia {
 }
 
 export interface AgentData {
+  /**
+   * Sus captaciones activas, contadas en la base.
+   *
+   * ARREGLADO EN REVISIÓN: aquí ponía que la tarjeta 'Scraper · mis
+   * captaciones' saca su total "de ahí", y no es cierto desde que esa tarjeta
+   * responde al selector de periodo: lo que lee es `origenes.scraper.total`.
+   * Es EL MISMO count —`capsActivas` alimenta los dos campos en `getAgentData`,
+   * a propósito, para que el número no pueda decir dos cosas— pero esta pieza
+   * del contrato no la mira hoy ninguna pantalla.
+   *
+   * Se deja en pie porque el dueño pidió expresamente que el contador de
+   * captaciones NO se fuera al quitar los dos embudos, y porque no cuesta un
+   * viaje de más: la consulta hace falta igual para la tarjeta. Quien venga a
+   * borrarla que borre el CAMPO y no la consulta, o la tarjeta del scraper se
+   * queda sin total.
+   */
   captaciones: number | null
-  wa: Array<{ valor: string; nombre: string; color: string | null; count: number | null }>
-  /** Las captaciones activas a las que todavía no se ha escrito: no son de
-   *  ningún valor del catálogo y sin esto no salían en ninguna pastilla. */
-  waSinEstado: number | null
+  /**
+   * LOS VALORES DE `fuente` DE CADA TARJETA DE LEADS.
+   *
+   * No es adorno ni configuración: es lo que el enlace de la tarjeta le pasa a
+   * /leads para que la lista enseñe LOS MISMOS leads que acaba de contar el
+   * número. Una tarjeta agrupa una FAMILIA (Instagram y Facebook son la misma
+   * pregunta), así que son varios valores y no uno.
+   */
+  fuentes: { rrss: string[]; web: string[] }
+  /**
+   * Dónde empieza cada periodo corto, en ISO y calculado en el servidor con el
+   * mismo corte que ha troceado las filas.
+   *
+   * Es la otra mitad del enlace: con "Hoy" puesto, la tarjeta dice 3 y la lista
+   * de destino tiene que enseñar esos 3 y no los 121 de siempre.
+   */
+  cortes: { hoy: string; semana: string; mes: string }
   /**
    * Sus tareas del calendario SIN COMPLETAR, partidas en tres.
    *
@@ -155,7 +216,6 @@ export interface AgentData {
     scraper: Periodos | null
     demandas: (Periodos & { sinVer: number | null }) | null
   }
-  pipeline: Array<{ estado: string; count: number | null }>
   agenda: Array<{
     id: number; nombre: string | null; telefono: string | null; direccion: string | null
     estado_whatsapp: string | null; cuando: string | null; notas: string | null
@@ -169,13 +229,19 @@ export interface AgentData {
   }
 }
 
-export default function AgentDashboard({ nombre, saludo, data, catalogos, agendaEquipo, yoId }: {
+export default function AgentDashboard({ nombre, saludo, data, catalogos, agendaEquipo, yoId, puedeProspectos }: {
   nombre: string
   saludo: string
   data: AgentData
   catalogos: Catalogo[]
   agendaEquipo: { entradas: EntradaAgenda[]; personas: PersonaAgenda[]; disponible: boolean }
   yoId: string
+  /**
+   * Si este agente tiene abierto el módulo de prospectos. Lo decide el servidor
+   * con sus permisos de verdad, no esta pantalla: aquí sólo se usa para no
+   * pintar un enlace que acabaría en /sin-acceso.
+   */
+  puedeProspectos: boolean
 }) {
   /**
    * EL AGENTE ARRANCA EN "TODO", NO EN "HOY" COMO EL ADMINISTRADOR.
@@ -196,25 +262,32 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
    */
   const [periodo, setPeriodo] = useState<ClavePeriodo>("total")
 
-  // Sólo suma lo que se ha podido contar. Si TODOS los contadores fallaron no se
-  // pinta la barra: una barra vacía dice "no tienes leads", que es distinto de
-  // "no se han podido contar".
-  const conteos = data.pipeline.map((p) => p.count).filter((c): c is number => c != null)
-  const totalPipeline = conteos.reduce((s, c) => s + c, 0)
-  // ARREGLADO EN REVISIÓN: la condición era "se ha medido ALGUNO" y eso sólo
-  // cubría el fallo TOTAL. Con un estado caído de los ocho y los demás a cero,
-  // el bloque escribía "Aún no tienes leads asignados": un cero que se traga un
-  // contador roto, que es justo lo que esta pantalla no puede hacer. Basta UNO
-  // sin contar para que no se pueda afirmar que no hay nada, así que lo que se
-  // mira es si queda algún hueco, no si se midió alguno.
-  const pipelineRoto = data.pipeline.some((p) => p.count == null)
-
-  // El bloque de WhatsApp sólo existe si tiene captaciones. Si el contador
-  // falló (null) el bloque SÍ se pinta, para poder decir que falló.
-  const hayWa = data.captaciones == null || data.captaciones > 0
-  const waVisible = data.wa.filter((i) => i.count == null || i.count > 0)
-  const waTotal =
-    data.wa.reduce((s, i) => s + (i.count ?? 0), 0) + (data.waSinEstado ?? 0)
+  /**
+   * EL ENLACE DE UNA TARJETA DE LEADS, con lo que hace falta para que la lista
+   * de destino enseñe lo mismo que el número.
+   *
+   * Dos cosas: la FAMILIA de fuentes (`?fuente=Instagram,Facebook,…`, que
+   * /leads valida una a una contra el catálogo y pinta como chapa quitable) y,
+   * si hay un periodo corto puesto, el CORTE de ese periodo (`&desde=…`). Sin
+   * el corte, pulsar una tarjeta que dice 3 con "Hoy" abría una lista de 121:
+   * el número prometiendo una cosa y la pantalla enseñando otra.
+   *
+   * `periodo` es el del botón pulsado ahora mismo, así que el enlace cambia con
+   * él. El instante viene calculado del servidor (`data.cortes`) y no de
+   * Date.now() aquí: durante el render, el servidor y el navegador escribirían
+   * dos enlaces distintos y eso es un desajuste de hidratación.
+   *
+   * `periodo` se manda además como palabra para que la chapa de destino se lea
+   * ("Entrados hoy") en vez de enseñar una fecha con hora.
+   */
+  const enlaceLeads = (fuentes: string[]) => {
+    const q = new URLSearchParams({ fuente: fuentes.join(",") })
+    if (periodo !== "total") {
+      q.set("periodo", periodo)
+      q.set("desde", data.cortes[periodo])
+    }
+    return `/leads?${q.toString()}`
+  }
 
   const { filas } = data.dia
   const primeras = filas.slice(0, VISIBLES)
@@ -342,7 +415,9 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
         ) : (
           <div className="flex flex-col gap-3">
             <div className="rounded-lg border border-border bg-card divide-y divide-border overflow-hidden">
-              {primeras.map((f) => <FilaDelDia key={f.clave} fila={f} catalogos={catalogos} />)}
+              {primeras.map((f) => (
+                <FilaDelDia key={f.clave} fila={f} catalogos={catalogos} puedeProspectos={puedeProspectos} />
+              ))}
             </div>
 
             {resto.length > 0 && (
@@ -354,7 +429,9 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
                   <span className="inline-block transition-transform group-open:rotate-90"> ›</span>
                 </summary>
                 <div className="divide-y divide-border border-t border-border">
-                  {resto.map((f) => <FilaDelDia key={f.clave} fila={f} catalogos={catalogos} />)}
+                  {resto.map((f) => (
+                    <FilaDelDia key={f.clave} fila={f} catalogos={catalogos} puedeProspectos={puedeProspectos} />
+                  ))}
                 </div>
               </details>
             )}
@@ -430,8 +507,10 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
 
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           {/* Una familia de valores por tarjeta, no un valor: Instagram y
-              Facebook son la misma pregunta. El enlace va a /leads sin filtro
-              justamente por eso —`?fuente=` sólo admite UN valor del catálogo—.
+              Facebook son la misma pregunta. Y el enlace lleva la familia
+              ENTERA: `?fuente=` admite desde hoy varios valores separados por
+              comas, que es lo que hacía falta para que pulsar la tarjeta abra
+              justo los leads que ha contado y no la lista de los 1.090.
 
               El `extra` sólo se escribe cuando el canal está a cero: con
               números, la línea de abajo la pone la tarjeta y dice "N en total",
@@ -440,14 +519,14 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               prefiere esta frase a la de la tarjeta ("Aún sin usar"), porque a
               un agente no le han faltado ganas: no le han repartido nada. */}
           <OrigenCard
-            href="/leads" icon={Share2} label="Redes sociales"
+            href={enlaceLeads(data.fuentes.rrss)} icon={Share2} label="Redes sociales"
             datos={data.origenes.rrss} periodo={periodo}
             fallo={data.origenes.rrss == null}
             tono="rosa"
             extra={data.origenes.rrss?.total === 0 ? "todavía no te han repartido ninguno" : undefined}
           />
           <OrigenCard
-            href="/leads" icon={Globe} label="Web"
+            href={enlaceLeads(data.fuentes.web)} icon={Globe} label="Web"
             datos={data.origenes.web} periodo={periodo}
             fallo={data.origenes.web == null}
             tono="cyan"
@@ -457,9 +536,18 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               el cambio que pidió el dueño: al agente no le sirve saber cuánta
               gente ha dicho que sí en toda la empresa, le sirve saber cuántas
               fichas suyas tiene que trabajar. Se llama "Scraper" porque es de
-              donde salen y porque así la nombra él. */}
+              donde salen y porque así la nombra él.
+
+              EL ENLACE NO LLEVA EL CORTE DEL PERIODO, y es la única de las tres
+              que no puede: la lista de /captaciones la trae una acción de
+              servidor con tres filtros y ninguno es la fecha. En vez de
+              callarlo, se le manda la PALABRA del periodo y esa pantalla lo
+              dice en su cabecera ("vienes de tu portada mirando los últimos 7
+              días · aquí salen todas"). Lo que no vale es que el número prometa
+              tres y salgan 759 sin explicación; dicho, se entiende. */}
           <OrigenCard
-            href="/captaciones" icon={Radar} label="Scraper · mis captaciones"
+            href={periodo === "total" ? "/captaciones" : `/captaciones?periodo=${periodo}`}
+            icon={Radar} label="Scraper · mis captaciones"
             datos={data.origenes.scraper} periodo={periodo}
             fallo={data.origenes.scraper == null}
             tono="violeta"
@@ -469,16 +557,17 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               La tabla `demandas` no tiene columna de agente —una demanda es de
               un piso, no de una persona—, así que este número es idéntico para
               los seis agentes. El aviso va en la línea de abajo y no sólo en la
-              etiqueta a propósito: la etiqueta se corta con puntos suspensivos
-              en el móvil (dos tarjetas por fila) y la línea de abajo se parte en
-              dos, que es lo que se quiere cuando lo que no puede perderse es
-              justo esa advertencia. */}
+              etiqueta a propósito: la etiqueta comparte sitio con el icono y se
+              corta con puntos suspensivos en cuanto la ventana se estrecha (dos
+              tarjetas por fila), mientras que la línea de abajo tiene el ancho
+              entero de la tarjeta y se parte en dos, que es lo que se quiere
+              cuando lo que no puede perderse es justo esa advertencia. */}
           <OrigenCard
             href="/demandas" icon={Inbox} label="Demandas"
             datos={data.origenes.demandas} periodo={periodo}
             fallo={data.origenes.demandas == null}
             tono="verde"
-            extra={textoDemandas(data.origenes.demandas)}
+            extra={textoDemandas(data.origenes.demandas, periodo)}
           />
           {/* EL CALENDARIO. El número es lo ACCIONABLE —lo vencido más lo de
               hoy—, que es la misma cuenta que hacía la tarjeta "Mis tareas" que
@@ -510,136 +599,28 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
         </div>
       </section>
 
-      {/* WA stats + Pipeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* El desglose de WhatsApp deja de ser una rejilla de diez casillas: es
-            la misma barra apilada + leyenda que 'Mi pipeline de leads' tiene al
-            lado. Un estado a cero NO sale (ahí estaban nueve de las diez); uno
-            que no se ha podido contar SÍ sale, con '—'. Y si el agente no tiene
-            captaciones, el bloque no existe: contarle en diez cajas que no tiene
-            ninguna era el ejemplo exacto de embudo que no sirve para nada. */}
-        {hayWa && (
-          <div className="flex flex-col gap-4">
-            <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-              Estado WhatsApp · mis captaciones
-            </h2>
-            <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-4 h-[calc(100%-2.5rem)]">
-              {data.captaciones == null ? (
-                // Un fallo al contar NO esconde el bloque: esconderlo sería
-                // esconder el fallo.
-                <p className="text-sm text-muted-foreground">No se han podido contar tus captaciones</p>
-              ) : waVisible.length === 0 && !(data.waSinEstado != null && data.waSinEstado > 0) ? (
-                // Ni una sola pastilla que pintar y el agente SÍ tiene
-                // captaciones: sin esta frase el bloque quedaba como una caja
-                // con borde y nada dentro. Pasa de verdad —no es un imposible—
-                // porque la 027 archivó `Interesado` y `Quiere_Llamada`: una
-                // captación que siga en un estado archivado no cae en ninguna
-                // pastilla del catálogo activo y tampoco cuenta como "sin
-                // escribir", que mira `estado_whatsapp IS NULL`.
-                <p className="text-sm text-muted-foreground">
-                  Tus captaciones no están en ninguno de los estados de WhatsApp del catálogo
-                </p>
-              ) : (
-                <>
-                  {waTotal > 0 && (
-                    <div className="flex gap-0.5 h-3 rounded-full overflow-hidden">
-                      {data.wa.map((i) =>
-                        i.count && i.count > 0 ? (
-                          <div key={i.valor}
-                            style={{ width: `${(i.count / waTotal) * 100}%` }}
-                            className={cn("rounded-sm", clasePunto(i.color))}
-                            title={`${i.nombre}: ${i.count}`} />
-                        ) : null
-                      )}
-                      {data.waSinEstado != null && data.waSinEstado > 0 && (
-                        <div style={{ width: `${(data.waSinEstado / waTotal) * 100}%` }}
-                          className="rounded-sm bg-muted-foreground/25"
-                          title={`Sin escribir: ${data.waSinEstado}`} />
-                      )}
-                    </div>
-                  )}
-                  <div className="flex flex-wrap gap-x-4 gap-y-2">
-                    {waVisible.map((i) => (
-                      <div key={i.valor} className="flex items-center gap-1.5">
-                        <span className={cn("h-2 w-2 rounded-full shrink-0", clasePunto(i.color))} />
-                        <span className="text-xs text-muted-foreground">{i.nombre}</span>
-                        <span className="text-xs font-medium text-foreground tabular-nums">
-                          {i.count != null ? i.count.toLocaleString("es") : "—"}
-                        </span>
-                      </div>
-                    ))}
-                    {/* El hueco de las que aún no tienen estado. Sin esto el
-                        desglose suma menos que el titular.
+      {/*
+        AQUÍ ESTABAN "ESTADO WHATSAPP · MIS CAPTACIONES" Y "MI PIPELINE DE
+        LEADS", los dos embudos del final, y los ha quitado el dueño.
 
-                        ARREGLADO EN REVISIÓN: aquí ponía "suma menos que 'Mis
-                        captaciones'", y esa tarjeta se ha ido con la fila de
-                        arriba en este mismo cambio. El número con el que este
-                        desglose tiene que cuadrar es hoy el de la tarjeta
-                        'Scraper · mis captaciones', que cuenta exactamente las
-                        mismas filas (suyas y activas). Un comentario que manda
-                        a buscar algo que ya no está hace dudar del resto. */}
-                    {data.waSinEstado != null && data.waSinEstado > 0 && (
-                      <div className="flex items-center gap-1.5">
-                        <span className="h-2 w-2 rounded-full shrink-0 border border-muted-foreground/40" />
-                        <span className="text-xs text-muted-foreground">Sin escribir</span>
-                        <span className="text-xs font-medium text-foreground tabular-nums">
-                          {data.waSinEstado.toLocaleString("es")}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+        Cada uno era una barra apilada con su leyenda, y con lo que tiene un
+        agente de verdad no decían nada: con UNA captación, la barra entera era
+        un solo tramo ("Enviado 1"); con cuatro leads, "Nuevo 1 · Contactado 3"
+        y cinco ceros al lado. Un embudo hace falta cuando hay volumen que
+        repartir; con estos números es un adorno que ocupa media pantalla justo
+        debajo de lo único accionable.
 
-        <div className={cn("flex flex-col gap-4", !hayWa && "lg:col-span-2")}>
-          <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-            Mi pipeline de leads
-          </h2>
-          <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-4 h-[calc(100%-2.5rem)]">
-            {totalPipeline > 0 ? (
-              <>
-                {/* El color de cada tramo sale del catálogo (clasePunto), no de
-                    una paleta escrita aquí que no tenía por qué coincidir con la
-                    pastilla del mismo estado en /leads. El ancho va en `style`
-                    porque es un porcentaje: una clase `w-[43%]` por plantilla la
-                    purgaría Tailwind al compilar. */}
-                <div className="flex gap-0.5 h-3 rounded-full overflow-hidden">
-                  {data.pipeline.map((p) =>
-                    p.count && p.count > 0 ? (
-                      <div key={p.estado}
-                        style={{ width: `${(p.count / totalPipeline) * 100}%` }}
-                        className={cn("rounded-sm", clasePunto(colorDe(catalogos, "estado_lead", p.estado)))}
-                        title={`${nombreDe(catalogos, "estado_lead", p.estado)}: ${p.count}`}
-                      />
-                    ) : null
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {data.pipeline.map((p) => (
-                    <div key={p.estado} className="flex items-center gap-1.5">
-                      <span className={cn("h-2 w-2 rounded-full shrink-0", clasePunto(colorDe(catalogos, "estado_lead", p.estado)))} />
-                      <span className="text-xs text-muted-foreground">{nombreDe(catalogos, "estado_lead", p.estado)}</span>
-                      <span className="text-xs font-medium text-foreground tabular-nums">
-                        {p.count != null ? p.count : "—"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full gap-2 py-6">
-                <p className="text-sm text-muted-foreground text-center">
-                  {pipelineRoto ? "No se ha podido contar tu pipeline" : "Aún no tienes leads asignados"}
-                </p>
-                <Link href="/leads" className="text-xs text-primary hover:underline">Ver todos los leads →</Link>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+        Se han ido con ellos sus consultas —el desglose por estado de WhatsApp,
+        el contador de las captaciones sin escribir y la decena de contadores del
+        pipeline, uno por estado del catálogo—: ver `getAgentData` en page.tsx.
+        Lo que NO se ha ido es el count de captaciones activas, que es el total
+        de la tarjeta 'Scraper · mis captaciones'.
+
+        Lo que se pierde a sabiendas: por dónde va cada lead suyo y cuántos
+        WhatsApp esperan respuesta. Las dos cosas están, una pulsación más
+        allá, en /leads y /captaciones — que es a donde llevan ya las tarjetas
+        de arriba, y ahora además filtradas.
+      */}
 
       {agendaEquipo.disponible ? (
         <AgendaPanel
@@ -698,8 +679,13 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
         Lo que se pierde: `v_mi_dia` deja fuera los leads en 'Ganado' y
         'Perdido' y las captaciones ya promocionadas, y esa lista sí los
         enseñaba. Es deliberado —la portada es para lo que hay que hacer, no
-        para el archivo— y los Ganados se siguen viendo en el pipeline de aquí
-        al lado.
+        para el archivo—.
+
+        ARREGLADO EN REVISIÓN: este párrafo terminaba diciendo que los Ganados
+        "se siguen viendo en el pipeline de aquí al lado". Ese pipeline lo ha
+        quitado el dueño en este mismo cambio, así que la frase mandaba a
+        buscar un bloque que ya no existe. Hoy los Ganados están en /leads,
+        filtrando por su estado.
       */}
     </div>
   )
@@ -717,9 +703,28 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
  * del formulario de la web salían idénticos —los dos decían sólo "LEAD"— y no
  * se trabaja igual a quien escribe por un anuncio que a quien pide una visita.
  */
-function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] }) {
+function FilaDelDia({ fila, catalogos, puedeProspectos }: {
+  fila: FilaDia
+  catalogos: Catalogo[]
+  puedeProspectos: boolean
+}) {
   const meta = AMBITOS[fila.ambito] ?? AMBITO_DESCONOCIDO
   const Icono = meta.icono
+
+  /**
+   * A DÓNDE LLEVA EL NOMBRE DE LA FILA.
+   *
+   * A su ficha, abierta: `/captaciones?id=…` y `/leads?lead=…`. Antes llevaba a
+   * la lista a secas y había que buscar el nombre a mano entre 759 captaciones
+   * o 1.090 leads, que es tanto como no llevar a ninguna parte.
+   *
+   * El prospecto es la excepción: /prospectos va cerrado por defecto para los
+   * agentes (PERMISOS_DEFAULT), así que sin el módulo el enlace sólo llevaría a
+   * /sin-acceso. Sin enlace, el nombre se queda en texto y la fila sigue
+   * diciendo lo que importa —a quién llamar y su teléfono—, que es a lo que se
+   * viene. Y quien SÍ tenga el módulo lo conserva.
+   */
+  const destino = fila.ambito === "prospecto" && !puedeProspectos ? null : meta.enlace(fila.id)
 
   // ARREGLADO EN REVISIÓN: el origen sólo se pinta cuando DICE algo que no diga
   // ya el chip del ámbito.
@@ -753,9 +758,13 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
           <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium uppercase tracking-wide", meta.chip)}>
             {meta.etiqueta}
           </span>
-          <Link href={meta.href} className="text-sm font-medium text-foreground truncate hover:underline">
-            {fila.titulo}
-          </Link>
+          {destino ? (
+            <Link href={destino} className="text-sm font-medium text-foreground truncate hover:underline">
+              {fila.titulo}
+            </Link>
+          ) : (
+            <span className="text-sm font-medium text-foreground truncate">{fila.titulo}</span>
+          )}
           {fila.barrio && (
             <span className="text-xs text-muted-foreground truncate">· {fila.barrio}</span>
           )}
@@ -790,9 +799,12 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
               fila. Y la señal es la única pastilla que tiene que gritar, porque
               es la que dice a quién llamar antes.
 
-              Abajo va con la misma pareja punto+texto que las leyendas del
-              pipeline y de WhatsApp de esta misma pantalla, así que el color de
-              Instagram significa Instagram en los tres sitios. Y va PRIMERO de
+              ARREGLADO EN REVISIÓN: aquí ponía que el punto de color repetía la
+              pareja punto+texto de "las leyendas del pipeline y de WhatsApp de
+              esta misma pantalla", y esas dos leyendas se han ido en este mismo
+              cambio. La pareja sigue siendo la misma que usan las pastillas de
+              /leads y las chapas de sus filtros, así que el color de Instagram
+              sigue significando Instagram en los dos sitios. Y va PRIMERO de
               la línea porque es lo más estable que hay en ella: el ojo lo busca
               siempre en el mismo sitio y lo que cambia a cada rato —cuánto lleva
               esperando, el motivo— cae detrás.
@@ -878,9 +890,13 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
  * tarjeta ponga "N en total". La tabla `demandas` no tiene columna de agente
  * —una demanda es de un PISO, no de una persona—, así que el número es idéntico
  * para los seis agentes, y el aviso va aquí abajo y no sólo en la etiqueta a
- * propósito: la etiqueta se corta con puntos suspensivos en el móvil (dos
- * tarjetas por fila) y esta línea se parte en dos, que es lo que se quiere
- * cuando lo que no puede perderse es justo esa advertencia.
+ * propósito: la etiqueta comparte sitio con el icono y se corta con puntos
+ * suspensivos en cuanto la ventana se estrecha (dos tarjetas por fila),
+ * mientras que esta línea tiene el ancho entero de la tarjeta y se parte en
+ * dos. Que se parta de verdad y no se recorte por el lado derecho depende del
+ * `min-w-0` de la columna del número en `origen-card.tsx`, que iba con
+ * `shrink-0` y se arregló en revisión: es lo que le permite a esta línea
+ * llevar tres trozos.
  *
  * Distingue además las tres cosas que esta portada no puede confundir: ninguna
  * demanda todavía, unas cuantas sin ver, y un contador de "sin ver" que ha
@@ -891,15 +907,38 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
  * el selector: lo que decía —cuántos de esta semana— es ahora uno de los cuatro
  * botones, y lo que hacía falta debajo del número (el total, para que un cero en
  * "Hoy" se entienda) lo pone ya la propia tarjeta.
+ *
+ * ARREGLADO EN REVISIÓN: y justo por eso esta línea tiene que escribirse también
+ * el total. Al mandar un `extra`, la tarjeta deja de poner el suyo ("N en
+ * total"), así que con un periodo corto elegido ésta era la ÚNICA de las cuatro
+ * que enseñaba un número pelado: "0" bajo "Hoy" con "de toda la empresa · 43 sin
+ * ver" debajo y ni rastro de las 1.825 que hay. Un cero sin su total al lado es
+ * exactamente lo que esta portada no puede permitirse —se lee como avería, no
+ * como que hoy no ha entrado nada—, y las otras tres de la misma fila sí lo
+ * dicen. En "Todo" no se repite: ahí el número grande YA es el total.
  */
-function textoDemandas(d: (Periodos & { sinVer: number | null }) | null) {
+function textoDemandas(
+  d: (Periodos & { sinVer: number | null }) | null,
+  periodo: ClavePeriodo,
+) {
   // Un total roto no llega aquí: la tarjeta se pinta entera en ámbar.
   if (d == null) return undefined
   if (d.total === 0) return "de toda la empresa · todavía no ha entrado ninguna"
-  if (d.sinVer == null) return "de toda la empresa · — sin ver"
-  return d.sinVer > 0
-    ? `de toda la empresa · ${d.sinVer.toLocaleString("es")} sin ver`
-    : "de toda la empresa · todas vistas"
+  // Se arma como lista y se une con " · " en vez de encadenar trozos con el
+  // separador pegado delante, por lo mismo que la cabecera de "Lo que toca hoy":
+  // el trozo del medio es opcional y concatenando se quedaban dos puntos
+  // seguidos el día que no toca escribirlo.
+  return [
+    "de toda la empresa",
+    periodo !== "total" ? `${d.total.toLocaleString("es")} en total` : null,
+    // Las tres cosas que no se pueden confundir: un contador de "sin ver" roto
+    // ("— sin ver") NO es "todas vistas", y ninguno de los dos es un cero.
+    d.sinVer == null
+      ? "— sin ver"
+      : d.sinVer > 0
+        ? `${d.sinVer.toLocaleString("es")} sin ver`
+        : "todas vistas",
+  ].filter((t): t is string => t != null).join(" · ")
 }
 
 /*

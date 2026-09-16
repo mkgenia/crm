@@ -154,7 +154,25 @@ export function OrigenCard({ href, icon: Icon, label, datos, periodo = "total", 
         // El número a la izquierda y los catorce días a la derecha: la tarjeta
         // es ancha, y dejar ese hueco vacío es lo que la hacía parecer pobre.
         <div className="relative flex items-end justify-between gap-4">
-          <div className="shrink-0 flex flex-col gap-2">
+          {/* ARREGLADO EN REVISIÓN: `min-w-0` y no `shrink-0`.
+
+              Con `shrink-0` esta columna se quedaba SIEMPRE a su ancho de
+              max-content —la línea de abajo entera, en un solo renglón— y el
+              `overflow-hidden` de la tarjeta se comía el final. La de demandas
+              del agente dice "de toda la empresa · 1.825 en total · 43 sin ver",
+              y a dos tarjetas por fila eso no cabe en una ventana estrecha: se
+              perdía por el lado derecho justo la advertencia que esa línea
+              existe para dar. Con `min-w-0` la columna puede encoger y el texto
+              se parte en dos renglones, que es lo que dan por hecho los
+              comentarios de la portada del agente.
+
+              La portada del ADMINISTRADOR no se mueve: una columna sólo encoge
+              cuando no cabe, y su línea más larga ("838 con señal · 12 sin
+              llamar") cabe de sobra a cualquier ancho en el que este CRM se
+              pueda usar —la barra lateral son 220 px fijos—. El número grande
+              tampoco corre peligro de recortarse: haría falta una tarjeta de
+              menos de 150 px, y a ese ancho no se ve ya ni la rejilla. */}
+          <div className="min-w-0 flex flex-col gap-2">
             <p className={cn(
               "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
               valor === 0 ? "text-muted-foreground/35" : "text-foreground",

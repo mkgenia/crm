@@ -4,8 +4,11 @@ import AdminDashboard, { type AdminData } from "./AdminDashboard"
 import AgentDashboard, { type AgentData, type FilaDia } from "./AgentDashboard"
 import { getAgendaMes } from "@/lib/actions/agenda"
 import { getCatalogosActivos } from "@/lib/actions/catalogos"
-import { getTotalesCaptaciones } from "@/lib/actions/captaciones"
 import { opcionesDe, nombreDe, colorDe, type Catalogo } from "@/lib/catalogos"
+// Los permisos del que mira deciden si la fila de un PROSPECTO enlaza a alguna
+// parte: el módulo va cerrado por defecto para los agentes y un enlace que sólo
+// lleva a /sin-acceso es peor que no tener enlace.
+import { resolverPermisos } from "@/types/database"
 import { traerTodo } from "@/lib/supabase/paginar"
 // El tipo de los cuatro periodos + las barras. Lo pintan LAS DOS portadas, así
 // que las dos funciones de esta página lo devuelven.
@@ -142,7 +145,19 @@ const cuenta = (r: { count: number | null; error: unknown }) => (r.error ? null 
  */
 const DIAS_SERIE = 14
 
-/** Las barras: una por día, de la más vieja a la de hoy. */
+/**
+ * Las barras: una por día, de la más vieja a la de hoy.
+ *
+ * OJO, y se deja escrito a sabiendas: estos cubos parten el día por la
+ * medianoche de UTC —la fecha del propio texto ISO, recortado a diez letras—
+ * mientras que el número grande lo parte por la de MADRID (ver `porPeriodo`).
+ * O sea que un lead entrado a las 00:30 de Madrid cuenta en "Hoy" y su barra
+ * cae en la columna de ayer. Es una o dos horas al día sobre una franja de
+ * catorce columnas y no se toca porque cuadrarlo movería barras en la portada
+ * del ADMINISTRADOR, que no cambia en este encargo; el número, que es el que
+ * se lee, sí tenía que quedar bien. Quien venga a unificarlo tiene que hacerlo
+ * en las dos portadas a la vez: las dos pintan estas mismas barras.
+ */
 function serieDe(filas: Array<{ fecha_creacion?: string | null }>) {
   const cubos: Record<string, number> = {}
   for (let i = DIAS_SERIE - 1; i >= 0; i--) {
@@ -173,17 +188,57 @@ function serieDe(filas: Array<{ fecha_creacion?: string | null }>) {
  * agente sólo se trae la ventana de 30 días— tiene que pisarlo con su propio
  * count exacto.
  */
-function porPeriodo(filas: Array<{ fecha_creacion?: string | null }>): Periodos {
-  const ahora = new Date()
-  // El día empieza a las 00:00 de MADRID, no a las del servidor (ver
-  // `inicioDiaMadrid`). En producción Node va en UTC y Madrid va una o dos horas
-  // por delante: cortando por la medianoche del servidor, "Hoy" se tragaba
-  // además las dos últimas horas de ayer durante toda la madrugada.
-  const cortes = {
+/**
+ * DÓNDE EMPIEZA CADA PERIODO CORTO, en milisegundos.
+ *
+ * Se saca aparte porque ahora lo miran DOS sitios: la cuenta de las tarjetas
+ * (`porPeriodo`, aquí debajo) y el enlace de esas mismas tarjetas, que desde
+ * este cambio lleva el corte a /leads para que la lista enseñe exactamente los
+ * que promete el número. Escrito dos veces, el día que alguien mueva el corte de
+ * "hoy" la tarjeta diría 3 y la lista enseñaría 4, y nada fallaría.
+ *
+ * "Todo" no está: no tiene corte, que es justo lo que lo distingue de los otros
+ * tres.
+ */
+function cortesPeriodo(ahora: Date) {
+  return {
     hoy: inicioDiaMadrid(ahora).getTime(),
     semana: ahora.getTime() - 7 * 24 * 60 * 60 * 1000,
     mes: ahora.getTime() - 30 * 24 * 60 * 60 * 1000,
   }
+}
+
+/**
+ * `reloj` es el instante desde el que se mide, y se puede pasar de fuera.
+ *
+ * ARREGLADO EN REVISIÓN: esta función se leía SIEMPRE su propio `new Date()`, y
+ * desde que la tarjeta del agente lleva su corte a /leads (`?desde=`) eso son
+ * dos relojes distintos para el mismo número: el enlace se escribe con el
+ * `ahora` del principio de `getAgentData` y la cuenta se hacía con el de
+ * después de esperar a todas las consultas —medio segundo largo más tarde—. Con
+ * "7 días" puesto, un lead entrado justo en esa rendija de hace siete días
+ * contaba en la lista y no en la tarjeta: el número diciendo 3 y la pantalla
+ * enseñando 4, que es exactamente lo que este encargo venía a quitar.
+ *
+ * El parámetro es OPCIONAL y cae a `new Date()`, así que la portada del
+ * ADMINISTRADOR —que no lo pasa— cuenta hoy lo mismo que contaba ayer.
+ */
+function porPeriodo(filas: Array<{ fecha_creacion?: string | null }>, reloj?: Date): Periodos {
+  const ahora = reloj ?? new Date()
+  // El día empieza a las 00:00 de MADRID, no a las del servidor (ver
+  // `inicioDiaMadrid`). En producción Node va en UTC y Madrid va una o dos horas
+  // por delante.
+  //
+  // ARREGLADO EN REVISIÓN: aquí ponía que cortando por la medianoche del
+  // servidor "Hoy" se tragaba las dos últimas horas de AYER, y es justo al
+  // revés — el error contado al derecho es lo único que impide que alguien
+  // "arregle" esto de vuelta. La medianoche de UTC son las 02:00 de Madrid, o
+  // sea que el corte viejo empezaba el día dos horas TARDE y dejaba fuera de
+  // "Hoy" todo lo entrado entre las 00:00 y las 02:00. Un lead de la
+  // madrugada no aparecía hasta el día siguiente. Este corte lo recupera, así
+  // que el "Hoy" del ADMINISTRADOR puede salir ahora un poco más alto que
+  // antes: la diferencia son esas filas, que siempre fueron de hoy.
+  const cortes = cortesPeriodo(ahora)
   // Se compara en MILISEGUNDOS, no en texto. PostgREST devuelve
   // "2026-09-15T08:30:00+00:00" y `toISOString()` escribe "…08:30:00.000Z": son
   // dos formatos distintos para la misma hora, y el orden alfabético de dos
@@ -482,12 +537,16 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
  * 1.008 leads vivos ya estábamos en el borde; el día que un agente pase de mil,
  * sus tarjetas se habrían quedado congeladas sin que nadie se entere.
  */
-async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<AgentData> {
+async function getAgentData(userId: string): Promise<AgentData> {
   const supabase = await createAdminClient()
   const ahora = new Date()
   const ahoraISO = ahora.toISOString()
 
-  const estadosLead = opcionesDe(catalogos, "estado_lead").map((c) => c.valor)
+  // YA NO ENTRA EL CATÁLOGO: lo leían el pipeline de leads (un contador por
+  // estado) y el desglose de WhatsApp, y el dueño ha quitado los dos bloques de
+  // la portada. Lo que queda no nombra ni un solo valor de catálogo, así que
+  // pedirlo aquí era cargar una lista para no mirarla. El componente lo sigue
+  // recibiendo por su lado: lo necesita para las pastillas de cada fila.
 
   /**
    * La fuente del lead ESPEJO de una captación.
@@ -543,8 +602,12 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       .eq("agente_id", userId).is("duplicado_de", null) as unknown as Q
   }
 
-  const misLeads = () =>
-    soloMios(supabase.from("leads").select("id", { count: "exact", head: true }))
+  // AQUÍ ESTABA `misLeads()`, el contador suelto de leads del agente. Sólo lo
+  // llamaba el pipeline —una consulta por estado del catálogo— y ese bloque se
+  // ha ido de la portada, así que se va con él: un contador que no pinta nadie
+  // es una consulta por carga de página a cambio de nada. `soloMios` sigue en
+  // pie porque de ella cuelga `soloRepartidos`, que es quien alimenta las
+  // tarjetas de redes y web.
 
   // Los leads REPARTIDOS: los que trabaja y que NO son el espejo de una
   // captación suya.
@@ -637,43 +700,35 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   const demandas = () =>
     supabase.from("demandas").select("id", { count: "exact", head: true })
 
-  // CINCO huecos, contados uno a uno: totalesCaps · base · pipelineRes ·
-  // totalesRes · ventanasRes. Este reparto es POR POSICIÓN: si se añade una
-  // consulta hay que añadir también su nombre aquí, o cada contador empieza a
-  // leer el valor del de al lado y TypeScript no dice nada.
-  const [totalesCaps, base, pipelineRes, totalesRes, ventanasRes] = await Promise.all([
-    // Las captaciones activas y su desglose por estado de WhatsApp ya se cuentan
-    // en la base aquí dentro, con la lista de estados salida del catálogo. Para
-    // un agente filtra por `agente_id` solo.
-    getTotalesCaptaciones(),
+  // TRES huecos, contados uno a uno: base · totalesRes · ventanasRes. Este
+  // reparto es POR POSICIÓN: si se añade una consulta hay que añadir también su
+  // nombre aquí, o cada contador empieza a leer el valor del de al lado y
+  // TypeScript no dice nada.
+  //
+  // Eran CINCO. Se han ido `totalesCaps` —`getTotalesCaptaciones()`, que sólo
+  // servía para el desglose por estado de WhatsApp— y `pipelineRes` —una
+  // consulta por estado del catálogo—, porque el dueño ha quitado de la portada
+  // los dos bloques que los pintaban.
+  const [base, totalesRes, ventanasRes] = await Promise.all([
     Promise.all([
       // El total de captaciones activas se cuenta AQUÍ y no se coge de
       // `getTotalesCaptaciones().total`: esa función devuelve `n(todas) ?? 0`, o
       // sea que si ESE contador falla el agente lee un 0 redondo donde tiene 140
-      // captaciones. El desglose por estado sí devuelve null como toca, así que
-      // ése se sigue usando tal cual. Mismos filtros que allí (activo = true y
-      // suyas) para que el titular y el desglose hablen de las mismas filas.
+      // captaciones. Es el número de la tarjeta 'Scraper · mis captaciones', y
+      // por eso sigue en pie aunque el desglose por estado se haya ido: lo pide
+      // `origenes.scraper`, que es quien lo enseña.
       supabase.from("captaciones").select("id", { count: "exact", head: true })
         .eq("agente_id", userId).eq("activo", true),
-      // AQUÍ ESTABA EL CONTADOR DE "ESTE MES" de la tarjeta del scraper, y se
-      // va con el selector de periodo: "30 días" contesta a lo mismo y encima
-      // lo dice sin ambigüedad —"este mes" el día 1 son unas horas, y el 30 son
-      // treinta días—. Una consulta menos por carga y una línea menos que
-      // contradiga al botón que el agente acaba de pulsar.
-      // Las que todavía no tienen estado de WhatsApp. No son de ningún valor
-      // del catálogo, así que no caen en ninguna pastilla del desglose.
+      // AQUÍ ESTABAN OTROS DOS CONTADORES DE CAPTACIONES y los dos se han ido
+      // por el mismo motivo, que es que ya no los lee nadie:
       //
-      // ARREGLADO EN REVISIÓN: este comentario decía que sin contarlas aparte
-      // "la tasa de respuesta saldría inflada", y esa tarjeta ya no existe —se
-      // fue con las tres que quitó el dueño—. Quien viniera a limpiar los
-      // restos leería que este contador alimenta algo borrado y se lo llevaría
-      // por delante, y con él el hueco "Sin escribir" del bloque "Estado
-      // WhatsApp · mis captaciones", que es quien lo lee HOY: sin él el
-      // desglose suma menos que el titular y esas filas desaparecen de la
-      // pantalla sin dejar rastro. (Se nombra el bloque y no su línea: la
-      // portada del agente se acaba de reescribir entera y los números bailan.)
-      supabase.from("captaciones").select("id", { count: "exact", head: true })
-        .eq("agente_id", userId).eq("activo", true).is("estado_whatsapp", null),
+      //   · el de "este mes", que contestaba a lo que hoy contesta el botón
+      //     "30 días" del selector de periodo —y encima sin la ambigüedad de
+      //     "este mes", que el día 1 son unas horas y el 30 son treinta días—.
+      //   · el de las captaciones SIN estado de WhatsApp, que era el hueco
+      //     "Sin escribir" del bloque "Estado WhatsApp · mis captaciones". El
+      //     dueño ha quitado ese bloque: con una sola captación pintaba una
+      //     barra entera de un solo tramo.
       supabase.from("captaciones")
         .select("id, nombre, telefono, direccion, estado_whatsapp, fecha_agenda, notas_agenda")
         .eq("agente_id", userId)
@@ -723,9 +778,11 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       misTareas().gte("fecha", inicioHoy).lt("fecha", inicioManana),         // hoy
       misTareas().gte("fecha", inicioManana).lt("fecha", finSemana),         // los 7 días siguientes
     ]),
-    // Una consulta por estado del catálogo. Son una decena de contadores
-    // diminutos en paralelo, no una fila por lead.
-    Promise.all(estadosLead.map((e) => misLeads().eq("estado", e))),
+    // AQUÍ ESTABA EL PIPELINE DE LEADS: una consulta por cada estado del
+    // catálogo, una decena de contadores diminutos por carga de página. Se va
+    // con su bloque, que ha quitado el dueño —con cuatro leads enseñaba "Nuevo
+    // 1 · Contactado 3" y cinco ceros—.
+
     // LOS TOTALES DE LAS TARJETAS: el número de "Todo" y las demandas sin ver.
     //
     // AQUÍ HABÍA DIECISIETE contadores, dos por cada valor del catálogo
@@ -799,9 +856,10 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   // nombre en dos funciones distintas; aquí sólo se quitó la del agente. Se
   // nombra la función y no el número de línea a propósito: este fichero se
   // mueve entero a cada cambio y un número caduca al día siguiente.
-  // DIEZ huecos, contados uno a uno. Eran once: el de "este mes" se ha ido con
-  // el selector de periodo, y por eso `capsSinEstadoRes` ha subido un puesto.
-  const [capsActivasRes, capsSinEstadoRes, agendaRes,
+  // NUEVE huecos, contados uno a uno. Eran diez: el de las captaciones sin
+  // estado de WhatsApp se ha ido con el bloque que lo pintaba, y por eso
+  // `agendaRes` ha subido un puesto.
+  const [capsActivasRes, agendaRes,
     diaRes, diaTotalRes, diaVencidosRes, diaSinAtenderRes,
     tareasVencidasRes, tareasHoyRes, tareasSemanaRes] = base
   // CUATRO contadores y CUATRO ventanas, contados uno a uno. El reparto es POR
@@ -847,6 +905,15 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
     const nuncaAtendido = !f.atendido_en
     return {
       clave: `${f.ambito}-${f.id}`,
+      // EL ID SUELTO, además de la clave. Es lo que le falta a cada fila para
+      // poder llevar a SU ficha (`/captaciones?id=…`, `/leads?lead=…`) en vez
+      // de a la lista entera, que es donde llevaba hasta hoy: con 759
+      // captaciones, buscar a mano el nombre que acabas de leer.
+      //
+      // La vista lo devuelve como TEXTO para las tres tablas a la vez —el de
+      // una captación es un número y el de un lead una uuid—, así que viaja
+      // como texto y cada pantalla de destino lo valida a su manera.
+      id: f.id,
       ambito: f.ambito,
       titulo: f.titulo?.trim() || "Sin nombre",
       barrio: f.barrio,
@@ -885,20 +952,31 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   // tasa—, porque un contador que no pinta nadie es una consulta por carga de
   // página a cambio de nada.
   //
-  // Lo que NO se ha tocado: `misLeads()` sigue viva —la usan el pipeline y
-  // `misRepartidos()`—, `sinEstado` sigue contándose porque es el hueco "Sin
-  // escribir" del desglose de WhatsApp, y el `interesadosTotal` del
+  // Y EN EL CAMBIO QUE QUITÓ LOS DOS EMBUDOS del final de la portada —"Estado
+  // WhatsApp · mis captaciones" y "Mi pipeline de leads"— se han ido con ellos
+  // `misLeads()` y su decena de contadores por estado, `getTotalesCaptaciones()`
+  // y el contador de captaciones sin estado. El `interesadosTotal` del
   // ADMINISTRADOR es otra variable en otra función y sigue en pie.
+  //
+  // Lo que NO se ha tocado: el count de captaciones activas (`capsActivas`), que
+  // es el total de la tarjeta 'Scraper · mis captaciones'.
   //
   // Y EN EL CAMBIO A SEIS TARJETAS se han ido también: los diecisiete
   // contadores por fuente del catálogo, la consulta `conDia()` con sus dos
   // restas —`visitas`, que alimentaba la tarjeta "Visita por programar"— y las
   // constantes que sólo usaban ellas (`TIPOS_CON_DIA`, `TOPE_CON_DIA`,
-  // `ESTADO_INTERESADO`) y la lista `fuentesVisibles`. En su sitio quedan seis
-  // contadores. `capsMesRes` se ha quedado: es el "N este mes" de la tarjeta
-  // del scraper.
+  // `ESTADO_INTERESADO`) y la lista `fuentesVisibles`.
+  //
+  // ARREGLADO EN REVISIÓN: este párrafo terminaba diciendo que quedaban seis
+  // contadores y que `capsMesRes` seguía vivo como el "N este mes" del
+  // scraper. Las dos cosas dejaron de ser ciertas con el selector de periodo:
+  // hoy son CUATRO count exactos (`totalesRes`) más CUATRO ventanas de 30 días
+  // (`ventanasRes`), y el contador del mes se borró porque ese número lo
+  // contesta ya el botón "30 días". Quien viniera a limpiar restos buscaría un
+  // `capsMesRes` que no existe y dudaría del resto del párrafo, que sí vale;
+  // se nombran las dos variables y no sus líneas porque esta función se mueve
+  // entera a cada cambio.
   const capsActivas = cuenta(capsActivasRes)
-  const sinEstado = cuenta(capsSinEstadoRes)
 
   /**
    * UNA TARJETA CON PERIODO: la ventana de 30 días da hoy / 7 días / 30 días y
@@ -912,32 +990,43 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
    * el total sigue siendo bueno y son los tres periodos cortos los que se
    * quedan flojos. Es el mismo trato que tienen hoy las barras del
    * administrador.
+   *
+   * Se trocea con `ahora`, el MISMO instante con el que se escribe `cortes` un
+   * poco más abajo — que es el que viaja en el enlace de la tarjeta. Dejando
+   * que `porPeriodo` se leyera su propio reloj, el número y la lista de destino
+   * se contaban con dos cortes separados por lo que tardaran las consultas.
    */
   const conTotal = (
     filas: Array<{ fecha_creacion?: string | null }>,
     total: number | null,
-  ): Periodos | null => (total == null ? null : { ...porPeriodo(filas), total })
+  ): Periodos | null => (total == null ? null : { ...porPeriodo(filas, ahora), total })
 
   const demandasPeriodos = conTotal(demandasFilas, cuenta(demandasTotalRes))
 
   return {
     captaciones: capsActivas,
-    // El desglose de WhatsApp, con su nombre y su color tal y como estén en
-    // /configuracion/catalogos. Un estado nuevo aparece aquí solo.
-    wa: opcionesDe(catalogos, "estado_whatsapp").map((c) => ({
-      valor: c.valor,
-      nombre: c.nombre,
-      color: c.color,
-      count: totalesCaps.porEstado[c.valor] ?? null,
-    })),
-    // Las que todavía no tienen estado NO son de ningún valor del catálogo, así
-    // que no caen en ninguna pastilla: el desglose sumaba menos que el titular y
-    // esas filas desaparecían de la pantalla sin dejar rastro. Antes iban dentro
-    // de "Pendiente" a mano, y eso era mentir en la otra dirección —no es lo
-    // mismo un WhatsApp por escribir que uno escrito y sin contestar—. Va aparte
-    // y sólo si hay alguna. No es un estado escondido: es el hueco de los que no
-    // tienen ninguno.
-    waSinEstado: sinEstado,
+    // LOS VALORES DE `fuente` QUE CUENTA CADA TARJETA DE LEADS, para que su
+    // enlace pueda pedirle a /leads exactamente esas filas. Son las MISMAS
+    // listas con las que se han contado los dos números de arriba
+    // (`totalesRes`), no una copia escrita en el componente: si mañana entra
+    // 'TikTok' en la familia, el número y la lista de destino se mueven juntos.
+    fuentes: { rrss: FAMILIAS_FUENTE.rrss, web: FAMILIAS_FUENTE.web },
+    // Y DÓNDE EMPIEZA CADA PERIODO CORTO, ya calculado aquí.
+    //
+    // Viaja el instante exacto con el que se han troceado las filas
+    // (`cortesPeriodo`), no la palabra "semana", porque es lo que hace que la
+    // lista de /leads enseñe LOS MISMOS que promete la tarjeta. Calcularlo en el
+    // componente sería calcularlo con Date.now() durante el render: el servidor
+    // y el navegador escribirían dos enlaces distintos y React lo cantaría como
+    // desajuste de hidratación.
+    cortes: (() => {
+      const c = cortesPeriodo(ahora)
+      return {
+        hoy: new Date(c.hoy).toISOString(),
+        semana: new Date(c.semana).toISOString(),
+        mes: new Date(c.mes).toISOString(),
+      }
+    })(),
     // Las tareas del calendario, cada contador por su cuenta: si falla el de
     // vencidas, el de hoy no tiene por qué callarse también.
     tareas: {
@@ -962,7 +1051,6 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       // ver" no es "no sé cuántas hay".
       demandas: demandasPeriodos && { ...demandasPeriodos, sinVer: cuenta(demandasSinVerRes) },
     },
-    pipeline: estadosLead.map((e, i) => ({ estado: e, count: cuenta(pipelineRes[i]) })),
     agenda: (agendaRes.data ?? []).map((a) => ({
       id: a.id as number,
       nombre: (a.nombre ?? null) as string | null,
@@ -990,8 +1078,12 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect("/login")
 
+  // `permisos` entra en el mismo `select` que ya se hacía, sin consulta de más:
+  // lo lee la portada del agente para saber si la fila de un prospecto puede
+  // enlazar a /prospectos. El módulo va cerrado por defecto (PERMISOS_DEFAULT),
+  // así que para casi todos ese enlace sólo llevaba a /sin-acceso.
   const { data: perfil } = await supabase
-    .from("perfiles").select("nombre, rol").eq("id", user.id).single()
+    .from("perfiles").select("nombre, rol, permisos").eq("id", user.id).single()
 
   const hora = new Date().getHours()
   const saludo = hora < 13 ? "Buenos días" : hora < 20 ? "Buenas tardes" : "Buenas noches"
@@ -1016,7 +1108,7 @@ export default async function DashboardPage() {
     )
   }
 
-  const data = await getAgentData(user.id, catalogos)
+  const data = await getAgentData(user.id)
   return (
     <AgentDashboard
       nombre={perfil?.nombre ?? "—"}
@@ -1025,6 +1117,9 @@ export default async function DashboardPage() {
       catalogos={catalogos}
       agendaEquipo={agenda}
       yoId={user.id}
+      // `resolverPermisos` completa las claves que falten en vez de darlas por
+      // denegadas: los perfiles viejos sólo llevan tres.
+      puedeProspectos={resolverPermisos(perfil?.permisos).prospectos}
     />
   )
 }

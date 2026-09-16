@@ -437,9 +437,22 @@ interface Props {
   catalogos?: Catalogo[]
   isAdmin?: boolean
   agentes?: AgenteInfo[]
+  /**
+   * La ficha que se abre al entrar, si se llega desde `/captaciones?id=…`.
+   *
+   * Lo estrena "lo que toca hoy" de la portada del agente: sus filas llevaban a
+   * esta lista a secas y había que buscar a mano, entre 759, el nombre que
+   * acababas de leer. Va como valor inicial de `selected` y no como un efecto
+   * que lo escriba al montar: un setState dentro de useEffect lo rechaza el lint
+   * del compilador, y encadena además un render de más.
+   *
+   * No hace falta que esa captación esté en la página que se ve: la ficha se
+   * trae ella sola de la base a partir del id.
+   */
+  capInicial?: number | null
 }
 
-export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalesEstado, totalesSenal, catalogos = [], isAdmin = true, agentes = [] }: Props) {
+export function CaptacionesList({ initialData, initialTotal, eliminadas = [], total, totalesEstado, totalesSenal, catalogos = [], isAdmin = true, agentes = [], capInicial = null }: Props) {
   /*
    * Las pastillas, en dos grupos y en este orden a propósito:
    *
@@ -466,7 +479,7 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
     ...pastillasEstado.map((c) => ({ key: c.valor, grupo: "estado", label: c.nombre, color: c.color })),
   ]
 
-  const [selected, setSelected] = useState<number | null>(null)
+  const [selected, setSelected] = useState<number | null>(capInicial)
   const [texto, setTexto] = useState("")
   const [search, setSearch] = useState("")
   const [filtro, setFiltro] = useState("todas")

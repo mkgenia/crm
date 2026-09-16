@@ -108,7 +108,23 @@ function timeAgo(date: string) {
   return new Date(date).toLocaleDateString("es", { day: "numeric", month: "short" })
 }
 
-export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { catalogos?: Catalogo[]; fuenteInicial?: string }) {
+export default function LeadsPage({
+  catalogos = [],
+  fuentesIniciales = [],
+  desdeInicial = "",
+  etiquetaDesde = "",
+  leadInicial = "",
+}: {
+  catalogos?: Catalogo[]
+  /** Las fuentes que pide la URL, ya validadas contra el catálogo por el servidor. */
+  fuentesIniciales?: string[]
+  /** Desde cuándo, en ISO. Lo calcula la portada con el corte de su periodo. */
+  desdeInicial?: string
+  /** Y cómo se lee ese corte ("Entrados hoy"), escrito también en el servidor. */
+  etiquetaDesde?: string
+  /** La ficha que hay que abrir al entrar, si se viene de pulsar una fila. */
+  leadInicial?: string
+}) {
   // Activos y en orden, tal y como los dejó el administrador en el panel.
   const ESTADOS = opcionesDe(catalogos, "estado_lead")
   const FUENTES = opcionesDe(catalogos, "fuente")
@@ -123,16 +139,39 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
   const [search, setSearch] = useState("")
   const [estadoFilter, setEstadoFilter] = useState<EstadoLead | "">("")
   /**
-   * De dónde vino. Llega por la URL (`/leads?fuente=Instagram`) desde el resumen
-   * de orígenes de la portada, y el servidor ya lo ha validado contra el
-   * catálogo.
+   * De dónde vinieron. Llega por la URL (`/leads?fuente=Instagram,Facebook`)
+   * desde las tarjetas de la portada, y el servidor ya las ha validado una a una
+   * contra el catálogo.
+   *
+   * VARIAS y no una: cada tarjeta cuenta una FAMILIA de fuentes —Instagram y
+   * Facebook son la misma pregunta— y el filtro tiene que poder enseñar
+   * exactamente las mismas filas que ha contado el número, o la tarjeta promete
+   * una cosa y la lista enseña otra.
    *
    * No lleva una fila de pastillas propia como el estado: serían ocho más, casi
    * todas a cero para casi todos, y es justo lo que se está quitando de las
    * pantallas. Cuando hay filtro se enseña una chapa que se puede quitar, y
    * cuando no hay, no se ve nada.
    */
-  const [fuenteFilter, setFuenteFilter] = useState<string>(fuenteInicial)
+  const [fuentes, setFuentes] = useState<string[]>(fuentesIniciales)
+  /**
+   * DESDE CUÁNDO, el corte del periodo que el agente tenía puesto en su portada.
+   *
+   * Llega hecho del servidor, que lo ha calculado con el mismo corte con el que
+   * contó el número de la tarjeta: pulsar una tarjeta que dice 3 con "Hoy"
+   * enseña esos 3, no los 121 de siempre. Se quita con su chapa, y quitarlo es
+   * "verlos todos".
+   */
+  const [desde, setDesde] = useState<string>(desdeInicial)
+  /**
+   * UNA FICHA CONCRETA: la fila de "lo que toca hoy" que se acaba de pulsar.
+   *
+   * Filtra la consulta además de abrir el panel, y las dos cosas por el mismo
+   * motivo: la lista va paginada de 50 en 50 y ordenada por fecha, así que el
+   * lead que toca llamar —que suele ser de los viejos— no tiene por qué estar en
+   * la página que se carga. Filtrando, está siempre.
+   */
+  const [leadFilter, setLeadFilter] = useState<string>(leadInicial)
   /** El filtro de "esto no lo está trabajando nadie". */
   const [soloSinAsignar, setSoloSinAsignar] = useState(false)
   const [pagina, setPagina] = useState(1)
@@ -152,7 +191,19 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
   // pinchó la fila: al pulsar "Atendido", la fila pasaba a "Interesado" y el
   // panel seguía marcando "Nuevo", sobre el mismo lead y al mismo tiempo.
   const [abierto, setSelected] = useState<Lead | null>(null)
-  const selected = abierto ? (leads.find((l) => l.id === abierto.id) ?? abierto) : null
+  /**
+   * Y la que abre la URL, sin haber pulsado nada.
+   *
+   * Es un VALOR DERIVADO, no un estado que alguien rellene en un efecto: el lint
+   * del compilador rechaza setState dentro de useEffect, y aquí además sobra.
+   * Mientras el filtro de un solo lead siga puesto, la lista tiene exactamente
+   * esa fila y el panel se abre solo con ella.
+   */
+  const selected = abierto
+    ? (leads.find((l) => l.id === abierto.id) ?? abierto)
+    : leadFilter
+      ? leads.find((l) => l.id === leadFilter) ?? null
+      : null
   const [updatingId, setUpdatingId] = useState<string | null>(null)
 
   // El equipo, para repartir desde la ficha. `null` mientras no se ha traído:
@@ -275,8 +326,23 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
         if (estadoFilter) q = q.eq("estado", estadoFilter)
 
         // El origen es una columna, no una relación: se filtra igual que el
-        // estado. El valor ya viene comprobado contra el catálogo.
-        if (fuenteFilter) q = q.eq("fuente", fuenteFilter)
+        // estado. Los valores ya vienen comprobados contra el catálogo.
+        //
+        // `.in` y no `.eq` aunque venga una sola: una tarjeta de la portada
+        // manda su familia entera (Instagram · Facebook · RRSS · Redes) y con
+        // `.eq` sólo habría entrado la primera, o sea que el número de la
+        // tarjeta y el total de aquí no habrían cuadrado nunca.
+        if (fuentes.length > 0) q = q.in("fuente", fuentes)
+
+        // Desde cuándo. El corte llega en ISO y ya normalizado por el servidor,
+        // y es EL MISMO instante con el que la portada contó el número.
+        if (desde) q = q.gte("fecha_creacion", desde)
+
+        // Una ficha concreta. Va con los demás filtros a propósito: el total del
+        // paginador, el recuento de sin asignar y la propia fila salen todos de
+        // esta misma consulta, así que la pantalla sigue siendo coherente
+        // consigo misma mientras dure el filtro.
+        if (leadFilter) q = q.eq("id", leadFilter)
 
         // El valor va entre comillas: PostgREST parte el `or` por comas y
         // paréntesis, así que buscar "Pérez, Juan" sin ellas rompe el filtro y
@@ -292,7 +358,15 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
         return q
       }
 
-      const desde = (pag - 1) * POR_PAGINA
+      // Se llama `primeraFila` y no `desde` porque en este mismo bloque vive
+      // `construir`, que usa el `desde` del componente —el corte de fecha que
+      // llega por la URL—. Un `const desde` aquí lo tapaba por alcance léxico y
+      // el filtro de fecha acababa recibiendo el número de fila: en la página 1
+      // valía 0, o sea que no se filtraba nada y la tarjeta que prometía 3
+      // enseñaba los 1.090; en la 2 se preguntaba por `fecha_creacion >= 50` y
+      // la pantalla se iba al error de carga. TypeScript no lo canta porque los
+      // dos son valores válidos para `.gte()`.
+      const primeraFila = (pag - 1) * POR_PAGINA
       // Las dos a la vez: la página y cuántos de esos mismos leads están sin
       // repartir. El recuento se hace EN LA BASE con head:true —sólo viaja la
       // cabecera con el total, ni una fila—, porque contar los sin agente sobre
@@ -300,7 +374,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
       const [{ data, error, count }, conteoSin] = await Promise.all([
         construir(COLUMNAS)
           .order("fecha_creacion", { ascending: false })
-          .range(desde, desde + POR_PAGINA - 1),
+          .range(primeraFila, primeraFila + POR_PAGINA - 1),
         construir("id", true, true),
       ])
 
@@ -353,7 +427,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
       // parpadear la lista vieja antes de que llegue la buena.
       if (vigente()) setLoading(false)
     }
-  }, [estadoFilter, fuenteFilter, search, soloSinAsignar])
+  }, [estadoFilter, fuentes, desde, leadFilter, search, soloSinAsignar])
 
   // Init: auth + datos iniciales (una sola vez)
   useEffect(() => {
@@ -425,7 +499,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
     const delay = search ? 300 : 0
     debounceRef.current = setTimeout(() => fetchLeads(userId, isAdmin, pagina), delay)
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [estadoFilter, fuenteFilter, search, soloSinAsignar, fetchLeads, userId, isAdmin, pagina])
+  }, [estadoFilter, fuentes, desde, leadFilter, search, soloSinAsignar, fetchLeads, userId, isAdmin, pagina])
 
   // La página que se está mirando, en una ref: el canal de realtime se monta una
   // vez y así la lee sin tener que resuscribirse cada vez que pasas de página.
@@ -491,8 +565,44 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
   }
 
   function quitarFuente() {
-    setFuenteFilter("")
+    setFuentes([])
     setPagina(1)
+  }
+
+  /** "Y enséñamelos todos, no sólo los de ese periodo." */
+  function quitarDesde() {
+    setDesde("")
+    setPagina(1)
+  }
+
+  /**
+   * Soltar la ficha que abrió la URL y volver a ver la lista entera.
+   *
+   * Cierra el panel Y quita el filtro de un solo lead, que son la misma acción:
+   * mientras el filtro esté puesto la lista tiene una fila, así que dejar el
+   * panel cerrado sobre una lista de uno no sería "cerrar", sería un callejón.
+   */
+  function verTodos() {
+    setLeadFilter("")
+    setSelected(null)
+    setEditando(false)
+    setPagina(1)
+  }
+
+  /**
+   * Abrir (o cerrar) una ficha pulsando una fila.
+   *
+   * Pulsar manda sobre la URL: en cuanto el agente toca la lista, el filtro de
+   * un solo lead se suelta. Si no, cerrar la ficha que abrió la URL no cerraría
+   * nada —el valor derivado la volvería a abrir en el mismo render—.
+   */
+  function abrirFicha(lead: Lead | null) {
+    if (leadFilter) {
+      setLeadFilter("")
+      setPagina(1)
+    }
+    setSelected(lead)
+    setEditando(false)
   }
 
   function filtrarSinAsignar() {
@@ -501,7 +611,8 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
   }
 
   /** Hay algo filtrando: cambia lo que dice la pantalla cuando no sale nada. */
-  const hayFiltros = !!search || !!estadoFilter || !!fuenteFilter || soloSinAsignar
+  const hayFiltros =
+    !!search || !!estadoFilter || fuentes.length > 0 || !!desde || !!leadFilter || soloSinAsignar
 
   /**
    * Traspasar el lead abierto a un compañero.
@@ -739,21 +850,58 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
 
         {/* Pills filtro estado */}
         <div className="flex items-center gap-2 overflow-x-auto shrink-0">
-          {/* De dónde vienen. Sólo aparece cuando se ha llegado filtrando desde
-              el resumen de orígenes: si no, no se pinta nada. Lleva la X porque
-              un filtro que llega por la URL y no se ve es la forma más rápida de
-              que alguien jure que "faltan leads". */}
-          {fuenteFilter && (
+          {/* LAS TRES CHAPAS DE LO QUE LLEGA POR LA URL: de dónde vienen, desde
+              cuándo, y si se está mirando una ficha suelta.
+
+              Sólo aparecen si se ha llegado filtrando desde la portada. Las tres
+              llevan su X, y no es adorno: un filtro que llega por la URL y no se
+              ve es la forma más rápida de que alguien jure que "faltan leads". Y
+              es además lo que pidió el dueño —"con la opción de volver a verlas
+              todas"—, una por cada cosa que se ha filtrado, para poder soltarlas
+              de una en una. */}
+          {fuentes.length > 0 && (
             <button
               onClick={quitarFuente}
               title="Quitar el filtro de origen"
               className={cn(
                 "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border font-medium whitespace-nowrap transition-all",
-                claseColor(colorDe(catalogos, "fuente", fuenteFilter)),
+                // Con UNA fuente la chapa se pinta de su color, como siempre.
+                // Con varias no hay un color que las represente —la tarjeta de
+                // redes trae cuatro— y se queda neutra: teñirla del color de la
+                // primera diría que el filtro es sólo ésa.
+                fuentes.length === 1
+                  ? claseColor(colorDe(catalogos, "fuente", fuentes[0]))
+                  : "border-border text-muted-foreground",
               )}
             >
-              <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(colorDe(catalogos, "fuente", fuenteFilter)))} />
-              {nombreDe(catalogos, "fuente", fuenteFilter)}
+              {fuentes.map((f) => (
+                <span key={f} className="flex items-center gap-1.5">
+                  <span className={cn("h-1.5 w-1.5 rounded-full", clasePunto(colorDe(catalogos, "fuente", f)))} />
+                  {nombreDe(catalogos, "fuente", f)}
+                </span>
+              ))}
+              <X className="h-3 w-3 shrink-0 opacity-70" />
+            </button>
+          )}
+          {desde && (
+            <button
+              onClick={quitarDesde}
+              title="Ver todos, sin filtro de fecha"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border border-border text-muted-foreground font-medium whitespace-nowrap transition-all hover:border-muted-foreground/40"
+            >
+              {/* La frase la escribe el servidor con el periodo que venía
+                  pulsado, para que diga lo mismo que el botón de la portada. */}
+              {etiquetaDesde || "Con filtro de fecha"}
+              <X className="h-3 w-3 shrink-0 opacity-70" />
+            </button>
+          )}
+          {leadFilter && (
+            <button
+              onClick={verTodos}
+              title="Volver a ver todos tus leads"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border border-border text-muted-foreground font-medium whitespace-nowrap transition-all hover:border-muted-foreground/40"
+            >
+              Un solo lead · ver todos
               <X className="h-3 w-3 shrink-0 opacity-70" />
             </button>
           )}
@@ -840,14 +988,22 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
               </div>
               <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">
-                  {hayFiltros ? "No hay leads con estos filtros" : "Aún no tienes leads"}
+                  {/* Venir de una fila del día y no encontrar la ficha no es
+                      "no hay leads con estos filtros": es que ese lead ya no
+                      está en tu lista, y decirlo así ahorra el paseo de
+                      comprobar los filtros uno a uno. */}
+                  {leadFilter
+                    ? "Ese lead ya no está en tu lista"
+                    : hayFiltros ? "No hay leads con estos filtros" : "Aún no tienes leads"}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {hayFiltros
-                    ? soloSinAsignar
-                      ? "Ninguno de los leads que ves está esperando agente"
-                      : "Prueba cambiando los filtros de búsqueda"
-                    : "Los leads se crean automáticamente cuando un propietario responde, o puedes añadir uno manualmente"}
+                  {leadFilter
+                    ? "Puede que se lo hayan traspasado a otro compañero. Pulsa «Un solo lead · ver todos» para volver a tu lista."
+                    : hayFiltros
+                      ? soloSinAsignar
+                        ? "Ninguno de los leads que ves está esperando agente"
+                        : "Prueba cambiando los filtros de búsqueda"
+                      : "Los leads se crean automáticamente cuando un propietario responde, o puedes añadir uno manualmente"}
                 </p>
               </div>
               {!hayFiltros && (
@@ -865,7 +1021,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
               {leads.map((lead) => (
                 <button
                   key={lead.id}
-                  onClick={() => { setSelected(selected?.id === lead.id ? null : lead); setEditando(false) }}
+                  onClick={() => abrirFicha(selected?.id === lead.id ? null : lead)}
                   className={cn(
                     "w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-muted/40",
                     selected?.id === lead.id && "bg-muted/60",
@@ -952,7 +1108,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
                   Guardar
                 </button>
               )}
-              <button onClick={() => { setSelected(null); setEditando(false) }} className="text-muted-foreground hover:text-foreground transition-colors">
+              <button onClick={() => abrirFicha(null)} className="text-muted-foreground hover:text-foreground transition-colors">
                 <X className="h-4 w-4" />
               </button>
             </div>
