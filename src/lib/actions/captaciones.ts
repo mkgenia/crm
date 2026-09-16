@@ -590,16 +590,45 @@ export async function marcarRespondido(captacionId: number) {
   return { success: true }
 }
 
+/**
+ * Dar de baja una captación: se va a la papelera.
+ *
+ * Y SE LE QUITA AL AGENTE QUE LA LLEVARA. Antes sólo se ponía `activo = false`,
+ * y eso dejaba dos cabos sueltos:
+ *
+ *   · El lead espejo del propietario seguía en la lista de su agente. El trigger
+ *     `bajar_agente_al_lead` (026) sólo salta cuando cambia `agente_id`, y aquí
+ *     no cambiaba nada: la captación desaparecía de /captaciones y el señor
+ *     seguía apareciendo en /leads como trabajo de alguien.
+ *   · Al restaurarla volvía con el mismo agente puesto, aunque hubieran pasado
+ *     meses y el reparto fuera ya otro.
+ *
+ * Ahora se suelta el agente en el mismo gesto, y el trigger de la 026 se lleva
+ * también el lead espejo —tiene su rama para la retirada, con el motivo "Se le
+ * quitó el agente a la captación"—. `captado_por` NO se toca: quién la trajo es
+ * historia y no cambia porque la propiedad se dé de baja.
+ *
+ * Medido antes de escribirlo: la papelera está hoy vacía, así que esto no
+ * arrastra nada hacia atrás. Es una puerta que se cierra antes de que entre nadie.
+ */
 export async function eliminarCaptacion(captacionId: number) {
   if (!await admiteAdmin()) return { error: SIN_PERMISO }
   const supabase = await createAdminClient()
   const { error } = await supabase
     .from("captaciones")
-    .update({ activo: false })
+    .update({
+      activo: false,
+      agente_id: null,
+      asignado_en: null,
+      asignado_por: null,
+      asignacion_motivo: "Se dio de baja la captación",
+    })
     .eq("id", captacionId)
 
   if (error) return { error: error.message }
   revalidatePath("/captaciones")
+  revalidatePath("/leads")
+  revalidatePath("/dashboard")
   return { success: true }
 }
 
@@ -730,6 +759,43 @@ export async function eliminarDefinitivamente(ids: number[]) {
       fallos.slice(0, 3).map((f) => (f as PromiseRejectedResult).reason?.message)
     )
   }
+
+  // SOLTAR AL PROPIETARIO ANTES DE BORRAR EL ANUNCIO.
+  //
+  // El lead espejo —la persona— NO se borra: puede tener notas, una conversación
+  // de WhatsApp y un historial que no se recuperan, y lo que se está tirando es
+  // el anuncio, no al señor. Pero hay que desatarlo de la captación antes de que
+  // desaparezca, y esto se hace en dos pasos porque cada uno arregla una cosa:
+  //
+  //   1. Quitar el agente de la CAPTACIÓN. Así el trigger de la 026 suelta
+  //      también su lead espejo, con su motivo escrito. Si se borrara la
+  //      captación de golpe, el trigger no llega a saltar y el contacto se queda
+  //      en la lista de un agente que ya no tiene nada que trabajar.
+  //   2. Vaciar el `captacion_id` del lead, que si no queda apuntando a una fila
+  //      que ya no existe. Medido hoy: hay 179 leads así de borrados anteriores.
+  //      Ninguno sale en la lista del día de nadie —`v_mi_dia` excluye los que
+  //      tienen `captacion_id`—, así que son personas que su agente ve en /leads
+  //      y a las que el CRM no le va a pedir que llame jamás.
+  //
+  // Los dos pasos se hacen aunque fallen: es limpieza, y si algo va mal es peor
+  // dejar el anuncio sin borrar que dejar un cabo suelto que ya se sabe medir.
+  await supabase
+    .from("captaciones")
+    .update({
+      agente_id: null,
+      asignado_en: null,
+      asignado_por: null,
+      asignacion_motivo: "Se borró la captación",
+    })
+    .in("id", ids)
+
+  await supabase
+    .from("leads")
+    .update({
+      captacion_id: null,
+      asignacion_motivo: "Se borró la captación de la que venía",
+    })
+    .in("captacion_id", ids)
 
   // Borrar registros relacionados y la captación
   await supabase.from("historial_cambios").delete().in("captacion_id", ids)

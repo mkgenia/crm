@@ -481,6 +481,157 @@ export async function asignarLeadsAMano(ids: string[], agenteId: string): Promis
 }
 
 /**
+ * La firma que queda escrita cuando el administrador quita un agente.
+ *
+ * Se escribe el nombre Y la hora porque el hueco sin explicación es el problema
+ * que se viene arreglando: hasta ahora, vaciar la cuenta de alguien sólo se
+ * podía hacer con un script contra la base, y lo que quedaba en pantalla era un
+ * lead sin agente y sin una línea que dijera por qué. El `asignacion_motivo` es
+ * lo que la ficha pinta debajo del "Sin asignar", así que es ahí donde tiene que
+ * caber la respuesta a "¿y esto quién lo ha soltado?".
+ *
+ * La hora se formatea en Europe/Madrid a propósito: el servidor corre en UTC y
+ * un "21:40" que en la oficina fueron las 23:40 no sirve para reconstruir nada.
+ */
+function motivoQuitado(nombre: string): string {
+  const cuando = new Intl.DateTimeFormat("es-ES", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Europe/Madrid",
+  }).format(new Date())
+  return `Agente quitado por ${nombre} el ${cuando}`
+}
+
+/**
+ * QUITAR el agente de unos leads. Que es otra cosa que RECHAZAR.
+ *
+ * La diferencia está justo aquí abajo, en `rechazarLead`: rechazar es el agente
+ * diciendo "esto no es para mí", y por eso se apunta en `rechazado_por`, que es
+ * la lista que `siguiente_agente()` excluye — a ese agente no se le vuelve a
+ * ofrecer NUNCA. Quitar es el administrador recogiendo el lead para repartirlo
+ * de otra forma, o para dejar una cuenta limpia cuando alguien se va. Si esto
+ * tocara `rechazado_por`, el día que el dueño quisiera volver a dárselo a esa
+ * misma persona el reparto automático se lo negaría para siempre y nadie
+ * entendería por qué. Por eso no se reutiliza `rechazarLead` y por eso este
+ * update NO lleva esa columna.
+ *
+ * `captado_por` tampoco se toca, ni aquí ni al asignar: ése es quien TRAJO el
+ * contacto, es historia y no cambia porque hoy no lo lleve nadie.
+ *
+ * Va separada de la de captaciones y no unificada con un parámetro de tipo
+ * porque los ids no son la misma cosa —uuid en texto aquí, bigint allí— y ya
+ * hay un precedente escrito arriba: `asignarAMano` y `asignarLeadsAMano` están
+ * partidas por lo mismo. Una sola función con `('lead'|'captacion', ids)`
+ * tendría que aceptar `string[] | number[]` y dejaría pasar un número donde va
+ * un uuid sin que el compilador dijera nada. Además revalidan pantallas
+ * distintas: quitar el agente de una captación arrastra a su lead espejo y
+ * quitar el de un lead no arrastra nada.
+ *
+ * Trabaja sobre una lista porque la ficha sólo tiene que mandar uno, pero
+ * vaciar la cuenta de un agente son veinticuatro de golpe, y eso es exactamente
+ * lo que hasta hoy había que hacer con un script.
+ */
+export async function quitarAgenteLeads(ids: string[]): Promise<{ ok?: true; motivo?: string; error?: string }> {
+  const sesion = await sesionActual()
+  // Mismo control que `asignarLeadsAMano`, y por el mismo motivo: esto es un
+  // fichero "use server", cada export es una puerta de entrada de verdad y
+  // esconder el botón en la ficha no impide que nadie la llame a mano.
+  if (!sesion.isAdmin) return { error: "Sólo el administrador quita el agente de un lead" }
+  if (ids.length === 0) return { error: "No has seleccionado ningún lead" }
+
+  const supabase = await createAdminClient()
+  const motivo = motivoQuitado(sesion.nombre)
+
+  const { error } = await supabase.from("leads").update({
+    agente_id: null,
+    asignado_en: null,
+    asignado_por: null,
+    asignacion_motivo: motivo,
+  })
+    .in("id", ids)
+    // Sólo a los que TIENEN agente. Sin esta línea, una tanda de ids le escribe
+    // la firma "Agente quitado por X" también a los que nunca tuvieron ninguno
+    // —y hoy hay 1.011 leads así—, pisando el motivo de verdad ("esperando
+    // asignación", "no había nadie disponible"), que es justo lo que la ficha
+    // pinta debajo del "Sin asignar". Un hueco con una explicación falsa es el
+    // problema que esta acción venía a arreglar, no uno que deba crear.
+    .not("agente_id", "is", null)
+
+  if (error) return { error: error.message }
+
+  // Los mismos cuatro que `asignarLeadsAMano`: la lista y la ficha, los
+  // contactos, el panel de reparto (que vive en captaciones y cuenta la cola de
+  // los que esperan agente, que acaba de crecer) y la portada, de donde sale la
+  // carga de cada agente.
+  revalidatePath("/leads")
+  revalidatePath("/contactos")
+  revalidatePath("/captaciones")
+  revalidatePath("/dashboard")
+
+  // El motivo vuelve para que la ficha pinte YA la firma que se acaba de
+  // escribir, en vez del motivo viejo hasta que llegue la recarga.
+  return { ok: true, motivo }
+}
+
+/**
+ * Lo mismo con captaciones. Ver el comentario de arriba para el porqué de las
+ * dos funciones y de por qué esto no es un rechazo.
+ *
+ * No hay que tocar el lead espejo: el trigger `bajar_agente_al_lead` (migración
+ * 026) ya ve que la captación se ha quedado sin agente y se lo quita también al
+ * lead del mismo propietario, con su propio motivo. Hacerlo aquí además serían
+ * dos reglas para lo mismo, y dos reglas para lo mismo acaban discrepando.
+ *
+ * `visto_en` SÍ se limpia, igual que al asignar. La idea de dejarlo como estaba
+ * era que aquí no hay agente al que avisar y que ya lo pondría a null quien la
+ * volviera a repartir, pero eso no es cierto por el camino más probable: la
+ * captación vuelve a la bolsa de las que esperan —hoy 696— y de ahí sale casi
+ * siempre con el botón "Repartir", o sea con `repartir_interesadas_pendientes()`
+ * (migración 027), que escribe agente, fecha y motivo pero NO toca `visto_en`.
+ * Sólo lo limpian `asignar_captacion()` (017) y las asignaciones a mano de aquí.
+ * Con la marca del agente anterior todavía puesta, la captación le llega al
+ * siguiente ya "vista": `getCaptacionesSinVer()` filtra por `visto_en IS NULL`,
+ * así que el aviso de "nueva captación asignada" no le salta al entrar y se
+ * entera sólo si estaba conectado justo en ese momento. Una captación sin dueño
+ * no la ha visto nadie como suya: eso es exactamente lo que dice el hueco.
+ */
+export async function quitarAgenteCaptaciones(ids: number[]): Promise<{ ok?: true; motivo?: string; error?: string }> {
+  const sesion = await sesionActual()
+  if (!sesion.isAdmin) return { error: "Sólo el administrador quita el agente de una captación" }
+  if (ids.length === 0) return { error: "No has seleccionado ninguna captación" }
+
+  const supabase = await createAdminClient()
+  const motivo = motivoQuitado(sesion.nombre)
+
+  const { error } = await supabase.from("captaciones").update({
+    agente_id: null,
+    asignado_en: null,
+    asignado_por: null,
+    asignacion_motivo: motivo,
+    // Vuelve a la bolsa sin ver, para que al siguiente que la reciba le salte el
+    // aviso. El porqué largo está en la cabecera.
+    visto_en: null,
+  })
+    .in("id", ids)
+    // Lo mismo que en los leads, y aquí pasaba seguro: la selección múltiple de
+    // la lista permite marcar la página entera, y de las captaciones activas hay
+    // 696 sin agente. Sin este filtro, un "Quitar agente" sobre cincuenta
+    // seleccionadas firmaba como retirada lo que en realidad nunca se repartió,
+    // y borraba el motivo que explicaba por qué seguían esperando.
+    .not("agente_id", "is", null)
+
+  if (error) return { error: error.message }
+
+  // Las cuatro de siempre, y aquí /leads y /contactos no son de adorno: el
+  // trigger de la 026 acaba de dejar sin agente al lead espejo.
+  revalidarCaptaciones()
+  return { ok: true, motivo }
+}
+
+/**
  * Un agente rechaza un lead: vuelve a la cola y no se le vuelve a ofrecer.
  *
  * Igual que en captaciones, se apunta QUIÉN lo rechazó y no sólo que fue

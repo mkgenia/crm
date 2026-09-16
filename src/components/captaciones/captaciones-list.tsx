@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type ComponentProps } from "react"
 import { DetailPanel } from "./detail-panel"
 import { PapeleraList } from "./papelera-list"
-import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, Trash2, Loader2, CheckSquare, Square, Trash, Building2 } from "lucide-react"
+import { MapPin, Home, CalendarClock, Search, LayoutGrid, List, KanbanSquare, PhoneOff, Trash2, Loader2, CheckSquare, Square, Trash, Building2, UserMinus } from "lucide-react"
 import { CaptacionesPipeline } from "./captaciones-pipeline"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { ESTADO_COLORS, AGENDA_COLORS, type EstadoAgenda } from "@/types/captaciones"
@@ -11,6 +11,7 @@ import { type Catalogo, opcionesDe, nombreDe, colorDe, claseColor, clasePunto } 
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { darDeBajaMasivo, asignarAgentesMasivo, getCaptaciones } from "@/lib/actions/captaciones"
+import { quitarAgenteCaptaciones } from "@/lib/actions/asignacion"
 
 type Captacion = Awaited<ReturnType<typeof getCaptaciones>>["filas"][number]
 type AgenteInfo = { id: string; nombre: string; apellidos: string | null; avatar_url: string | null }
@@ -476,6 +477,18 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
   const [asignarLoading, setAsignarLoading] = useState(false)
   const [showAsignarMenu, setShowAsignarMenu] = useState(false)
   const [confirmBaja, setConfirmBaja] = useState(false)
+  const [quitarLoading, setQuitarLoading] = useState(false)
+  /**
+   * Quitar el agente EN MASA sí pregunta antes, al revés que el botón de la
+   * ficha.
+   *
+   * No es una manía de coherencia con los otros dos diálogos: en la ficha,
+   * quitar tiene vuelta atrás de un clic porque la rejilla de agentes se queda
+   * ahí al lado. Sobre cincuenta seleccionadas no la tiene — reasignarlas en
+   * masa se las da TODAS al mismo agente, que no es el estado anterior, y quién
+   * llevaba cada una ya no está en pantalla para reconstruirlo.
+   */
+  const [confirmQuitar, setConfirmQuitar] = useState(false)
   const [pendingAgente, setPendingAgente] = useState<AgenteInfo | null>(null)
 
   // La página que se ve y su total, las dos cosas traídas del servidor. Filtrar
@@ -683,6 +696,41 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
     }
   }
 
+  /**
+   * Dejar sin agente las seleccionadas.
+   *
+   * Esto es lo que faltaba el día que hubo que vaciar la cuenta de una agente
+   * con un script contra la base: veinticuatro captaciones que por pantalla no
+   * había forma de soltar. NO es un rechazo —el mismo agente puede volver a
+   * recibirlas—, y el lead espejo de cada una se queda sin agente solo, por el
+   * trigger de la migración 026.
+   */
+  async function handleQuitarAgenteMasivo() {
+    if (!seleccionados.size) return
+    setConfirmQuitar(false)
+    setQuitarLoading(true)
+    try {
+      const res = await quitarAgenteCaptaciones(Array.from(seleccionados))
+      if (res.error) { toast.error(res.error); return }
+      // Sin número, al revés que la asignación y la baja masivas. Ahí el número
+      // es verdad —se asigna o se da de baja todo lo marcado—, pero aquí el
+      // servidor sólo toca las que TIENEN agente, y con 696 activas sin agente
+      // lo normal es que la selección lleve muchas que no cambian. Decir "50
+      // captaciones se han quedado sin agente" cuando se soltaron doce es
+      // cantar un recuento que nadie ha contado.
+      toast.success("Las seleccionadas que tenían agente se han quedado sin asignar")
+      setSeleccionados(new Set())
+      recargarLista()
+    } catch (e: unknown) {
+      // Mismo motivo que en las otras dos masivas: sin catch, un fallo de red
+      // deja el botón girando y sin forma de volver a intentarlo.
+      console.error("[captaciones] no se pudo quitar el agente de la selección", e)
+      toast.error("No se pudo quitar el agente. Vuelve a intentarlo.")
+    } finally {
+      setQuitarLoading(false)
+    }
+  }
+
   function seleccionarSinTelefono() {
     const sinTel = filas.filter((c) => !hasPhone(c.telefono)).map((c) => c.id)
     if (!sinTel.length) { toast("No hay captaciones sin teléfono en esta página"); return }
@@ -806,6 +854,21 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
                         </div>
                       )}
                     </div>
+                  )}
+
+                  {/* Quitar el agente. No hace falta la lista de agentes —esto
+                      no se lo da a nadie—, así que sale aunque `agentes` venga
+                      vacía. Es la acción que hasta hoy había que hacer con un
+                      script contra la base para vaciar la cuenta de alguien. */}
+                  {isAdmin && (
+                    <button
+                      onClick={() => setConfirmQuitar(true)}
+                      disabled={quitarLoading}
+                      className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                    >
+                      {quitarLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <UserMinus className="h-3 w-3" />}
+                      Quitar agente
+                    </button>
                   )}
 
                   <button
@@ -990,6 +1053,44 @@ export function CaptacionesList({ initialData, initialTotal, eliminadas = [], to
                 className="h-9 px-4 rounded-md bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition-colors"
               >
                 Sí, dar de baja
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm dialog: quitar agente masivo */}
+      {confirmQuitar && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          {/* El hueco entre el texto y los botones lo pone el `gap` del diálogo,
+              no un `space-y-*`: eso son márgenes en los hijos, y aquí el espacio
+              lo reparte el padre. Los diálogos de al lado todavía llevan lo
+              viejo; se irán cambiando cuando se toquen. */}
+          <div className="bg-card border border-border rounded-xl p-6 shadow-2xl max-w-sm w-full mx-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h3 className="font-semibold text-foreground">
+                ¿Quitar el agente a {seleccionados.size} captaciones?
+              </h3>
+              {/* Se dice lo que NO pasa, porque es lo que la gente teme: esto no
+                  es un rechazo (se les puede volver a asignar al mismo agente) y
+                  no borra quién trajo cada captación. */}
+              <p className="text-sm text-muted-foreground">
+                Se quedarán sin asignar y podrás repartirlas de nuevo a quien quieras, incluido el mismo
+                agente. No se pierde quién las captó.
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setConfirmQuitar(false)}
+                className="h-9 px-4 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleQuitarAgenteMasivo}
+                className="h-9 px-4 rounded-md bg-violet-500 text-white text-sm font-medium hover:bg-violet-600 transition-colors"
+              >
+                Sí, quitar
               </button>
             </div>
           </div>

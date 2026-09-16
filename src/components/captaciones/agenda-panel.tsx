@@ -4,8 +4,9 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { asignarAgenda } from "@/lib/actions/captaciones"
+import { quitarAgenteCaptaciones } from "@/lib/actions/asignacion"
 import { toast } from "sonner"
-import { Loader2, ArrowLeftRight, X } from "lucide-react"
+import { Loader2, ArrowLeftRight, UserMinus, X } from "lucide-react"
 import type { EstadoAgenda } from "@/types/captaciones"
 import { cn } from "@/lib/utils"
 
@@ -41,6 +42,7 @@ function initials(a: Agente) {
 /** Asignar o traspasar el agente de una captación. No hace nada más. */
 export function AgendaPanel({ captacionId, agentes, initial, onUpdate }: Props) {
   const [loading, setLoading] = useState(false)
+  const [quitando, setQuitando] = useState(false)
   const [traspasando, setTraspasando] = useState(false)
   /**
    * Solo guardamos la elección pendiente. El agente vigente se lee siempre de `initial`,
@@ -75,6 +77,44 @@ export function AgendaPanel({ captacionId, agentes, initial, onUpdate }: Props) 
     onUpdate?.()
   }
 
+  /**
+   * Dejar la captación sin agente.
+   *
+   * NO es un rechazo: el administrador la recoge para repartirla de otra forma,
+   * así que el mismo agente puede volver a recibirla (ver `quitarAgenteCaptaciones`;
+   * rechazarla lo metería en `rechazado_por` y el reparto automático no se la
+   * volvería a ofrecer nunca). Hasta hoy esto no se podía hacer por pantalla:
+   * "Traspasar" exige elegir a OTRO, y vaciar la cuenta de un agente había que
+   * hacerlo con un script contra la base.
+   *
+   * Sin confirmación a propósito: tiene vuelta atrás de un clic, porque al
+   * quedarse sin agente el panel enseña la rejilla para volver a dárselo a quien
+   * sea.
+   *
+   * Y sin guardarse aquí un "ya no tiene agente": el agente vigente se lee
+   * siempre de `initial`, que el padre refresca con `onUpdate`. Una copia local
+   * es justo lo que este panel evita desde el principio, y sería la que se
+   * quedaría vieja.
+   */
+  async function handleQuitar() {
+    if (loading || quitando) return
+    setQuitando(true)
+    const res = await quitarAgenteCaptaciones([captacionId]).catch((e: unknown) => ({
+      error: e instanceof Error ? e.message : "No se ha podido quitar el agente",
+    }))
+    setQuitando(false)
+
+    if (res?.error) {
+      toast.error(res.error)
+      return
+    }
+
+    toast.success("Captación sin asignar. Puedes dársela a otro agente aquí mismo.")
+    setTraspasando(false)
+    setSeleccion(null)
+    onUpdate?.()
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
@@ -93,22 +133,81 @@ export function AgendaPanel({ captacionId, agentes, initial, onUpdate }: Props) 
               </p>
               <p className="text-xs text-muted-foreground">Lleva esta captación</p>
             </div>
-            {/* El icono NO lleva margen: <Button> ya separa con su propio gap. */}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground shrink-0"
-              onClick={() => setTraspasando(true)}
-            >
-              <ArrowLeftRight className="h-3.5 w-3.5" />
-              Traspasar
-            </Button>
+            {/* Los dos botones van en su propia fila con su `gap`: el `gap-3`
+                del contenedor separa el bloque del nombre, y este `gap-1`
+                separa "Traspasar" de "Quitar" sin que ninguno lleve margen. */}
+            <div className="flex items-center gap-1 shrink-0">
+              {/* El icono NO lleva margen: <Button> ya separa con su propio gap. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={quitando}
+                className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setTraspasando(true)}
+              >
+                <ArrowLeftRight className="h-3.5 w-3.5" />
+                Traspasar
+              </Button>
+              {/* "Traspasar" contesta "¿a quién?" y esto contesta "a nadie", que
+                  no es un agente más de la rejilla. Sólo sale con la ficha
+                  delante, o sea cuando hay agente que quitar. Este panel entero
+                  lo pinta `detail-panel` sólo para el administrador, y quien de
+                  verdad lo impide es la acción de servidor. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={loading || quitando}
+                title="Dejar la captación sin agente"
+                className="h-8 px-2.5 text-xs text-muted-foreground hover:text-red-600 dark:hover:text-red-400"
+                onClick={handleQuitar}
+              >
+                {quitando
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : <UserMinus className="h-3.5 w-3.5" />}
+                Quitar
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col gap-2">
             {asignada && !traspasando && (
-              <p className="text-xs text-muted-foreground">
-                El agente asignado ya no está en la lista. Elige uno para reasignarla.
+              /* La captación tiene agente, pero su perfil ya no sale en la lista
+                 (se borró al irse de la empresa). Ése es justo el caso de
+                 "vaciar la cuenta de alguien", así que aquí también tiene que
+                 poder soltarse: con el botón sólo en la ficha de arriba, la
+                 única salida era dársela a OTRO, y no siempre hay a quién. El
+                 hueco entre el aviso y el botón lo pone este `gap`, no un
+                 margen del hijo. */
+              <div className="flex items-center gap-2">
+                <p className="flex-1 text-xs text-muted-foreground">
+                  El agente asignado ya no está en la lista. Elige uno para reasignarla, o quítaselo.
+                </p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={loading || quitando}
+                  title="Dejar la captación sin agente"
+                  className="h-8 shrink-0 px-2.5 text-xs text-muted-foreground hover:text-red-600 dark:hover:text-red-400"
+                  onClick={handleQuitar}
+                >
+                  {quitando
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <UserMinus className="h-3.5 w-3.5" />}
+                  Quitar
+                </Button>
+              </div>
+            )}
+            {/* Que la pantalla DIGA que no la lleva nadie, y no que haya que
+                deducirlo de que salga la rejilla. Faltaba: al pulsar "Quitar",
+                la ficha con el nombre desaparecía y quedaba un rótulo que
+                seguía diciendo "Agente asignado" encima de una lista de
+                nombres, o sea lo mismo que ve una captación que nunca se
+                repartió. Con 696 activas sin agente, ese estado es un sitio
+                normal y tiene que leerse a la primera. El amarillo es el mismo
+                que usa la ficha de lead para el hueco sin agente. */}
+            {!asignada && !traspasando && (
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
+                Sin asignar. Elige abajo a quién se la das.
               </p>
             )}
             {traspasando && (

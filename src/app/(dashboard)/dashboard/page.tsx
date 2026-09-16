@@ -60,6 +60,50 @@ function fechaCorta(iso: string | null | undefined): string | null {
 }
 
 /**
+ * Las piezas de una fecha vistas desde MADRID. Sólo la usa `inicioDiaMadrid`.
+ *
+ * `en-CA` no es un capricho de idioma: se leen las piezas una a una con
+ * `formatToParts`, así que el idioma no pinta nada y lo único que importa es
+ * que el formato pida las siete piezas en 24 horas.
+ */
+const PARTES_MADRID = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Madrid", hour12: false,
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+})
+
+/**
+ * El instante en que empieza (00:00 de MADRID) el día de `base`, o el de
+ * `sumaDias` días después.
+ *
+ * NO vale cortar el día con `new Date(...); setHours(0,0,0,0)`, que es la hora
+ * del SERVIDOR. En producción el servidor va en UTC y Madrid va una o dos horas
+ * por delante, y eso rompe justo el caso más común de la agenda: una entrada de
+ * "todo el día" la crea el navegador como `new Date("2026-09-16T00:00:00")` con
+ * la hora de Madrid (agenda-panel.tsx:330), o sea que se guarda como
+ * 2026-09-15T22:00Z. Cortando el día en la medianoche de UTC, esa tarea de
+ * mañana cae en el saco de ayer y la tarjeta la cantaría como VENCIDA un día
+ * entero antes de tiempo, que es exactamente la mentira que esta pantalla no se
+ * puede permitir.
+ *
+ * El desfase se mide en `base` y se aplica también a los días que se le suman:
+ * en la madrugada de los dos cambios de hora al año el corte puede irse una
+ * hora. Es el único caso, y se prefiere a no mirar la zona en absoluto.
+ */
+function inicioDiaMadrid(base: Date, sumaDias = 0): Date {
+  const p: Record<string, string> = {}
+  for (const parte of PARTES_MADRID.formatToParts(base)) p[parte.type] = parte.value
+  // Con `hour12: false` algunas versiones de Node escriben la medianoche como
+  // "24" en vez de "00"; sin esto el desfase saldría 24 h torcido esa hora.
+  const hora = p.hour === "24" ? "00" : p.hour
+  // El mismo reloj leído como si fuera UTC. No es una fecha de verdad: sólo
+  // sirve para restar y saber cuánto va Madrid por delante de UTC ahora mismo.
+  const comoUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hora, +p.minute, +p.second)
+  const desfase = comoUTC - base.getTime()
+  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day + sumaDias) - desfase)
+}
+
+/**
  * Un contador que falla vale `null`, nunca 0.
  *
  * Un 0 se lee como "no tienes nada pendiente" y es justo la mentira que no nos
@@ -405,8 +449,12 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
    * Se escribe aquí una sola vez porque la usan dos cosas que tienen que decir
    * lo mismo: el filtro de `misRepartidos()` y la lista de tarjetas. No sale del
    * catálogo a propósito —es un valor de sistema que nombran el trigger de
-   * reparto (024:178) y la vista `v_mi_dia` (024:317)—, igual que
-   * `getAgentData` ya nombra "Pendiente" y "Enviado" más abajo.
+   * reparto (024:178) y la vista `v_mi_dia` (024:317)—.
+   *
+   * ARREGLADO EN REVISIÓN: aquí ponía "igual que `getAgentData` ya nombra
+   * 'Pendiente' y 'Enviado' más abajo", y esos dos literales se han ido en este
+   * mismo cambio con la resta de la tasa de respuesta. Un ejemplo que manda a
+   * buscar algo que ya no está hace dudar del resto del comentario.
    */
   const FUENTE_ESPEJO = "Captaciones"
 
@@ -415,11 +463,15 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
    *
    * ARREGLADO EN REVISIÓN: antes se pintaba una tarjeta por cada fuente del
    * catálogo, `Captaciones` incluida. Pero `misRepartidos()` excluye justo esa
-   * fuente, así que su contador vale 0 pase lo que pase, y un 0 acaba en la
-   * frase del pie: a un agente con 140 captaciones se le leía "Todavía no te ha
-   * llegado nada por Captador Idealista", que es exactamente lo contrario de la
-   * verdad. Aquí no sale porque va aparte —lo dice el subtítulo del bloque, con
-   * su enlace a /captaciones—, no porque esté vacía. Dos consultas menos.
+   * fuente, así que su contador vale 0 pase lo que pase: a un agente con 140
+   * captaciones se le leía "Todavía no te ha llegado nada por Captador
+   * Idealista", que es exactamente lo contrario de la verdad. Aquí no sale
+   * porque va aparte —lo dice el subtítulo del bloque, con su enlace a
+   * /captaciones—, no porque esté vacía. Dos consultas menos.
+   *
+   * Y esto pesa MÁS desde que los ceros se ven: aquel 0 se recogía en una frase
+   * al pie, y hoy sería una tarjeta apagada de pleno derecho, con su icono de
+   * radar, jurando que el captador no ha traído nada en la vida.
    */
   const fuentesVisibles = fuentes.filter((f) => f.valor !== FUENTE_ESPEJO)
 
@@ -473,6 +525,29 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   const miDia = () =>
     supabase.from("v_mi_dia").select("id", { count: "exact", head: true }).eq("agente_id", userId)
 
+  /**
+   * SUS tareas del calendario y sólo las que siguen SIN HACER.
+   *
+   * Es la misma tabla y el mismo criterio que la agenda de /calendario: suyas
+   * por `agente_id` (agenda.ts:46, donde un agente que no es admin sólo ve lo
+   * suyo) y `completado = false`, que es lo que la columna "Lo que viene" ya
+   * descuenta para no enseñar dos veces lo hecho (proximas-entradas.tsx:27).
+   *
+   * Se cuenta en la base con `head: true`, no trayendo las filas de
+   * `getAgendaMes()` y midiéndolas con `.length`: esa consulta trae SEIS
+   * SEMANAS —ni lo vencido de hace dos meses ni lo de dentro de tres— así que
+   * contar sobre ella respondería a otra pregunta, y encima con el corte mudo
+   * de PostgREST a 1.000 filas esperando.
+   */
+  const misTareas = () =>
+    supabase.from("agenda").select("id", { count: "exact", head: true })
+      .eq("agente_id", userId).eq("completado", false)
+
+  // Los tres cortes del día, en hora de Madrid (ver `inicioDiaMadrid`).
+  const inicioHoy = inicioDiaMadrid(ahora).toISOString()
+  const inicioManana = inicioDiaMadrid(ahora, 1).toISOString()
+  const finSemana = inicioDiaMadrid(ahora, 8).toISOString()
+
   const [totalesCaps, base, pipelineRes, origenesRes] = await Promise.all([
     // Las captaciones activas y su desglose por estado de WhatsApp ya se cuentan
     // en la base aquí dentro, con la lista de estados salida del catálogo. Para
@@ -489,12 +564,19 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
         .eq("agente_id", userId).eq("activo", true),
       supabase.from("captaciones").select("id", { count: "exact", head: true })
         .eq("agente_id", userId).eq("activo", true).gte("created_at", inicioMes),
-      // Las que todavía no tienen estado de WhatsApp. No son de ningún valor del
-      // catálogo, así que sin contarlas aparte la tasa de respuesta saldría
-      // inflada: irían al saco de "ha contestado" sin haberlo hecho.
+      // Las que todavía no tienen estado de WhatsApp. No son de ningún valor
+      // del catálogo, así que no caen en ninguna pastilla del desglose.
+      //
+      // ARREGLADO EN REVISIÓN: este comentario decía que sin contarlas aparte
+      // "la tasa de respuesta saldría inflada", y esa tarjeta ya no existe —se
+      // fue con las tres que quitó el dueño—. Quien viniera a limpiar los
+      // restos leería que este contador alimenta algo borrado y se lo llevaría
+      // por delante, y con él el hueco "Sin escribir" del bloque de WhatsApp
+      // (AgentDashboard.tsx:406), que es quien lo lee HOY: sin él el desglose
+      // suma menos que el titular "Mis captaciones" y esas filas desaparecen de
+      // la pantalla sin dejar rastro.
       supabase.from("captaciones").select("id", { count: "exact", head: true })
         .eq("agente_id", userId).eq("activo", true).is("estado_whatsapp", null),
-      misLeads(),
       supabase.from("captaciones")
         .select("id, nombre, telefono, direccion, estado_whatsapp, fecha_agenda, notas_agenda")
         .eq("agente_id", userId)
@@ -533,11 +615,16 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
       miDia(),
       miDia().lte("proximo_toque", ahoraISO),
       miDia().is("atendido_en", null),
-      // Las suyas con SEÑAL. Se cuenta aquí y no se saca de
-      // `getTotalesCaptaciones`, que sólo desglosa `estado_whatsapp`: la señal
-      // es otra columna y otra pregunta.
-      supabase.from("captaciones").select("id", { count: "exact", head: true })
-        .eq("agente_id", userId).eq("activo", true).not("senal", "is", null),
+      // SUS TAREAS DEL CALENDARIO, en tres contadores y no en uno.
+      //
+      // El total histórico no le dice nada a nadie: una agenda de un año son
+      // cientos de tareas hechas y unas pocas que importan. Lo que se cuenta es
+      // lo que puede hacer HOY —lo vencido y lo de hoy— y, aparte, lo que viene
+      // en la semana, que es lo que salva la tarjeta de quedarse en un cero
+      // mudo el día que no toca nada.
+      misTareas().lt("fecha", inicioHoy),                                    // vencidas
+      misTareas().gte("fecha", inicioHoy).lt("fecha", inicioManana),         // hoy
+      misTareas().gte("fecha", inicioManana).lt("fecha", finSemana),         // los 7 días siguientes
     ]),
     // Una consulta por estado del catálogo. Son una decena de contadores
     // diminutos en paralelo, no una fila por lead.
@@ -588,8 +675,9 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
   // las líneas a propósito: "unas líneas más arriba" mandaba a buscar cerca y
   // está a casi quinientas, así que el siguiente que limpie por aquí se lo
   // llevaría por delante creyendo que es un resto del borrado.
-  const [capsActivasRes, capsMesRes, capsSinEstadoRes, leadsTotalRes, agendaRes,
-    diaRes, diaTotalRes, diaVencidosRes, diaSinAtenderRes, senalRes] = base
+  const [capsActivasRes, capsMesRes, capsSinEstadoRes, agendaRes,
+    diaRes, diaTotalRes, diaVencidosRes, diaSinAtenderRes,
+    tareasVencidasRes, tareasHoyRes, tareasSemanaRes] = base
 
   type FilaVista = {
     ambito: string
@@ -658,41 +746,20 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
     }
   })
 
-  // Aquí sí se nombran dos valores sueltos, y no es una lista de estados
-  // escondida: la LISTA entera sale del catálogo (es `totalesCaps.porEstado`, y
-  // el desglose de la pantalla la recorre completa). Lo que se nombra son los
-  // dos valores concretos que dan sentido a un KPI derivado —quién ha
-  // contestado—, igual que hace la cabecera de /captaciones. Son de `sistema`,
-  // así que no se pueden borrar del catálogo, y si alguno faltara el KPI sale a
-  // null en vez de mentir.
+  // AQUÍ ESTABAN LA TASA DE RESPUESTA Y LOS INTERESADOS DEL AGENTE, y se han
+  // ido con sus dos tarjetas: el dueño quitó "Mis leads", "Interesados" y "Tasa
+  // respuesta" de la portada. Con ellas se van también sus consultas —el
+  // contador de leads (`misLeads()` suelto), el de captaciones con señal, y los
+  // dos valores de `totalesCaps.porEstado` que sólo servían para la resta de la
+  // tasa—, porque un contador que no pinta nadie es una consulta por carga de
+  // página a cambio de nada.
   //
-  // Eran cuatro. Los otros dos, `Interesado` y `Quiere_Llamada`, dejaron de ser
-  // estados con la 027 y se cuentan desde `senal` unas líneas más abajo.
+  // Lo que NO se ha tocado: `misLeads()` sigue viva —la usan el pipeline y
+  // `misRepartidos()`—, `sinEstado` sigue contándose porque es el hueco "Sin
+  // escribir" del desglose de WhatsApp, y el `interesadosTotal` del
+  // ADMINISTRADOR (línea 198) es otra variable en otra función y sigue en pie.
   const capsActivas = cuenta(capsActivasRes)
   const sinEstado = cuenta(capsSinEstadoRes)
-  const pendientes = totalesCaps.porEstado["Pendiente"]
-  const enviadas = totalesCaps.porEstado["Enviado"]
-
-  // Ha contestado el que no está ni sin escribir, ni recién escrito, ni sin
-  // estado. Si falta cualquiera de los tres sumandos la tasa vale null y no se
-  // pinta: media resta da un porcentaje falso, no un porcentaje aproximado.
-  const sinContestar =
-    pendientes == null || enviadas == null || sinEstado == null
-      ? null
-      : pendientes + enviadas + sinEstado
-  const tasaRespuesta =
-    sinContestar == null || capsActivas == null || capsActivas === 0
-      ? null
-      : Math.round(((capsActivas - sinContestar) / capsActivas) * 100)
-
-  // Los suyos con SEÑAL, contados en la base.
-  //
-  // Esto era `porEstado["Interesado"] + porEstado["Quiere_Llamada"]`.
-  // `getTotalesCaptaciones` desglosa por los valores ACTIVOS del catálogo de
-  // `estado_whatsapp`, y la 027 archivó esos dos: las dos claves salían
-  // `undefined`, `undefined == null` es cierto y el KPI se quedaba en null para
-  // siempre. No roto: invisible, que se nota bastante menos.
-  const interesadosTotal = cuenta(senalRes)
 
   return {
     captaciones: capsActivas,
@@ -713,9 +780,13 @@ async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<Agen
     // y sólo si hay alguna. No es un estado escondido: es el hueco de los que no
     // tienen ninguno.
     waSinEstado: sinEstado,
-    interesadosTotal,
-    tasaRespuesta,
-    leadsTotal: cuenta(leadsTotalRes),
+    // Las tareas del calendario, cada contador por su cuenta: si falla el de
+    // vencidas, el de hoy no tiene por qué callarse también.
+    tareas: {
+      vencidas: cuenta(tareasVencidasRes),
+      hoy: cuenta(tareasHoyRes),
+      semana: cuenta(tareasSemanaRes),
+    },
     // Nombre y color se resuelven AQUÍ, en el servidor, igual que hace el
     // administrador con `senal.porValor` (page.tsx:321): así el componente no
     // necesita recorrer el catálogo entero para pintar la rejilla.

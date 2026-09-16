@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import {
-  Building2, UserCircle, TrendingUp, MessageSquare, CalendarClock,
+  Building2, UserCircle, MessageSquare, CalendarClock, CalendarDays,
   Phone, AlertTriangle, Home, Target, Radar, Share2, Globe, QrCode, Inbox,
 } from "lucide-react"
 import { AgendaPanel } from "@/components/agenda/agenda-panel"
@@ -69,7 +69,11 @@ const VISIBLES = 8
  * sistema que escriben el trigger de reparto (024:178) y la propia vista
  * (033:69 y 033:76), igual que `AMBITOS` de aquí arriba nombra los tres ámbitos
  * que une la vista. `page.tsx` lo tiene declarado con el mismo nombre y por el
- * mismo motivo (408-411).
+ * mismo motivo (page.tsx:459).
+ *
+ * ARREGLADO EN REVISIÓN: aquí ponía "(408-411)", que en `page.tsx` cae dentro
+ * del mapeo de los leads recientes del ADMINISTRADOR. Quien fuera a comprobar
+ * que las dos declaraciones dicen lo mismo aterrizaba en otra función.
  */
 const FUENTE_ESPEJO = "Captaciones"
 
@@ -101,15 +105,26 @@ export interface AgentData {
   /** Las captaciones activas a las que todavía no se ha escrito: no son de
    *  ningún valor del catálogo y sin esto no salían en ninguna pastilla. */
   waSinEstado: number | null
-  interesadosTotal: number | null
-  tasaRespuesta: number | null
-  leadsTotal: number | null
+  /**
+   * Sus tareas del calendario SIN COMPLETAR, partidas en tres.
+   *
+   * Tres números y no uno porque la tarjeta tiene que poder decir de qué están
+   * hechos: "9" no es lo mismo si son nueve de hoy o siete vencidas y dos de
+   * hoy. Cada uno puede valer null por su cuenta —un contador que falla no es
+   * un cero— y `semana` son los SIETE DÍAS SIGUIENTES, sin contar hoy: es lo
+   * que evita que la tarjeta de un martes tranquilo se quede en un cero mudo.
+   */
+  tareas: {
+    vencidas: number | null
+    hoy: number | null
+    semana: number | null
+  }
   /**
    * De dónde vienen sus leads. Una entrada por valor ACTIVO del catálogo
    * `fuente`, con nombre y color ya resueltos en el servidor.
    *
-   * `total` es el denominador del PROPIO bloque y no tiene por qué coincidir
-   * con `leadsTotal`: aquí no entran los leads espejo de sus captaciones.
+   * `total` es el denominador del PROPIO bloque: aquí no entran los leads
+   * espejo de sus captaciones.
    */
   origenes: {
     total: number | null
@@ -178,6 +193,43 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
       ? `${data.dia.sinAtender.toLocaleString("es")} sin atender nunca`
       : null,
   ].filter((t): t is string => t != null)
+
+  // LA TARJETA NUEVA: SUS TAREAS DEL CALENDARIO.
+  //
+  // El número grande es lo ACCIONABLE: lo vencido más lo de hoy. No el total
+  // histórico de la agenda, que a los seis meses son cientos de tareas hechas y
+  // no contesta a nada; y tampoco sólo las de hoy, porque una tarea de ayer sin
+  // hacer no se va a hacer en el pasado — sigue siendo trabajo de hoy, y es
+  // justo la que se olvida. Es la misma cuenta que hace el comercial a las
+  // nueve de la mañana: qué tengo que despachar antes de irme a casa.
+  //
+  // Si CUALQUIERA de los dos sumandos falló, el total es null y la tarjeta
+  // pinta "—" con "no se ha podido contar": media suma no es un número
+  // aproximado, es un número inventado.
+  const { vencidas, hoy, semana } = data.tareas
+  const tareasAhora = vencidas == null || hoy == null ? null : vencidas + hoy
+
+  // La línea de abajo desmonta el número —nueve no es lo mismo si son siete
+  // vencidas que si son nueve de hoy— y, cuando no hay nada que desmontar,
+  // mira a la semana que viene en vez de dejar un cero sin explicar. Un cero
+  // con "no tienes nada pendiente" se lee como lo que es; un cero solo, en una
+  // portada llena de números, se lee como que algo no ha cargado.
+  const subTareas =
+    vencidas == null || hoy == null
+      ? "" // no llega a pintarse: KpiCard dice "no se ha podido contar"
+      : vencidas > 0
+        ? `${vencidas} ${plural(vencidas, "vencida", "vencidas")} · ${hoy} para hoy`
+        : hoy > 0
+          ? "para hoy, nada vencido"
+          : semana == null
+            ? "nada para hoy ni vencido"
+            : semana > 0
+              ? `nada para hoy · ${semana} en los próximos 7 días`
+              // "ni esta semana" y no "no tienes nada pendiente": los tres
+              // contadores sólo miran hasta dentro de siete días, así que una
+              // tarea apuntada para dentro de tres semanas existe y este cero
+              // no puede negarla.
+              : "nada para hoy ni esta semana"
 
   return (
     <div className="p-8 flex flex-col gap-8">
@@ -257,26 +309,39 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
         )}
       </section>
 
-      {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      {/* LAS TARJETAS DE ARRIBA. Eran cuatro y ahora son dos: se han quitado
+          "Mis leads", "Interesados" y "Tasa respuesta" —los tres los pidió
+          quitar el dueño— y ha entrado la cuenta de sus tareas del calendario.
+
+          LA REJILLA SIGUE SIENDO `grid-cols-2 lg:grid-cols-4`, la misma que la
+          de los orígenes de aquí abajo, y las dos tarjetas ocupan las dos
+          primeras casillas. No es un descuido que la mitad derecha quede
+          libre en pantalla ancha: es la alternativa a que cada tarjeta se
+          coma media fila.
+
+          Con `lg:grid-cols-2` estas dos tarjetas medirían el DOBLE que las de
+          los orígenes que tienen justo debajo —mismo tipo de tarjeta, mismo
+          número grande, dos anchos distintos— y el 3xl del número se quedaría
+          flotando en medio de una caja de medio metro. Compartiendo las
+          columnas con la fila de abajo, cada tarjeta cae exactamente encima de
+          su vecina y las dos filas se leen como una sola cuadrícula.
+
+          El `gap` sube de 3 a 4 por lo mismo: para que sea el de abajo. */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
           href="/captaciones"
           icon={Building2} label="Mis captaciones" value={data.captaciones}
           sub={data.captacionesEsteMes != null ? `${data.captacionesEsteMes} este mes` : "activas"} holo
         />
+        {/* "Mis tareas" y no "Tareas del calendario": a un cuarto de fila esa
+            etiqueta se parte en dos líneas y empuja el número hacia abajo, con
+            lo que los dos números de la fila dejan de estar a la misma altura.
+            Lo que la etiqueta no dice lo dicen el icono, la línea de abajo y el
+            enlace, que va al calendario. */}
         <KpiCard
-          href="/leads"
-          icon={UserCircle} label="Mis leads" value={data.leadsTotal}
-          sub="asignados a ti"
-        />
-        <KpiCard
-          href="/captaciones"
-          icon={TrendingUp} label="Interesados" value={data.interesadosTotal}
-          sub="interesados + quieren llamada"
-        />
-        <KpiCard
-          icon={MessageSquare} label="Tasa respuesta" value={data.tasaRespuesta}
-          sub="de tus captaciones" suffix="%"
+          href="/calendario"
+          icon={CalendarDays} label="Mis tareas" value={tareasAhora}
+          sub={subTareas}
         />
       </div>
 
@@ -630,8 +695,11 @@ function FilaDelDia({ fila, catalogos }: { fila: FilaDia; catalogos: Catalogo[] 
   )
 }
 
-function KpiCard({ href, icon: Icon, label, value, sub, holo, suffix }: {
-  href?: string; icon: React.ElementType; label: string; value: number | null; sub: string; holo?: boolean; suffix?: string
+// El `suffix` se ha ido con la tarjeta de la tasa de respuesta, que era la
+// única que pintaba un "%". Un parámetro que ya no usa nadie es una promesa que
+// hay que seguir manteniendo a cambio de nada.
+function KpiCard({ href, icon: Icon, label, value, sub, holo }: {
+  href?: string; icon: React.ElementType; label: string; value: number | null; sub: string; holo?: boolean
 }) {
   const inner = (
     <div className={cn(
@@ -650,7 +718,7 @@ function KpiCard({ href, icon: Icon, label, value, sub, holo, suffix }: {
         {/* Un contador que no se ha podido contar enseña una raya, no un cero.
             El cero de un fallo se lee como "no tienes ninguno". */}
         <p className={cn("text-3xl font-semibold tracking-tight", holo ? "holo-text" : "text-foreground")}>
-          {value != null ? `${value.toLocaleString("es")}${suffix ?? ""}` : "—"}
+          {value != null ? value.toLocaleString("es") : "—"}
         </p>
         <p className="text-xs text-muted-foreground">{value != null ? sub : "no se ha podido contar"}</p>
       </div>
@@ -683,18 +751,14 @@ const ICONO_FUENTE: Record<string, React.ElementType> = {
 
 function SeccionOrigenes({ data }: { data: AgentData }) {
   const o = data.origenes
-  const conTarjeta = o.porFuente.filter((f) => f.total != null && f.total > 0)
-  const enFallo    = o.porFuente.filter((f) => f.total == null)
-  const aCero      = o.porFuente.filter((f) => f.total === 0)
+  const enFallo = o.porFuente.filter((f) => f.total == null)
   // LOS RESTOS, por dos caminos.
   //
   // El bueno es el par de contadores. Pero si UNO de los dos falla, el residuo
   // se DEDUCE del total: lo repartido menos lo que han contado las fuentes. Sin
   // esa segunda vía, un solo contador caído se llevaba por delante la línea que
-  // hace cuadrar la suma —las tarjetas enseñando 5 debajo de un titular que
-  // dice 7, y nada que lo explique— y, si además ninguna fuente tenía tarjeta,
-  // arrastraba a `hayQueEnsenyar` al estado vacío: "todavía no te han repartido
-  // ningún lead" encima de siete. El número deducido es el mismo siempre que
+  // hace cuadrar la suma: las tarjetas enseñando 5 debajo de un titular que
+  // dice 7, y nada que lo explique. El número deducido es el mismo siempre que
   // todas las fuentes se hayan podido contar, que es justo lo que se comprueba.
   const sumaFuentes = o.porFuente.reduce((s, f) => s + (f.total ?? 0), 0)
   const restos =
@@ -708,29 +772,38 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
   const hayRestos = restos != null && restos > 0
   // Sin catálogo de fuentes no hay nada con lo que desglosar, y eso NO es "no
   // te han repartido nada": con `fuentes` vacío page.tsx deja `fueraDeCatalogo`
-  // en null a propósito (509) y aquí no llegaría ni una tarjeta, así que el
-  // estado vacío diría "todavía no te han repartido ningún lead" tres píxeles
-  // debajo de "1.021 leads repartidos". Sólo se enseña el vacío cuando el total
-  // es un cero medido.
+  // en null a propósito y aquí no llegaría ni una tarjeta, así que el bloque se
+  // callaría los leads que ese agente sí tiene. Por eso, con leads y sin
+  // catálogo, se pinta el fallo; el recuadro de "no hay ninguna fuente activa"
+  // queda para cuando el total es un cero medido.
   const todoRoto = o.porFuente.length > 0
     ? enFallo.length === o.porFuente.length
     : o.total == null || o.total > 0
 
-  // ORDEN: por el `orden` del catálogo, que ya viene aplicado por `opcionesDe`.
-  // NO por número descendente: con 7 leads un lead nuevo reordena las tarjetas
-  // entre recargas y la pantalla parece otra. El número grande ya salta a la
-  // vista solo; la posición fija vale más.
-  const tarjetas = [...conTarjeta, ...enFallo]
-
-  // El bloque tiene algo que enseñar si hay tarjetas O si hay restos.
+  // UNA TARJETA POR CADA FUENTE DEL CATÁLOGO, TAMBIÉN LAS QUE ESTÁN A CERO.
   //
-  // Sin la segunda mitad, un agente al que TODOS sus leads le llegaron sin
-  // fuente anotada —o con una fuente que el administrador retiró del catálogo—
-  // leía "Todavía no te han repartido ningún lead" justo debajo de "3 leads
-  // repartidos": dos frases contrarias a dos centímetros, y los tres leads
-  // desaparecidos, porque la línea de los restos vive en la otra rama. Cero
-  // leads y "ninguno encaja en una tarjeta" no son lo mismo.
-  const hayQueEnsenyar = tarjetas.length > 0 || hayRestos
+  // Antes sólo entraban las que tenían número y las rotas, y los ceros se
+  // recogían en una frase al pie ("Todavía no te ha llegado nada por Formulario
+  // web, WhatsApp entrante…"). Lo pidió cambiar el dueño y tiene razón: ver el
+  // hueco es la mitad de la información, y un canal nombrado en una frase de
+  // pie de página se deja de mirar. La pantalla del administrador ya lo hace
+  // así desde su `OrigenCard` (AdminDashboard.tsx:458): la tarjeta a cero SE
+  // PINTA, apagada —el icono en gris y el número en gris—, pero se pinta.
+  //
+  // El orden es el del catálogo, que ya viene aplicado por `opcionesDe` en el
+  // servidor. NO por número descendente: con 7 leads un lead nuevo reordena las
+  // tarjetas entre recargas y la pantalla parece otra. Ahora importa todavía
+  // más, porque con las siete fijas el sitio de cada canal ES su identidad.
+  //
+  // `Captaciones` sigue sin estar: no es una fuente vacía, es la de los leads
+  // espejo y va aparte. Lo dice el subtítulo del bloque.
+  //
+  // ARREGLADO EN REVISIÓN: el filtro que la deja fuera está en `page.tsx:476`
+  // (`fuentesVisibles`), no en la 424, que es el comentario de cabecera de
+  // `getAgentData`. Y esta nota importa justo por lo que acaba de cambiar: si
+  // esa fuente llegara, ya no se recogería en una frase al pie sino que sería
+  // una tarjeta apagada jurando que el captador no ha traído nada nunca.
+  const tarjetas = o.porFuente
 
   return (
     <section className="flex flex-col gap-4">
@@ -739,12 +812,24 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
           De dónde vienen tus leads
         </h2>
         {/* El bloque declara SU PROPIO denominador, contado con sus mismos
-            filtros. No es el KPI 'Mis leads' de arriba: aquí no entran los
-            leads espejo de sus captaciones, y la segunda frase lo dice en vez
-            de dejar un descuadre sin explicar. */}
+            filtros: aquí NO entran los leads espejo de sus captaciones, y la
+            segunda frase lo dice en vez de dejar un descuadre sin explicar.
+
+            ARREGLADO EN REVISIÓN: esto decía "no es el KPI 'Mis leads' de
+            arriba", y ese KPI ya no está —se fue con las tres tarjetas que
+            quitó el dueño—. Un comentario que se defiende de una tarjeta que no
+            existe manda a buscar arriba algo que no se va a encontrar; lo que
+            importa sigue siendo con qué filtros está contado ESTE total. */}
         {o.total != null && (
           <p className="text-xs text-muted-foreground">
-            {o.total.toLocaleString("es")} {o.total === 1 ? "lead repartido" : "leads repartidos"}
+            {/* Con las siete tarjetas siempre en pantalla, el cero se lee aquí
+                con palabras. "0 leads repartidos" encima de siete tarjetas
+                apagadas —la cuenta de Ana hoy mismo— parece una pantalla que no
+                ha cargado; "todavía no te han repartido ningún lead" dice que
+                está bien, que es lo que hay. */}
+            {o.total === 0
+              ? "Todavía no te han repartido ningún lead"
+              : `${o.total.toLocaleString("es")} ${o.total === 1 ? "lead repartido" : "leads repartidos"}`}
             {data.captaciones != null && data.captaciones > 0 && (
               <> · tus captaciones van aparte, en <Link href="/captaciones" className="hover:text-foreground underline underline-offset-2">captaciones</Link></>
             )}
@@ -753,8 +838,14 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
       </div>
 
       {todoRoto ? (
-        // ESTADO ROTO. Calcado del recuadro de `data.dia.error` (línea 178).
+        // ESTADO ROTO. Calcado del recuadro de `data.dia.error` de "Lo que
+        // toca hoy", más arriba en este mismo fichero.
         // Cero y fallo no comparten pintura nunca.
+        //
+        // ARREGLADO EN REVISIÓN: ponía "(línea 178)" y ese recuadro está casi
+        // cien líneas más abajo. Un número de línea del PROPIO fichero se cae
+        // solo cada vez que se toca la pantalla —y esta se acaba de tocar
+        // entera—, así que se nombra la sección, que no se mueve.
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-5 flex items-start gap-3">
           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
           <p className="text-sm text-muted-foreground">
@@ -762,28 +853,45 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
             si sigue igual, avisa: es un fallo de la consulta, no que no tengas leads.
           </p>
         </div>
-      ) : !hayQueEnsenyar ? (
-        // ESTADO VACÍO. Mismo `border-dashed` que ya se usa en 186 y 382. Los
-        // nombres salen del catálogo, no escritos aquí.
+      ) : tarjetas.length === 0 ? (
+        // ESTADO VACÍO, que ya NO quiere decir "no tienes leads" —eso lo dice
+        // ahora el subtítulo, con las tarjetas a cero debajo— sino que no hay
+        // catálogo de fuentes con el que desglosar nada. Se llega aquí con
+        // `fuente` vacío o con todo archivado desde /configuracion/catalogos.
+        // Mismo `border-dashed` que el vacío de "Lo que toca hoy".
         <div className="border border-dashed border-border rounded-lg p-10 text-center flex flex-col gap-2">
-          <p className="text-sm text-muted-foreground">Todavía no te han repartido ningún lead.</p>
+          <p className="text-sm text-muted-foreground">
+            No hay ninguna fuente activa en el catálogo.
+          </p>
           <p className="text-xs text-muted-foreground/70">
-            Cuando te asignen uno, aquí verás por dónde entró
-            {o.porFuente.length > 0 && <>: {o.porFuente.slice(0, 4).map((f) => f.nombre).join(", ")}…</>}
+            Sin fuentes no se puede decir por dónde entra cada lead. Se encienden
+            desde Configuración → Catálogos.
           </p>
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          {/* grid-cols-2 en móvil y lg:grid-cols-4: rima con la fila de KPIs de
-              arriba, que ya es grid-cols-2 lg:grid-cols-4.
-              La rejilla sólo existe si hay alguna tarjeta: se puede llegar aquí
-              con cero tarjetas y sólo restos —todos sus leads sin fuente— y una
-              rejilla vacía dejaría el hueco del `gap` del padre delante de la
-              frase, como si faltara algo. */}
-          {tarjetas.length > 0 && (
+          {/* grid-cols-2 en móvil y lg:grid-cols-4: las mismas columnas que la
+              fila de tarjetas de arriba, para que las dos filas se lean como
+              una sola cuadrícula.
+              Hoy son siete tarjetas —las ocho fuentes activas menos la del
+              espejo—, o sea dos filas de cuatro con una casilla libre al final.
+              Es la misma media fila libre que arriba y por el mismo motivo: no
+              se estiran las tarjetas para tapar un hueco. */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {tarjetas.map((f) => {
               const Icono = ICONO_FUENTE[f.valor] ?? Inbox
+              // TRES ESTADOS QUE NO SE CONFUNDEN NUNCA, y ahora menos que
+              // nunca, porque los ceros ya no se esconden en una frase:
+              //   · con leads  → icono con el color de su catálogo
+              //   · a cero     → apagada: icono gris y número gris. Está vacía,
+              //                  no rota, y la línea de abajo lo dice con
+              //                  palabras.
+              //   · rota       → ámbar, que es el color con el que esta portada
+              //                  cuenta los fallos (los dos recuadros de arriba).
+              //                  Sin esto, "—" en gris se leería como un cero
+              //                  más apagado.
+              const roto = f.total == null
+              const vacia = f.total === 0
               return (
                 // El número lleva a SUS leads de ESE canal, no a la lista
                 // entera. /leads ya lee `?fuente=` en el servidor y valida el
@@ -793,52 +901,72 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
                 // abría los 1.021 leads sin filtrar: un contador que no lleva a
                 // ninguna parte se deja de mirar a la semana.
                 <Link key={f.valor} href={`/leads?fuente=${encodeURIComponent(f.valor)}`}
-                  className="rounded-xl border border-border bg-card px-4 py-4 flex flex-col gap-3 hover:bg-muted/20 transition-colors">
+                  className={cn(
+                    "rounded-xl border bg-card px-4 py-4 flex flex-col gap-3 transition-colors hover:bg-muted/20",
+                    roto ? "border-amber-500/30" : "border-border",
+                  )}>
                   <div className="flex items-center gap-2.5">
                     <span className={cn(
                       "h-8 w-8 rounded-lg flex items-center justify-center shrink-0 border",
-                      claseColor(f.color),
+                      // Las clases van escritas enteras o salen de un mapa
+                      // explícito (`claseColor`): Tailwind purga lo que se
+                      // construye con plantillas.
+                      roto ? "bg-amber-500/10 text-amber-500 border-amber-500/30"
+                        : vacia ? "bg-muted text-muted-foreground/50 border-transparent"
+                        : claseColor(f.color),
                     )}>
                       <Icono className="h-4 w-4" />
                     </span>
-                    <span className="text-[13px] font-medium text-foreground/90 truncate">{f.nombre}</span>
+                    <span className={cn(
+                      "text-[13px] font-medium truncate",
+                      vacia ? "text-muted-foreground" : "text-foreground/90",
+                    )}>{f.nombre}</span>
                   </div>
                   <div className="flex flex-col gap-2">
-                    {/* Misma fórmula que KpiCard (531-536): un contador que
-                        falló enseña una raya, no un cero. Un cero nunca llega
-                        a una tarjeta: esa fuente se va a la frase del pie. */}
-                    <p className="text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight text-foreground">
+                    {/* Misma fórmula que KpiCard: un contador que falló enseña
+                        una raya, no un cero. Y el cero, que ahora SÍ llega a
+                        una tarjeta, se pinta en gris claro: se ve que está,
+                        pero no compite con los canales que sí traen gente. */}
+                    {/* ARREGLADO EN REVISIÓN: el "—" de la tarjeta rota se
+                        pintaba en el MISMO gris al 35 % que el cero. Los demás
+                        avisos de la rota (borde ámbar, pastilla ámbar, "no se
+                        ha podido contar") estaban bien, pero lo que el ojo mira
+                        primero en esta rejilla es el número grande, y ahí un
+                        fallo y un cero se veían iguales: una raya gris apagada
+                        entre seis tarjetas apagadas se lee como un canal vacío
+                        más. Va en ámbar —a media fuerza, para no gritar más que
+                        los canales que sí traen gente— y así el fallo se
+                        reconoce sin leer la letra pequeña. */}
+                    <p className={cn(
+                      "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
+                      roto ? "text-amber-500/60"
+                        : f.total ? "text-foreground" : "text-muted-foreground/35",
+                    )}>
                       {f.total != null ? f.total.toLocaleString("es") : "—"}
                     </p>
                     <p className="text-[11px] text-muted-foreground leading-snug">
-                      {/* La semana que NO se ha podido contar lo dice. Antes
-                          pintaba un espacio, y un espacio dentro de un <p> se
-                          colapsa: la línea desaparecía y el fallo se leía
-                          igual que "nada nuevo esta semana", que es cero. Cero
-                          y fallo no se confunden nunca. */}
+                      {/* Las tres frases de los tres estados. La de cero es la
+                          que antes vivía en el pie del bloque, ahora en su
+                          propia tarjeta y en singular.
+                          La semana que NO se ha podido contar también lo dice:
+                          antes pintaba un espacio, y un espacio dentro de un
+                          <p> se colapsa —la línea desaparecía y el fallo se
+                          leía igual que "nada nuevo esta semana", que es cero—. */}
                       {f.total == null
                         ? "no se ha podido contar"
-                        : f.semana == null
-                          ? "— esta semana"
-                          : f.semana > 0
-                            ? `${f.semana} esta semana`
-                            : "nada nuevo esta semana"}
+                        : f.total === 0
+                          ? "todavía no te ha llegado nada por aquí"
+                          : f.semana == null
+                            ? "— esta semana"
+                            : f.semana > 0
+                              ? `${f.semana} esta semana`
+                              : "nada nuevo esta semana"}
                     </p>
                   </div>
                 </Link>
               )
             })}
           </div>
-          )}
-
-          {/* LA LÍNEA QUE MATA LA REJILLA DE CEROS. Un canal a cero se sigue
-              nombrando —existe y está vacío, no roto— pero en una frase, no en
-              una casilla por barba. */}
-          {aCero.length > 0 && (
-            <p className="text-[11px] text-muted-foreground/70">
-              Todavía no te ha llegado nada por {listaEs(aCero.map((f) => f.nombre))}.
-            </p>
-          )}
 
           {/* LA LÍNEA DE LOS RESTOS. Es lo que hace que la suma cuadre con el
               total del bloque. Si alguno de sus dos contadores falló, se calla:
@@ -855,8 +983,10 @@ function SeccionOrigenes({ data }: { data: AgentData }) {
   )
 }
 
-/** "Instagram, Código QR ni Trasteros". Une con comas y un 'ni' al final. */
-function listaEs(nombres: string[]): string {
-  if (nombres.length <= 1) return nombres[0] ?? ""
-  return `${nombres.slice(0, -1).join(", ")} ni ${nombres[nombres.length - 1]}`
-}
+/*
+  AQUÍ ESTABA `listaEs`, que unía con comas y un "ni" final los nombres de los
+  canales a cero para la frase del pie del bloque ("Todavía no te ha llegado
+  nada por Formulario web, WhatsApp entrante ni Código QR"). Esa frase se ha ido
+  con este cambio: cada canal a cero tiene ya su tarjeta apagada y lo dice él
+  solo, así que no queda ninguna lista que enredar en una oración.
+*/

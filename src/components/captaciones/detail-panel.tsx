@@ -523,6 +523,17 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
   const [fallo, setFallo] = useState(false)
   const [promocionando, setPromocionando] = useState(false)
   /**
+   * Los dos avisos de "esto no se deshace", como diálogo propio y no como
+   *  del navegador.
+   *
+   * El  nativo lo CANCELAN SOLOS los navegadores incrustados (el
+   * panel de vista previa, una webview, un móvil con los diálogos bloqueados).
+   * El botón parecía roto: se pulsaba y no pasaba nada, ni aviso ni error.
+   */
+  const [confirmProspecto, setConfirmProspecto] = useState(false)
+  const [confirmBaja, setConfirmBaja] = useState(false)
+  const [dandoDeBaja, setDandoDeBaja] = useState(false)
+  /**
    * El prospecto recién creado, sólo hasta que `load()` traiga la fila con su
    * `prospecto_id`. Sin esto, entre el "hecho" y la relectura el botón volvería
    * a ofrecer promocionar algo que ya está promocionado.
@@ -708,6 +719,30 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
    * idempotente por índice único: dos clics seguidos devuelven el mismo
    * prospecto en vez de crear dos del mismo piso.
    */
+  /**
+   * Dar de baja: a la papelera.
+   *
+   * Estaba escrito dentro del `onClick` de la papelera, con su `confirm()`
+   * delante. Sale aquí porque ahora lo dispara el diálogo, y porque un botón que
+   * llama a la base tiene que poder apagarse mientras espera: sin eso, dos clics
+   * seguidos mandaban dos bajas y la segunda cerraba el panel sobre una ficha ya
+   * cerrada.
+   */
+  async function handleDarDeBaja() {
+    if (!data || dandoDeBaja) return
+    setDandoDeBaja(true)
+    // Sin el .catch, una baja que no llega a contestar cerraba el panel en
+    // silencio y la captación seguía viva.
+    const res = await eliminarCaptacion(data.id)
+      .catch(() => ({ error: "No se pudo dar de baja la captación" }))
+    setDandoDeBaja(false)
+    if (res.error) { toast.error(res.error); return }
+    setConfirmBaja(false)
+    toast.success("Captación dada de baja")
+    onCambio?.()
+    onClose()
+  }
+
   async function handlePasarAProspecto() {
     if (!data) return
     // La captación sobre la que se pulsa, para poder comprobar al volver que
@@ -715,11 +750,20 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
     // otra ficha.
     const id = data.id
 
-    // Confirmación breve y no un diálogo con formulario: el salto copia la
-    // ficha y congela quién la captó, y desde la interfaz no hay botón para
-    // deshacerlo. Se avisa antes, no después.
-    if (!confirm("¿Pasar esta captación a prospecto? Se creará su ficha de captación y desde aquí no se puede deshacer.")) return
-
+    // El aviso YA SE HA DADO, en el diálogo de abajo. Aquí sólo se cierra.
+    //
+    // Antes esto era un `confirm()` del navegador, y ahí estaba el fallo que
+    // reportó el dueño como "el botón de pasar a prospecto no funciona": los
+    // navegadores incrustados —el panel de vista previa, una webview, un móvil
+    // con los diálogos bloqueados— CANCELAN SOLOS los `confirm()`. La función
+    // devolvía false, el `return` se llevaba por delante la promoción y en
+    // pantalla no pasaba absolutamente nada: ni aviso, ni error, ni prospecto.
+    // Comprobado en la base: de todos sus intentos no se creó ni uno.
+    //
+    // El diálogo propio funciona en todas partes y además se lee: dice que el
+    // salto copia la ficha, congela quién la captó y que desde aquí no se
+    // deshace. Se avisa antes, no después.
+    setConfirmProspecto(false)
     setPromocionando(true)
     // El .catch cubre que la acción ni llegue a contestar —red caída, despliegue
     // a mitad—: sin él la promesa se rompe y el botón se queda girando para
@@ -798,16 +842,7 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
               <div className="absolute top-3 right-3 flex items-center gap-2">
                 {isAdmin && (
                   <button
-                    onClick={async () => {
-                      if (!confirm("¿Dar de baja esta captación? Dejará de aparecer en el listado.")) return
-                      // Sin el .catch, una baja que no llega a contestar cerraba
-                      // el panel en silencio y la captación seguía viva.
-                      const res = await eliminarCaptacion(data!.id)
-                        .catch(() => ({ error: "No se pudo dar de baja la captación" }))
-                      if (res.error) { toast.error(res.error); return }
-                      toast.success("Captación dada de baja")
-                      onClose()
-                    }}
+                    onClick={() => setConfirmBaja(true)}
                     className="h-8 w-8 rounded-full bg-black/50 flex items-center justify-center text-red-400 hover:bg-red-500/80 hover:text-white transition-colors"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -1063,7 +1098,7 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                           lo captó.
                         </p>
                         <button
-                          onClick={handlePasarAProspecto}
+                          onClick={() => setConfirmProspecto(true)}
                           disabled={promocionando}
                           className="w-full flex items-center justify-center gap-2 h-9 rounded-md border border-violet-500/30 text-xs font-medium text-violet-400 transition-colors hover:bg-violet-500/10 hover:border-violet-500/60 disabled:opacity-40 disabled:pointer-events-none"
                         >
@@ -1248,6 +1283,72 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
           </div>
         ) : null}
       </div>
+
+      {/* ── Los dos avisos de "esto no se deshace" ──
+          Como diálogo de la propia aplicación y no como `confirm()` del
+          navegador. El nativo lo cancelan solos los navegadores incrustados —el
+          panel de vista previa, una webview, un móvil con los diálogos
+          bloqueados—, así que el botón parecía roto: se pulsaba, la función
+          devolvía false y no pasaba nada, ni aviso ni error. Es el mismo patrón
+          que ya usan las acciones en masa de `captaciones-list.tsx`. */}
+      {confirmProspecto && data && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-card border border-border rounded-xl p-6 shadow-2xl max-w-sm w-full mx-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h3 className="font-semibold text-foreground">¿Pasar a prospecto?</h3>
+              <p className="text-sm text-muted-foreground">
+                Se crea la ficha del piso con lo que ya sabemos y a partir de ahí es
+                nuestra, no un anuncio de Idealista. Quién la captó se queda fijado, y
+                desde aquí no se deshace.
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setConfirmProspecto(false)}
+                className="h-9 px-4 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handlePasarAProspecto}
+                disabled={promocionando}
+                className="h-9 px-4 rounded-md bg-violet-500 text-white text-sm font-medium hover:bg-violet-600 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              >
+                {promocionando ? "Pasando..." : "Sí, pasar a prospecto"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmBaja && data && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-card border border-border rounded-xl p-6 shadow-2xl max-w-sm w-full mx-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h3 className="font-semibold text-foreground">¿Dar de baja esta captación?</h3>
+              <p className="text-sm text-muted-foreground">
+                Pasa a la papelera y puedes restaurarla desde allí. Si la lleva algún
+                agente, deja de ser suya.
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setConfirmBaja(false)}
+                className="h-9 px-4 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-all"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleDarDeBaja}
+                disabled={dandoDeBaja}
+                className="h-9 px-4 rounded-md bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              >
+                {dandoDeBaja ? "Dando de baja..." : "Sí, dar de baja"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

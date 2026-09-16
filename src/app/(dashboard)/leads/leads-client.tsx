@@ -4,11 +4,11 @@ import { useEffect, useState, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 import { crearLead, actualizarLead } from "@/lib/actions/leads"
-import { asignarLeadsAMano } from "@/lib/actions/asignacion"
+import { asignarLeadsAMano, quitarAgenteLeads } from "@/lib/actions/asignacion"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { Atendido } from "@/components/shared/atendido"
 import { cn } from "@/lib/utils"
-import { AlertCircle, Search, X, Plus, UserCircle, Pencil, Check, Loader2, RefreshCw, UserPlus } from "lucide-react"
+import { AlertCircle, Search, X, Plus, UserCircle, Pencil, Check, Loader2, RefreshCw, UserPlus, UserMinus } from "lucide-react"
 import { type Catalogo, opcionesDe, nombreDe, colorDe, claseColor, clasePunto } from "@/lib/catalogos"
 
 /**
@@ -160,6 +160,8 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
   const [agentes, setAgentes] = useState<AgenteOpcion[] | null>(null)
   /** Id del agente al que se está traspasando ahora mismo. */
   const [asignando, setAsignando] = useState<string | null>(null)
+  /** Si se está quitando el agente del lead abierto ahora mismo. */
+  const [quitando, setQuitando] = useState(false)
 
   // Panel edición inline
   const [editando, setEditando] = useState(false)
@@ -511,7 +513,9 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
    */
   async function asignarA(agenteId: string, nombreAgente: string) {
     const lead = selected
-    if (!lead || asignando) return
+    // También mientras se está quitando: son la misma columna, y dos peticiones
+    // pisándose dejan en pantalla lo que contestó la más lenta.
+    if (!lead || asignando || quitando) return
     setAsignando(agenteId)
 
     // .catch y no sólo try/finally: si la acción revienta por lo que sea, el
@@ -540,6 +544,51 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
     setSelected((prev) => (prev && prev.id === lead.id ? conAgente : prev))
     setLeads((prev) => prev.map((l) => (l.id === lead.id ? conAgente : l)))
     toast.success(`Lead asignado a ${nombreAgente}`)
+    if (userId) fetchLeads(userId, isAdmin, pagina)
+  }
+
+  /**
+   * Dejar el lead sin agente.
+   *
+   * Es lo contrario de `asignarA` y NO es un rechazo: el administrador lo
+   * recoge para repartirlo de otra forma, así que el agente sigue pudiendo
+   * volver a recibirlo (ver `quitarAgenteLeads`). Hasta ahora esto sólo se
+   * podía hacer con un script contra la base: en la rejilla de abajo el agente
+   * que lo lleva sale deshabilitado, así que ni volviendo a pulsarlo se soltaba.
+   *
+   * No lleva confirmación a propósito: tiene vuelta atrás de un clic, porque la
+   * rejilla de agentes se queda justo debajo para volver a dárselo a quien sea.
+   */
+  async function quitarAgente() {
+    const lead = selected
+    if (!lead || !lead.agente_id || asignando || quitando) return
+    setQuitando(true)
+
+    // Igual que en asignarA: si la acción revienta, el botón vuelve a su sitio
+    // y lo cuenta, en vez de quedarse girando.
+    const res: { ok?: true; motivo?: string; error?: string } = await quitarAgenteLeads([lead.id])
+      .catch((e: unknown) => ({
+        error: e instanceof Error ? e.message : "No se ha podido quitar el agente",
+      }))
+    setQuitando(false)
+
+    if (res?.error) {
+      toast.error(res.error)
+      return
+    }
+
+    // Se pinta ya el hueco CON su motivo —la firma que acaba de escribir el
+    // servidor, no el motivo viejo—, y detrás se vuelve a pedir la página: si
+    // está puesto el filtro "Sin asignar", este lead tiene que aparecer en él.
+    const sinAgente: Lead = {
+      ...lead,
+      agente_id: null,
+      agente: null,
+      asignacion_motivo: res.motivo ?? lead.asignacion_motivo,
+    }
+    setSelected((prev) => (prev && prev.id === lead.id ? sinAgente : prev))
+    setLeads((prev) => prev.map((l) => (l.id === lead.id ? sinAgente : l)))
+    toast.success("Lead sin asignar. Puedes dárselo a otro agente aquí mismo.")
     if (userId) fetchLeads(userId, isAdmin, pagina)
   }
 
@@ -1003,7 +1052,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
                     selected.agente ? "text-muted-foreground" : "text-amber-600 dark:text-amber-300",
                   )}
                 />
-                <div className="min-w-0 flex flex-col">
+                <div className="min-w-0 flex flex-1 flex-col">
                   <span
                     className={cn(
                       "text-xs font-medium truncate",
@@ -1014,11 +1063,36 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
                   </span>
                   {/* Por qué está como está: "esperando asignación" o "nadie
                       disponible" lo escribe el reparto, y leerlo evita el clásico
-                      "esto está roto" cuando lo que pasa es que el modo es manual. */}
+                      "esto está roto" cuando lo que pasa es que el modo es manual.
+                      Desde ahora también dice quién se lo quitó y cuándo. */}
                   {!selected.agente && selected.asignacion_motivo && (
                     <span className="text-[11px] text-muted-foreground truncate">{selected.asignacion_motivo}</span>
                   )}
                 </div>
+
+                {/* Quitarlo va AQUÍ, pegado al nombre de quien lo lleva, y no
+                    como una casilla más de la rejilla de abajo: la rejilla
+                    contesta "¿a quién?" y esto contesta "a nadie", que no es un
+                    agente más. Metido entre los nombres, sería el botón de
+                    vaciar la cuenta de alguien a un pixel del de asignársela.
+                    Sólo sale si hay agente que quitar —sin él no hay nada que
+                    hacer—, y sólo para el administrador, aunque quien lo impide
+                    de verdad es la acción de servidor. */}
+                {isAdmin && selected.agente_id && (
+                  <button
+                    onClick={quitarAgente}
+                    disabled={quitando || asignando !== null}
+                    title="Dejar el lead sin agente"
+                    className="flex items-center gap-1 shrink-0 text-xs px-2 py-1 rounded border border-border text-muted-foreground hover:border-red-500/40 hover:text-red-600 dark:hover:text-red-400 transition-all disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    {quitando ? (
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                    ) : (
+                      <UserMinus className="h-3 w-3 shrink-0" />
+                    )}
+                    Quitar
+                  </button>
+                )}
               </div>
 
               {/* Repartir es cosa del administrador: la acción de servidor
@@ -1035,7 +1109,7 @@ export default function LeadsPage({ catalogos = [], fuenteInicial = "" }: { cata
                       <button
                         key={a.id}
                         onClick={() => asignarA(a.id, a.nombre)}
-                        disabled={asignando !== null || selected.agente_id === a.id}
+                        disabled={asignando !== null || quitando || selected.agente_id === a.id}
                         className={cn(
                           "flex items-center gap-1.5 text-xs px-2 py-1.5 rounded border font-medium transition-all disabled:opacity-50 disabled:pointer-events-none",
                           selected.agente_id === a.id

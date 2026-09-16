@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, useCallback, useRef } from "react"
+import { Confirmar } from "@/components/shared/confirmar"
 import { createClient } from "@/lib/supabase/client"
 import { actualizarPropiedad, desactivarPropiedad, eliminarDemanda, eliminarPropiedad } from "@/lib/actions/demandas"
 import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail } from "lucide-react"
@@ -111,6 +112,15 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
   /** null = todavía no se sabe; un 0 inventado diría que no hay demandas. */
   const [totalDemandas, setTotalDemandas] = useState<number | null>(null)
   const [selected, setSelected] = useState<PropiedadConConteos | null>(null)
+  /**
+   * Los dos avisos de esta pantalla, como diálogo de la aplicación.
+   *
+   * Eran window.confirm(), y los navegadores incrustados los cancelan solos: el
+   * botón parecía muerto. El de borrar para siempre es el que más asusta —no
+   * borraba nada, pero tampoco decía por qué—.
+   */
+  const [confirmDesactivar, setConfirmDesactivar] = useState(false)
+  const [confirmEliminar, setConfirmEliminar] = useState(false)
   const [demandas, setDemandas] = useState<Demanda[]>([])
   const [loadingDemandas, setLoadingDemandas] = useState(false)
 
@@ -528,7 +538,10 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
 
   async function handleDesactivar() {
     if (!selected) return
-    if (!window.confirm(`¿Desactivar la propiedad Ref. ${selected.ref}? Desaparecerá de la lista.`)) return
+    // El aviso ya se ha dado en el diálogo. Antes esto era un window.confirm(),
+    // que los navegadores incrustados cancelan solos: se pulsaba y no pasaba
+    // nada, sin aviso ni error.
+    setConfirmDesactivar(false)
     const res = await desactivarPropiedad(selected.id).catch((e: unknown) => ({
       error: e instanceof Error ? e.message : "No se pudo desactivar la propiedad",
     }))
@@ -544,7 +557,7 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
 
   async function handleEliminarPropiedad() {
     if (!selected) return
-    if (!window.confirm(`¿Eliminar permanentemente la propiedad Ref. ${selected.ref} y todas sus demandas? Esta acción no se puede deshacer.`)) return
+    setConfirmEliminar(false)
     const res = await eliminarPropiedad(selected.id).catch((e: unknown) => ({
       error: e instanceof Error ? e.message : "No se pudo eliminar la propiedad",
     }))
@@ -806,13 +819,13 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
               {!editando && (
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handleDesactivar}
+                    onClick={() => setConfirmDesactivar(true)}
                     className="flex-1 h-7 rounded border border-border text-xs text-muted-foreground hover:border-amber-400/50 hover:text-amber-400 transition-colors"
                   >
                     Desactivar
                   </button>
                   <button
-                    onClick={handleEliminarPropiedad}
+                    onClick={() => setConfirmEliminar(true)}
                     className="flex-1 h-7 rounded border border-red-500/30 text-xs text-red-400 hover:bg-red-500/10 hover:border-red-500/60 transition-colors"
                   >
                     Eliminar propiedad
@@ -989,6 +1002,25 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
           </div>
         </div>
       )}
+
+      <Confirmar
+        abierto={confirmDesactivar}
+        titulo="¿Desactivar esta propiedad?"
+        texto={`La Ref. ${selected?.ref ?? ""} desaparece de la lista. Sus demandas se quedan como están.`}
+        confirmar="Sí, desactivar"
+        onConfirmar={handleDesactivar}
+        onCancelar={() => setConfirmDesactivar(false)}
+      />
+
+      <Confirmar
+        abierto={confirmEliminar}
+        titulo="¿Borrarla para siempre?"
+        texto={`Se borra la Ref. ${selected?.ref ?? ""} y sus ${selected?.totalDemandas ?? 0} demandas. Esto no se deshace ni desde la papelera: si sólo quieres que deje de salir, usa Desactivar.`}
+        confirmar="Sí, borrar"
+        peligro
+        onConfirmar={handleEliminarPropiedad}
+        onCancelar={() => setConfirmEliminar(false)}
+      />
     </div>
   )
 }

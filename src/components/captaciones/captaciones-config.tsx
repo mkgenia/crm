@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import { Confirmar } from "@/components/shared/confirmar"
 import dynamic from "next/dynamic"
 import {
   Settings, X, Plus, Trash2, Loader2, Check, MapPin, Zap, ZapOff, Globe,
@@ -119,6 +120,12 @@ export function CaptacionesConfig({
   const [ritmo, setRitmoLocal] = useState<Ritmo>(initialRitmo)
   const [toggling, setToggling] = useState(false)
   const [loadingZona, setLoadingZona] = useState<string | null>(null)
+  /**
+   * Qué zona se está a punto de borrar. Era un confirm() del navegador, y ésos
+   * los cancelan solos los navegadores incrustados: se pulsaba la papelera y no
+   * pasaba nada, sin aviso ni error.
+   */
+  const [zonaABorrar, setZonaABorrar] = useState<string | null>(null)
 
   // View: list | create
   const [view, setView] = useState<"list" | "create">("list")
@@ -274,7 +281,8 @@ export function CaptacionesConfig({
   }
 
   async function handleEliminarZona(id: string) {
-    if (!confirm("¿Eliminar esta zona?")) return
+    // El aviso ya se ha dado en el diálogo.
+    setZonaABorrar(null)
     setLoadingZona(id)
     await eliminarZona(id)
     setZonas(z => z.filter(zona => zona.id !== id))
@@ -596,7 +604,7 @@ export function CaptacionesConfig({
                             {zona.activa ? "Activa" : "Activar"}
                           </button>
                           <button
-                            onClick={() => handleEliminarZona(zona.id)}
+                            onClick={() => setZonaABorrar(zona.id)}
                             className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-500/10 transition-colors"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -893,6 +901,17 @@ export function CaptacionesConfig({
           </div>
         )}
       </div>
+
+      <Confirmar
+        abierto={zonaABorrar !== null}
+        titulo="¿Eliminar esta zona?"
+        texto={`El captador deja de rastrear "${zonas.find((z) => z.id === zonaABorrar)?.nombre ?? ""}". Las captaciones que ya trajo se quedan donde están.`}
+        confirmar="Sí, eliminar"
+        peligro
+        ocupado={loadingZona !== null && loadingZona === zonaABorrar}
+        onConfirmar={() => { if (zonaABorrar) void handleEliminarZona(zonaABorrar) }}
+        onCancelar={() => setZonaABorrar(null)}
+      />
     </>
   )
 }
