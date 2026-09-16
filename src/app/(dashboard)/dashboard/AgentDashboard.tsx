@@ -181,11 +181,24 @@ export interface AgentData {
    * hoy. Cada uno puede valer null por su cuenta —un contador que falla no es
    * un cero— y `semana` son los SIETE DÍAS SIGUIENTES, sin contar hoy: es lo
    * que evita que la tarjeta de un martes tranquilo se quede en un cero mudo.
+   *
+   * LOS TRES CUENTAN SÓLO CITAS Y VISITAS (el motivo está en page.tsx,
+   * `TIPOS_AGENDA_CONTADOS`): un recordatorio o una nota son del agente para sí
+   * mismo y no hacen esperar a nadie.
    */
   tareas: {
     vencidas: number | null
     hoy: number | null
     semana: number | null
+    /**
+     * Cómo se llaman esos tipos en /configuracion/catalogos, ya resueltos en el
+     * servidor.
+     *
+     * La tarjeta los escribe en su línea de abajo, y no es un detalle: sin esa
+     * frase, un 0 al lado de un calendario con dos recordatorios vencidos se lee
+     * como que la tarjeta está rota.
+     */
+    tipos: string[]
   }
   /**
    * LAS CUATRO TARJETAS QUE RESPONDEN AL SELECTOR DE PERIODO.
@@ -290,6 +303,24 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   }
 
   /**
+   * Y EL DE LAS DEMANDAS, que no llevan fuente porque no son leads.
+   *
+   * /demandas es una lista de PROPIEDADES con las demandas que ha recibido cada
+   * una, así que lo único que necesita es el corte: con él puesto enseña sólo
+   * las propiedades que han recibido alguna en ese periodo, y su cabecera dice
+   * el mismo número que esta tarjeta.
+   *
+   * El corte NO lleva agente, igual que el número: la tabla `demandas` no tiene
+   * esa columna (page.tsx), así que los seis agentes ven lo mismo y la tarjeta
+   * ya lo avisa en su línea de abajo ("de toda la empresa").
+   */
+  const enlaceDemandas = () => {
+    if (periodo === "total") return "/demandas"
+    const q = new URLSearchParams({ periodo, desde: data.cortes[periodo] })
+    return `/demandas?${q.toString()}`
+  }
+
+  /**
    * Y EL DE LA TARJETA DEL SCRAPER, que va a otra pantalla y pregunta otra cosa.
    *
    * Mismo corte y mismo motivo que el de arriba —pulsar una tarjeta que dice 11
@@ -377,6 +408,25 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               // no puede negarla.
               : "nada para hoy ni esta semana"
 
+  // Y DE QUÉ TIPOS ESTÁ HECHO ESE NÚMERO, dicho con sus nombres.
+  //
+  // Desde este cambio la tarjeta cuenta SÓLO citas y visitas: un recordatorio o
+  // una nota son del agente para sí mismo y no hacen esperar a nadie. Y eso hay
+  // que decirlo aquí, porque si no, un 0 en esta tarjeta al lado de un
+  // calendario con dos recordatorios vencidos se lee como que la tarjeta está
+  // rota y no como lo que es.
+  //
+  // Los nombres vienen del catálogo (page.tsx los resuelve con `nombreDe`), así
+  // que dicen lo mismo que el desplegable del calendario aunque el
+  // administrador los renombre.
+  //
+  // Se escribe "de tipo Cita y Visita" y no "citas y visitas" a propósito: esos
+  // nombres los edita una persona, y ponerlos en plural obligaría a inventarse
+  // una regla que falla en cuanto alguien escriba "Visita al piso".
+  const soloTipos = data.tareas.tipos.length > 0
+    ? `sólo de tipo ${data.tareas.tipos.join(" y ")}`
+    : ""
+
   // Y LA CUESTIÓN DEL PERIODO, DICHA EN LA PROPIA TARJETA.
   //
   // El calendario es la única de las seis que tiene un número y no se mueve al
@@ -389,7 +439,13 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   // encima habla de fechas de entrada también en "Todo", así que la advertencia
   // vale igual. Y va al final porque lo primero que se quiere leer es el
   // desglose del número.
-  const subTareas = detalleTareas && `${detalleTareas} · al margen del periodo`
+  //
+  // Se arma como lista y se une con " · ", igual que la cabecera de "Lo que toca
+  // hoy": el trozo de los tipos es opcional y concatenándolo con el separador
+  // pegado delante quedaban dos puntos seguidos el día que no hay nada que
+  // escribir ahí.
+  const subTareas = detalleTareas &&
+    [detalleTareas, soloTipos, "al margen del periodo"].filter(Boolean).join(" · ")
 
   return (
     <div className="p-8 flex flex-col gap-8">
@@ -591,7 +647,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               entero de la tarjeta y se parte en dos, que es lo que se quiere
               cuando lo que no puede perderse es justo esa advertencia. */}
           <OrigenCard
-            href="/demandas" icon={Inbox} label="Demandas"
+            href={enlaceDemandas()} icon={Inbox} label="Demandas"
             datos={data.origenes.demandas} periodo={periodo}
             fallo={data.origenes.demandas == null}
             tono="verde"
@@ -602,6 +658,11 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
               acaba de desaparecer de arriba: ni el total histórico, que a los
               seis meses son cientos de tareas hechas, ni sólo las de hoy,
               porque una tarea de ayer sin hacer sigue siendo trabajo de hoy.
+
+              Y SÓLO CITAS Y VISITAS, que es lo que tiene a otra persona
+              esperando al otro lado. Su línea de abajo lo dice con los nombres
+              del catálogo: una tarjeta a 0 sobre un calendario con
+              recordatorios vencidos tiene que explicarse sola.
 
               NO RECIBE `periodo` Y ES A PROPÓSITO: manda un contador suelto
               (`number`), que es la forma con la que la tarjeta no pinta ni

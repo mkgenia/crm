@@ -19,8 +19,22 @@ interface PropiedadConConteos extends PropiedadDemanda {
   noVistas: number
 }
 
-/** Lo que devuelve la consulta: la propiedad más el agregado `demandas(count)`. */
-type FilaPropiedad = PropiedadDemanda & { demandas?: { count: number }[] | null }
+/**
+ * Lo que devuelve la consulta: la propiedad más lo que se le pide de `demandas`.
+ *
+ *   · `conteo` es el agregado, o sea cuántas demandas tiene la propiedad. Lleva
+ *     alias porque cuando hay corte de fecha viaja al lado de OTRA lectura de la
+ *     misma tabla, y sin alias PostgREST no sabe a cuál de las dos le toca cada
+ *     filtro: medido, `demandas.fecha_creacion=gte.…` se lo quedaba la otra y el
+ *     agregado salía SIN filtrar (una propiedad con 5 demandas en la semana
+ *     decía 113, que son las de toda su vida).
+ *   · `marca` sólo existe cuando hay corte y no es un dato que se pinte: es la
+ *     mitad de la consulta que PODA la lista. Ver `fetchPropiedades`.
+ */
+type FilaPropiedad = PropiedadDemanda & {
+  conteo?: { count: number }[] | null
+  marca?: { id: string }[] | null
+}
 
 /** Los campos que se editan a mano en la ficha de la propiedad. */
 type CampoEditable =
@@ -75,7 +89,21 @@ function fmtPrecio(alq: number, venta: number) {
   return null
 }
 
-export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalogos?: Catalogo[] } = {}) {
+export default function DemandasPage({
+  catalogos: catalogosProp = [],
+  desdeInicial = "",
+  etiquetaDesde = "",
+}: {
+  catalogos?: Catalogo[]
+  /**
+   * Desde cuándo mirar las demandas, en ISO. Lo calcula la portada con el mismo
+   * corte con el que contó el número de su tarjeta, y lo valida el servidor
+   * (page.tsx) antes de bajarlo: lo que no cuadra llega vacío y no filtra nada.
+   */
+  desdeInicial?: string
+  /** Y cómo se lee ese corte ("Entradas hoy"), escrito también en el servidor. */
+  etiquetaDesde?: string
+} = {}) {
   /**
    * Los estados de una demanda salen del catálogo `estado_demanda`, no de una
    * lista escrita en el código: un estado creado desde /configuracion/catalogos
@@ -107,6 +135,18 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
   /** Lo que se ha buscado de verdad, ya con el rebote aplicado. */
   const [termino, setTermino] = useState("")
   const [pagina, setPagina] = useState(1)
+  /**
+   * EL CORTE DE FECHA, el periodo que venía pulsado en la portada.
+   *
+   * Mientras está puesto, esta pantalla contesta a otra pregunta: no "qué
+   * propiedades hay" sino "qué propiedades han recibido demandas desde X", y
+   * todos los números que se enseñan —las de cada fila, el total de la cabecera
+   * y las del panel de la derecha— hablan sólo de ese periodo. Es lo que hace
+   * que una tarjeta que dice 20 lleve a 20 y no a las 1.825 de siempre.
+   *
+   * Se suelta con su chapa, y soltarlo es "verlas todas".
+   */
+  const [desde, setDesde] = useState<string>(desdeInicial)
   /** Propiedades que cumplen el filtro, contadas en la base de datos. */
   const [total, setTotal] = useState(0)
   /** null = todavía no se sabe; un 0 inventado diría que no hay demandas. */
@@ -180,7 +220,7 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
    */
   const paginaActual = Math.min(pagina, paginas)
 
-  const fetchPropiedades = useCallback(async (pagina: number, termino: string) => {
+  const fetchPropiedades = useCallback(async (pagina: number, termino: string, desde: string) => {
     // Cada petición se queda con su número. Si mientras va y viene se teclea otra
     // búsqueda o se cambia de página, la que llega tarde se descarta: si no, la
     // respuesta vieja pinta filas que no son las de la página que marca el
@@ -188,16 +228,55 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     const peticion = ++peticionRef.current
     setLoading(true)
     try {
-      const desde = (pagina - 1) * POR_PAGINA
+      // Se llama `primeraFila` y no `desde`, que es como se llamaba: en esta
+      // misma función vive ahora el corte de fecha con ese nombre, y un `const
+      // desde` aquí lo taparía por alcance léxico sin que TypeScript dijera
+      // nada — la consulta se filtraría por "desde la fila 50" en vez de por
+      // "desde el lunes".
+      const primeraFila = (pagina - 1) * POR_PAGINA
 
-      // `demandas(count)` deja que Postgres cuente las demandas de cada
-      // propiedad. Antes se traían las filas enteras sólo para hacerles un
-      // .length, y son esas las que reventaban el tope: 1.825 demandas viajando
-      // para pintar un "89 demandas" en un lateral.
+      /**
+       * LAS DOS LECTURAS DE `demandas`, y por qué hacen falta las dos.
+       *
+       * `conteo:demandas(count)` deja que Postgres cuente las demandas de cada
+       * propiedad. Antes se traían las filas enteras sólo para hacerles un
+       * .length, y son esas las que reventaban el tope: 1.825 demandas viajando
+       * para pintar un "89 demandas" en un lateral.
+       *
+       * `marca:demandas!inner(id)` sólo aparece CUANDO HAY CORTE, y no es un
+       * dato: es lo que PODA la lista. Un `!inner` deja fuera a las propiedades
+       * que no tienen ninguna demanda en el periodo, que es lo que convierte
+       * esta pantalla en "las propiedades que han recibido demandas desde X".
+       *
+       * Y TIENE QUE SER UNA LECTURA DE FILAS, no el propio agregado. Medido
+       * contra la base: `demandas!inner(count)` NO poda nada —el agregado
+       * siempre devuelve una fila, aunque sea un 0, así que el `inner` no tiene
+       * qué descartar— y la lista salía entera con medias filas diciendo "0
+       * demandas". Con `!inner(id)` sí poda, y el `limit(1)` de abajo evita que
+       * una propiedad con 113 demandas se traiga 113 identificadores para nada.
+       *
+       * Los dos alias son obligatorios: sin ellos PostgREST no sabe a cuál de
+       * las dos lecturas le toca cada filtro y el agregado se queda sin filtrar.
+       */
+      // Anotado como `string` a propósito: supabase-js intenta deducir la forma
+      // de la respuesta LEYENDO el literal del select, y con dos literales
+      // posibles se rinde con un error de tipos en vez de quedarse con la unión.
+      // La forma de la fila la dice `FilaPropiedad`, aquí arriba.
+      const columnas: string = desde
+        ? "*, marca:demandas!inner(id), conteo:demandas(count)"
+        : "*, conteo:demandas(count)"
+
       let q = supabase
         .from("propiedades_demanda")
-        .select("*, demandas(count)", { count: "exact" })
+        .select(columnas, { count: "exact" })
         .eq("activo", true)
+
+      // El MISMO corte a las dos lecturas: una decide qué propiedades salen y la
+      // otra cuántas demandas se le cuentan a cada una. Con el corte en una sola,
+      // la fila diría "113 demandas" dentro de una lista de esta semana.
+      if (desde) {
+        q = q.gte("marca.fecha_creacion", desde).gte("conteo.fecha_creacion", desde)
+      }
 
       const t = limpiarBusqueda(termino)
       if (t) q = q.or(`ref.ilike.%${t}%,ciudad.ilike.%${t}%,zona.ilike.%${t}%,tipo.ilike.%${t}%`)
@@ -205,10 +284,15 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
       // El id desempata el orden. Con updated_at a secas, dos propiedades con la
       // misma marca de tiempo pueden intercambiarse entre una petición y la
       // siguiente, y entonces una sale dos veces y otra no sale en ninguna.
-      const { data, count, error } = await q
+      let consulta = q
         .order("updated_at", { ascending: false })
         .order("id", { ascending: false })
-        .range(desde, desde + POR_PAGINA - 1)
+      // Una sola demanda por propiedad basta para podar: lo que se mira de
+      // `marca` es si viene o no viene, nunca lo que trae dentro.
+      if (desde) consulta = consulta.limit(1, { referencedTable: "marca" })
+
+      const { data, count, error } = await consulta
+        .range(primeraFila, primeraFila + POR_PAGINA - 1)
 
       if (peticion !== peticionRef.current) return
 
@@ -217,7 +301,11 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
         return
       }
 
-      const filas = (data ?? []) as FilaPropiedad[]
+      // Pasando por `unknown`: con el select anotado como `string`, supabase-js
+      // renuncia a deducir la fila y devuelve su tipo de "no he podido leer el
+      // select", que no se parece a nada. Quien dice cómo viene cada fila es
+      // `FilaPropiedad`, que es de donde salen los dos alias que se leen abajo.
+      const filas = (data ?? []) as unknown as FilaPropiedad[]
 
       // Las no vistas van aparte porque en el mismo select harían falta dos
       // agregados de la misma tabla y uno de ellos filtrado. Aquí sí hacen falta
@@ -228,14 +316,19 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
       const pendientes = new Map<string, number>()
       if (filas.length) {
         const ids = filas.map((p) => p.id)
-        const sinVer = await traerTodo<{ propiedad_id: string }>(() =>
-          supabase
+        const sinVer = await traerTodo<{ propiedad_id: string }>(() => {
+          let c = supabase
             .from("demandas")
             .select("propiedad_id")
             .in("propiedad_id", ids)
             .eq("visto", false)
-            .order("id", { ascending: true })
-        )
+          // El mismo corte que el resto de la pantalla: dentro de una lista de
+          // esta semana, "3 nuevas" tiene que ser tres de esta semana. Si no, el
+          // aviso verde apuntaría a demandas que la ficha ni siquiera va a
+          // enseñar al abrirla.
+          if (desde) c = c.gte("fecha_creacion", desde)
+          return c.order("id", { ascending: true })
+        })
         for (const d of sinVer) {
           pendientes.set(d.propiedad_id, (pendientes.get(d.propiedad_id) ?? 0) + 1)
         }
@@ -243,11 +336,17 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
       }
 
       setPropiedades(filas.map((p) => {
-        const { demandas: agregado, ...rest } = p
+        // `conteo` es el agregado y `marca` la mitad de la consulta que poda:
+        // ninguna de las dos es un dato de la propiedad, así que se quedan fuera
+        // del estado. Si `marca` se colara, viajaría hasta la ficha y hasta el
+        // guardado de la propiedad como si fuera una columna suya.
+        const propiedad: FilaPropiedad = { ...p }
+        delete propiedad.conteo
+        delete propiedad.marca
         return {
-          ...rest,
-          extras: rest.extras ?? [],
-          totalDemandas: agregado?.[0]?.count ?? 0,
+          ...propiedad,
+          extras: p.extras ?? [],
+          totalDemandas: p.conteo?.[0]?.count ?? 0,
           noVistas: pendientes.get(p.id) ?? 0,
         }
       }))
@@ -265,11 +364,16 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     }
   }, [supabase])
 
-  const fetchTotalDemandas = useCallback(async () => {
+  const fetchTotalDemandas = useCallback(async (desde: string) => {
     // head:true trae sólo la cabecera con el total: la cabecera de la página
     // tiene que decir 1.825 aunque en pantalla haya 50 propiedades, y sumar lo
     // que se ve daría un número más pequeño cada vez que pasas de página.
-    const { count, error } = await supabase.from("demandas").select("id", { count: "exact", head: true })
+    //
+    // Con corte, este número es EL DE LA TARJETA de la portada: es el que tiene
+    // que cuadrar con lo que prometía el número que se acaba de pulsar.
+    let c = supabase.from("demandas").select("id", { count: "exact", head: true })
+    if (desde) c = c.gte("fecha_creacion", desde)
+    const { count, error } = await c
     // Si falla se deja en null y la cabecera no menciona las demandas. Poner un 0
     // sería decir que no hay ninguna, que es justo la clase de mentira silenciosa
     // que vinimos a quitar.
@@ -277,7 +381,7 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     setTotalDemandas(count)
   }, [supabase])
 
-  const fetchDemandas = useCallback(async (propiedadId: string) => {
+  const fetchDemandas = useCallback(async (propiedadId: string, desde: string) => {
     // La misma guardia que la lista de propiedades, y por el mismo motivo:
     // pinchando rápido de una ficha a otra, la respuesta que llegaba tarde
     // pintaba las demandas de la propiedad anterior debajo de la cabecera de la
@@ -288,10 +392,16 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
       // Esta lista no se pagina: la propiedad más solicitada anda por las 90
       // demandas y caben de sobra. El count está para que el día que deje de ser
       // verdad se vea — PostgREST recorta en 1.000 devolviendo 200 OK.
-      const { data, count, error } = await supabase
+      //
+      // El mismo corte que la lista: la fila decía "3 demandas" y abrirla tiene
+      // que enseñar esas tres, no las 113 de toda la vida de la propiedad.
+      let c = supabase
         .from("demandas")
         .select("*", { count: "exact" })
         .eq("propiedad_id", propiedadId)
+      if (desde) c = c.gte("fecha_creacion", desde)
+
+      const { data, count, error } = await c
         .order("fecha_creacion", { ascending: false })
 
       if (peticion !== peticionDemandasRef.current) return
@@ -327,10 +437,16 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     // retener el panel. Si falla se deja el contador de "nuevas" como estaba:
     // ponerlo a 0 diría que se han leído cuando en la base siguen sin marcar y
     // volverían a salir en cuanto se recargue.
+    //
+    // Y sólo las que se han ENSEÑADO: con corte puesto, marcar como vista una
+    // demanda de hace tres meses que esta pantalla no llega a pintar sería
+    // borrar un aviso que nadie ha leído.
     try {
-      const { error: errorVisto } = await supabase
+      let u = supabase
         .from("demandas").update({ visto: true })
         .eq("propiedad_id", propiedadId).eq("visto", false)
+      if (desde) u = u.gte("fecha_creacion", desde)
+      const { error: errorVisto } = await u
       if (errorVisto) return
     } catch {
       return
@@ -355,11 +471,18 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     return () => { vivo = false }
   }, [catalogosProp.length])
 
+  // EL TOTAL DE LA CABECERA, EN SU PROPIO EFECTO.
+  //
+  // Estaba dentro del efecto del realtime, y ahora depende del corte: dejándolo
+  // allí, soltar la chapa habría desmontado y vuelto a montar el canal de
+  // realtime sin que eso tuviera nada que ver con lo que se pedía. Igual que el
+  // resto, la cuenta va dentro de una función asíncrona para que el setState no
+  // cuelgue del cuerpo del efecto.
   useEffect(() => {
-    // Igual que arriba: la cuenta va dentro de una función asíncrona para que el
-    // setState no cuelgue del cuerpo del efecto.
-    ;(async () => { await fetchTotalDemandas() })().catch(() => {})
+    ;(async () => { await fetchTotalDemandas(desde) })().catch(() => {})
+  }, [fetchTotalDemandas, desde])
 
+  useEffect(() => {
     const channel = supabase
       .channel("demandas-page")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "demandas" }, (payload) => {
@@ -385,7 +508,7 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [fetchTotalDemandas, supabase])
+  }, [supabase])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -405,11 +528,11 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     // Envuelto en una función asíncrona suelta: `fetchPropiedades` acaba
     // llamando a setState y llamarla a pelo desde el cuerpo del efecto es lo
     // que el lint del compilador marca como cascada de renders.
-    ;(async () => { await fetchPropiedades(paginaActual, termino) })().catch(() => {})
+    ;(async () => { await fetchPropiedades(paginaActual, termino, desde) })().catch(() => {})
     // Al cambiar de página se vuelve arriba: si no, aterrizas a media lista
     // sobre filas que no son las que estabas mirando.
     listaRef.current?.scrollTo({ top: 0 })
-  }, [paginaActual, termino, fetchPropiedades])
+  }, [paginaActual, termino, desde, fetchPropiedades])
 
   /** Cierra la ficha y descarta cualquier carga que siga en el aire. */
   function cerrarFicha() {
@@ -429,7 +552,17 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     }
     setSelected(p)
     setEditando(false)
-    fetchDemandas(p.id).catch(() => {})
+    fetchDemandas(p.id, desde).catch(() => {})
+  }
+
+  /** "Y enséñamelas todas, no sólo las de ese periodo." */
+  function quitarDesde() {
+    setDesde("")
+    setPagina(1)
+    // La ficha que hubiera abierta enseñaba sólo las del periodo: se vuelve a
+    // pedir sin corte, porque si no se queda con una lista corta debajo de una
+    // pantalla que ya dice "todas".
+    if (selected) fetchDemandas(selected.id, "").catch(() => {})
   }
 
   function abrirEdicion() {
@@ -613,11 +746,28 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
     }
   }
 
-  const resumen = termino
-    ? `${total.toLocaleString("es")} propiedad${total !== 1 ? "es" : ""} encontrada${total !== 1 ? "s" : ""}`
-    : totalDemandas === null
-      ? `${total.toLocaleString("es")} propiedades`
-      : `${total.toLocaleString("es")} propiedades · ${totalDemandas.toLocaleString("es")} demanda${totalDemandas !== 1 ? "s" : ""}`
+  /**
+   * LA LÍNEA DE DEBAJO DEL TÍTULO.
+   *
+   * Con corte puesto las dos mitades cambian de significado y por eso cambian de
+   * palabras: las propiedades no son "las que hay" sino las que HAN RECIBIDO
+   * alguna demanda en el periodo, y las demandas son las de ese periodo — que es
+   * justo el número que prometía la tarjeta desde la que se ha llegado. Sin
+   * decirlo, un "13 propiedades" donde ayer ponía 1.090 se lee como que falta
+   * media base de datos.
+   */
+  const cuantasProps = total.toLocaleString("es")
+  const etiquetaProps = termino
+    ? `${cuantasProps} propiedad${total !== 1 ? "es" : ""} encontrada${total !== 1 ? "s" : ""}`
+    : desde
+      ? `${cuantasProps} propiedad${total !== 1 ? "es" : ""} con demandas en este periodo`
+      : `${cuantasProps} propiedades`
+  // Con búsqueda no se añade el total de demandas, que es de toda la pantalla y
+  // no de lo buscado: "3 propiedades encontradas · 1.825 demandas" se lee como
+  // si esas tres tuvieran 1.825.
+  const resumen = termino || totalDemandas === null
+    ? etiquetaProps
+    : `${etiquetaProps} · ${totalDemandas.toLocaleString("es")} demanda${totalDemandas !== 1 ? "s" : ""}`
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -631,15 +781,33 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
                 {loading ? "Cargando..." : resumen}
               </p>
             </div>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder="Ref, ciudad, zona..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-8 pr-3 h-9 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-52"
-              />
+            <div className="flex items-center gap-2 shrink-0">
+              {/* LA CHAPA DE LO QUE LLEGA POR LA URL, con su X.
+                  No es adorno: un filtro que llega por la URL y no se ve es la
+                  forma más rápida de que alguien jure que "faltan demandas". Y
+                  soltarla es "verlas todas", que es lo que pidió el dueño. */}
+              {desde && (
+                <button
+                  onClick={quitarDesde}
+                  title="Ver todas, sin filtro de fecha"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border border-border text-muted-foreground font-medium whitespace-nowrap transition-all hover:border-muted-foreground/40"
+                >
+                  {/* La frase la escribe el servidor con el periodo que venía
+                      pulsado, para que diga lo mismo que el botón de la portada. */}
+                  {etiquetaDesde || "Con filtro de fecha"}
+                  <X className="h-3 w-3 shrink-0 opacity-70" />
+                </button>
+              )}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Ref, ciudad, zona..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-8 pr-3 h-9 text-sm rounded-md border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-52"
+                />
+              </div>
             </div>
           </div>
           <div className="border-b border-border" />
@@ -653,14 +821,24 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
               <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">
                 <Building2 className="h-7 w-7 text-muted-foreground" />
               </div>
+              {/* Un vacío CON CORTE no es "no hay demandas": es que no ha
+                  entrado ninguna en ese periodo, y decirlo ahorra el paseo de ir
+                  a comprobar si se ha roto algo. La salida está a un clic, y se
+                  nombra la chapa para que se sepa cuál pulsar. */}
               <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium text-foreground">
-                  {termino ? "Sin resultados" : "Sin demandas todavía"}
+                  {termino
+                    ? "Sin resultados"
+                    : desde
+                      ? "Ninguna demanda en este periodo"
+                      : "Sin demandas todavía"}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {termino
                     ? "Prueba con otro término"
-                    : "Las demandas llegan automáticamente desde los portales vía email"}
+                    : desde
+                      ? `Estás viendo «${etiquetaDesde || "con filtro de fecha"}». Pulsa esa chapa de arriba para ver todas las propiedades.`
+                      : "Las demandas llegan automáticamente desde los portales vía email"}
                 </p>
               </div>
             </div>
@@ -841,7 +1019,14 @@ export default function DemandasPage({ catalogos: catalogosProp = [] }: { catalo
                   <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                 </div>
               ) : demandas.length === 0 ? (
-                <p className="text-xs text-muted-foreground/60 italic">Sin demandas para esta propiedad</p>
+                <p className="text-xs text-muted-foreground/60 italic">
+                  {/* Con corte, el vacío de aquí es del PERIODO y no de la
+                      propiedad: sin decirlo, una ficha que la lista anuncia con
+                      demandas parecería estar rota al abrirse. */}
+                  {desde
+                    ? "Sin demandas en el periodo filtrado"
+                    : "Sin demandas para esta propiedad"}
+                </p>
               ) : (
                 (() => {
                   // Un grupo por estado, en el orden del catálogo. Antes eran

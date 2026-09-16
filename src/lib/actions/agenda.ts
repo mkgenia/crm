@@ -62,6 +62,28 @@ export async function getAgendaMes(anclaISO?: string) {
   hasta.setDate(desde.getDate() + 41)
   hasta.setHours(23, 59, 59, 999)
 
+  /**
+   * La ventana se estira hasta cubrir QUINCE días por delante cuando hoy cae
+   * dentro de ella.
+   *
+   * La columna "Lo que viene" promete catorce días y se sirve de estas mismas
+   * filas, pero la rejilla termina donde termina. Mirando septiembre acaba el
+   * 11/10, así que el día 28 los últimos días de la promesa ya no se bajaban y
+   * la lista los perdía SIN DECIR NADA; en un mes que empiece en domingo se
+   * quedan fuera hasta nueve. Es el engaño de las vencidas otra vez en pequeño:
+   * un rótulo que promete arriba y unas filas que abajo no están.
+   *
+   * Sólo se estira si HOY está dentro de la ventana. Mirando un mes del año
+   * pasado, estirar hasta hoy se traería doce meses de citas para no pintar
+   * ninguna.
+   */
+  const finPromesa = new Date()
+  finPromesa.setDate(finPromesa.getDate() + 15)
+  finPromesa.setHours(23, 59, 59, 999)
+  const ahoraMs = Date.now()
+  const hoyDentro = ahoraMs >= desde.getTime() && ahoraMs <= hasta.getTime()
+  if (hoyDentro && finPromesa.getTime() > hasta.getTime()) hasta.setTime(finPromesa.getTime())
+
   let q = supabase
     .from("agenda")
     .select(CAMPOS)

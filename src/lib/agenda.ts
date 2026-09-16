@@ -69,7 +69,8 @@ const PARTES_MADRID = new Intl.DateTimeFormat("en-CA", {
 })
 
 /**
- * El instante en que empieza (00:00 de MADRID) el día de `base`.
+ * El instante en que empieza (00:00 de MADRID) el día de `base`, o el de
+ * `sumaDias` días después.
  *
  * NO vale cortar el día con `setHours(0, 0, 0, 0)`, que es la hora del
  * SERVIDOR. En producción el servidor va en UTC y Madrid va una o dos horas por
@@ -79,10 +80,17 @@ const PARTES_MADRID = new Intl.DateTimeFormat("en-CA", {
  * Cortando por la medianoche de UTC, la tarea de HOY caería del lado de ayer y
  * el bloque la cantaría como vencida un día antes de tiempo.
  *
+ * `sumaDias` existe porque los cortes del día nunca vienen solos: el bloque de
+ * vencidas corta en el 00:00 de hoy y la columna "Lo que viene" necesita además
+ * el de mañana y el del día 14 para saber dónde empieza y dónde acaba. El
+ * desfase se mide en `base` y se aplica también a los días sumados: en la
+ * madrugada de los dos cambios de hora al año el corte puede irse una hora, y
+ * eso se prefiere a no mirar la zona en absoluto.
+ *
  * Está copiada de la portada del agente —donde es privada de la página— por lo
  * mismo que `desdeHace`: allí no es una librería de la que se pueda importar.
  */
-export function inicioDiaMadrid(base: Date): Date {
+export function inicioDiaMadrid(base: Date, sumaDias = 0): Date {
   const p: Record<string, string> = {}
   for (const parte of PARTES_MADRID.formatToParts(base)) p[parte.type] = parte.value
   // Con `hour12: false` algunas versiones de Node escriben la medianoche como
@@ -91,8 +99,19 @@ export function inicioDiaMadrid(base: Date): Date {
   // El mismo reloj leído como si fuera UTC. No es una fecha de verdad: sólo
   // sirve para restar y saber cuánto va Madrid por delante de UTC ahora mismo.
   const comoUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hora, +p.minute, +p.second)
-  const desfase = comoUTC - base.getTime()
-  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day) - desfase)
+  // ARREGLADO EN REVISIÓN: a `base` se le quitan los MILISEGUNDOS antes de
+  // restar. El reloj de Madrid llega sin ellos —`formatToParts` no da esa
+  // pieza—, así que restarle un `base` con milisegundos dejaba el desfase corto
+  // por esa cola y la medianoche salía hasta 999 ms TARDE. Y 999 ms bastan para
+  // romper justo el caso que este corte venía a proteger: una entrada de "todo
+  // el día" de HOY se guarda clavada en el 00:00 de Madrid (agenda-panel.tsx,
+  // `new Date("2026-09-16T00:00:00")` → 22:00:00.000Z), o sea un pelo por
+  // debajo del corte, y salía en el bloque de VENCIDAS —"hace un momento"— el
+  // mismo día que tocaba, mientras "Lo que viene" la descartaba por no llegar a
+  // su `hoy0`. Desaparecía de un sitio y mentía en el otro, y sólo se salvaba
+  // el milisegundo cero de cada segundo.
+  const desfase = comoUTC - Math.floor(base.getTime() / 1000) * 1000
+  return new Date(Date.UTC(+p.year, +p.month - 1, +p.day + sumaDias) - desfase)
 }
 
 /**
@@ -182,12 +201,32 @@ export function tipoDe(t: string, tipos: TipoAgenda[] = TIPOS): TipoAgenda {
   return tipos.find((x) => x.valor === t) ?? conColor(t, t, "gray")
 }
 
-/** Clave de día en horario local: es la que agrupa el calendario. */
+/** El día "2026-09-16" de un instante, visto desde MADRID. Sólo la usa `claveDia`. */
+const DIA_MADRID = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit",
+})
+
+/**
+ * Clave de día —"2026-09-16"— en hora de MADRID: es la que agrupa el calendario.
+ *
+ * ARREGLADO EN REVISIÓN: leía `getFullYear()/getMonth()/getDate()`, que es el
+ * día de QUIEN PINTA. La rejilla del mes es un componente de cliente, pero Next
+ * la pinta también en el SERVIDOR para el primer HTML, y allí el día es el de
+ * UTC: una entrada de "todo el día" —guardada como el 00:00 de Madrid, o sea
+ * las 22:00Z del día ANTERIOR— se agrupaba bajo la casilla de ayer en el HTML
+ * del servidor y bajo la de hoy al hidratar. Eso es un desajuste de hidratación
+ * de manual, y se lo comía toda entrada de todo el día, no un rato al día.
+ *
+ * Fijar Madrid no cambia nada en el navegador de la oficina —su hora local YA
+ * es esa—, y hace que las dos pasadas escriban lo mismo. Va en la zona de la
+ * casa, la misma que `inicioDiaMadrid` y `horaDe`: esta agenda es la de una
+ * oficina de Valencia, y el día de una cita es el día que es en Valencia.
+ */
 export function claveDia(d: Date | string): string {
   const f = typeof d === "string" ? new Date(d) : d
-  const mes = String(f.getMonth() + 1).padStart(2, "0")
-  const dia = String(f.getDate()).padStart(2, "0")
-  return `${f.getFullYear()}-${mes}-${dia}`
+  const p: Record<string, string> = {}
+  for (const parte of DIA_MADRID.formatToParts(f)) p[parte.type] = parte.value
+  return `${p.year}-${p.month}-${p.day}`
 }
 
 /**
@@ -220,8 +259,22 @@ export function nombreMes(d: Date) {
   return d.toLocaleDateString("es-ES", { month: "long", year: "numeric" })
 }
 
+/**
+ * La hora de una entrada, SIEMPRE en la de Madrid.
+ *
+ * Sin `timeZone` cada lado escribía una hora distinta: el servidor de
+ * producción va en UTC y pintaba la cita de Víctor de las 14:53 como "12:53",
+ * mientras el navegador —que sí está en Madrid— la hidrataba como "14:53".
+ * Además de enseñar una hora falsa en el bloque de vencidas, que se pinta
+ * entero en el servidor, eso es un desajuste de hidratación en el panel.
+ *
+ * Fijarla no es una suposición: esta es la agenda de una oficina de Valencia y
+ * una visita a las 17:30 son las 17:30 allí, se abra el CRM desde donde se abra.
+ */
 export function horaDe(iso: string) {
-  return new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })
+  return new Date(iso).toLocaleTimeString("es-ES", {
+    hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid",
+  })
 }
 
 export function esHoy(d: Date) {

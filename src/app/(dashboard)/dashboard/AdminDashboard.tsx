@@ -49,11 +49,22 @@ export interface AdminData {
     otros: number
   }
   /**
-   * Dónde empieza cada periodo corto, en ISO y calculado en el servidor con el
-   * mismo reloj con el que se contó la tarjeta del scraper.
+   * Los valores de `fuente` que cuenta cada tarjeta de leads.
    *
-   * Lo único que lee de aquí esta pantalla es el enlace de esa tarjeta. Es un
-   * dato, no algo que se pinte: ningún número de la portada cambia por esto.
+   * No es adorno ni configuración: es lo que el enlace de esas tres tarjetas le
+   * pasa a /leads (`?fuente=Instagram,Facebook,…`) para que la lista enseñe
+   * exactamente las filas que se han contado. Viaja desde el servidor porque
+   * allí es donde está la única lista buena (`FAMILIAS_FUENTE`); copiada aquí,
+   * el día que entre una fuente nueva el número y la lista dejarían de cuadrar.
+   */
+  fuentes: { web: string[]; rrss: string[]; qr: string[] }
+  /**
+   * Dónde empieza cada periodo corto, en ISO y calculado en el servidor con el
+   * mismo reloj con el que se contaron las tarjetas.
+   *
+   * Es la otra mitad de todos los enlaces de la rejilla: con "7 días" puesto, la
+   * tarjeta dice 47 y la lista de destino tiene que enseñar esos 47. Es un dato,
+   * no algo que se pinte: ningún número de la portada cambia por esto.
    */
   cortes: { hoy: string; semana: string; mes: string }
   demandas: Periodos & { sinVer: number; cualificadas: number }
@@ -103,7 +114,91 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
   const [periodo, setPeriodo] = useState<ClavePeriodo>("hoy")
 
   /**
-   * EL ENLACE DE LA TARJETA DEL SCRAPER, y sólo eso de esta portada.
+   * EL ENLACE DE UNA TARJETA DE LEADS: web, redes sociales y códigos QR.
+   *
+   * Las tres cuentan LEADS de una familia de fuentes, así que las tres llevan a
+   * /leads con esa familia (`?fuente=Instagram,Facebook,…`, que la pantalla de
+   * destino valida una a una contra el catálogo y pinta como chapa quitable) y,
+   * si hay un periodo corto puesto, con el corte de ese periodo (`&desde=…`).
+   * Sin el corte, pulsar "Redes sociales 47" con "7 días" aterrizaba en los
+   * 1.090 leads de siempre: el número prometiendo una cosa y la pantalla
+   * enseñando otra.
+   *
+   * LA DE CÓDIGOS QR LLEVABA A /galeria-qr, que es la galería de códigos —otra
+   * cosa—, y por eso su número no llevaba nunca a lo que enseña: esa tarjeta
+   * cuenta leads de la familia `qr`, igual que las otras dos cuentan los suyos.
+   * La galería sigue en el menú, que es de donde se entra a gestionar códigos.
+   *
+   * El instante sale de `data.cortes`, calculado en el servidor con la MISMA
+   * función y el mismo reloj con los que se contó el número. Sacarlo de
+   * Date.now() aquí serían dos enlaces distintos, el que escribe el servidor y
+   * el que escribe el navegador: desajuste de hidratación.
+   *
+   * `periodo` se manda además como palabra para que la chapa de destino se lea
+   * ("Entrados hoy") en vez de enseñar una fecha con hora.
+   */
+  const enlaceLeads = (fuentes: string[]) => {
+    const q = new URLSearchParams({ fuente: fuentes.join(",") })
+    if (periodo !== "total") {
+      q.set("periodo", periodo)
+      q.set("desde", data.cortes[periodo])
+    }
+    return `/leads?${q.toString()}`
+  }
+
+  /**
+   * Y EL DE LAS DEMANDAS, que no llevan fuente porque no son leads.
+   *
+   * /demandas es una lista de PROPIEDADES con las demandas que ha recibido cada
+   * una, así que el corte le dice qué demandas mirar: con él puesto enseña sólo
+   * las propiedades que han recibido alguna en ese periodo, y su cabecera dice
+   * el mismo número que esta tarjeta.
+   *
+   * "Todo" no tiene corte: lleva a la lista entera, que es lo que dice.
+   */
+  const enlaceDemandas = () => {
+    if (periodo === "total") return "/demandas"
+    const q = new URLSearchParams({ periodo, desde: data.cortes[periodo] })
+    return `/demandas?${q.toString()}`
+  }
+
+  /**
+   * LA LÍNEA DE ABAJO DE ESA MISMA TARJETA.
+   *
+   * ARREGLADO EN REVISIÓN, y es el mismo arreglo que ya lleva la tarjeta de
+   * demandas del AGENTE (`textoDemandas`, AgentDashboard.tsx). Al mandar un
+   * `extra`, la tarjeta deja de escribir el suyo ("N en total"), así que con un
+   * periodo corto puesto —y "Hoy" es el que trae puesto esta portada al
+   * abrirse— ésta era la única de la rejilla que enseñaba un número pelado: un
+   * "0" enorme bajo "Hoy" con "43 sin ver" debajo y ni rastro de las 1.825 que
+   * hay. Un cero sin su total al lado se lee como avería, no como que hoy no ha
+   * entrado ninguna.
+   *
+   * Hasta hoy ese cero al menos llevaba a la lista entera y allí se veían las
+   * 1.825. Desde este cambio el enlace lleva el corte, así que lleva a una
+   * pantalla vacía: el número y su destino cuadran, pero la línea de al lado
+   * habla de un "sin ver" que es de TODA la vida y no del periodo, y sin el
+   * total en medio esas dos cosas se leen como una sola.
+   *
+   * "Todo" no cambia ni una letra: ahí el número grande YA es el total, y
+   * repetirlo sobraría. Y con la tabla vacía tampoco: sin `extra`, la tarjeta
+   * pone su propio "Aún sin usar", que dice más.
+   */
+  const extraDemandas = () => {
+    if (data.demandas.total === 0) return undefined
+    const trozos = [
+      periodo !== "total" ? `${data.demandas.total.toLocaleString("es")} en total` : null,
+      data.demandas.sinVer > 0 ? `${data.demandas.sinVer.toLocaleString("es")} sin ver` : null,
+    ].filter((t): t is string => t != null)
+    // Sin nada que decir se devuelve `undefined` y no una cadena vacía: es lo
+    // que hace que la tarjeta vuelva a escribir su propia línea en vez de
+    // dejar el hueco en blanco.
+    return trozos.length > 0 ? trozos.join(" · ") : undefined
+  }
+
+  /**
+   * EL ENLACE DE LA TARJETA DEL SCRAPER, que va a otra pantalla y pregunta otra
+   * cosa.
    *
    * Pulsar un número que dice 13 tiene que llevar a esos 13, no a las 759.
    * /captaciones necesita dos cosas para conseguirlo: el instante en que empieza
@@ -191,8 +286,11 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
             despega 8 px de las tarjetas, no los 16 que separan los bloques. */}
         <div className="flex flex-col gap-2">
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+          {/* Las cuatro tarjetas de abajo llevan ya su filtro: pulsar un número
+              abre la lista con exactamente lo que ese número cuenta. Hasta hoy
+              eran `href` fijos y aterrizaban en la lista entera. */}
           <OrigenCard
-            href="/leads" icon={Globe} label="Formularios web"
+            href={enlaceLeads(data.fuentes.web)} icon={Globe} label="Formularios web"
             datos={data.origenes.web} periodo={periodo}
             tono="cyan"
           />
@@ -211,18 +309,21 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
             }
           />
           <OrigenCard
-            href="/demandas" icon={Inbox} label="Demandas"
+            href={enlaceDemandas()} icon={Inbox} label="Demandas"
             datos={data.demandas} periodo={periodo}
             tono="verde"
-            extra={data.demandas.sinVer > 0 ? `${data.demandas.sinVer} sin ver` : undefined}
+            extra={extraDemandas()}
           />
           <OrigenCard
-            href="/leads" icon={Share2} label="Redes sociales"
+            href={enlaceLeads(data.fuentes.rrss)} icon={Share2} label="Redes sociales"
             datos={data.origenes.rrss} periodo={periodo}
             tono="rosa"
           />
+          {/* A /leads y no a /galeria-qr: esta tarjeta cuenta LEADS que entraron
+              por un código, no códigos. La galería es otra pantalla y se entra a
+              ella por el menú. */}
           <OrigenCard
-            href="/galeria-qr" icon={QrCode} label="Códigos QR"
+            href={enlaceLeads(data.fuentes.qr)} icon={QrCode} label="Códigos QR"
             datos={data.origenes.qr} periodo={periodo}
             tono="ambar"
           />

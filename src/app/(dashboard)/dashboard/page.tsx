@@ -47,6 +47,31 @@ const FAMILIAS_FUENTE: Record<string, string[]> = {
 }
 
 /**
+ * LOS TIPOS DE AGENDA QUE CUENTA LA TARJETA "MI CALENDARIO".
+ *
+ * Palabras del dueño: "la tarjeta de mi calendario sólo debe contar citas y
+ * visitas, porque recordatorios y notas son más personales y las otras dos sí
+ * que influyen en la funcionalidad de la persona". Dicho de otra forma: una
+ * cita y una visita son un compromiso con OTRA persona —hay alguien esperando
+ * al otro lado— y un recordatorio o una nota son un apunte del agente para sí
+ * mismo, que no le falla a nadie si se queda sin hacer.
+ *
+ * POR QUÉ ESTA LISTA ESTÁ ESCRITA AQUÍ Y NO SE SACA DEL CATÁLOGO, que es lo
+ * primero que se intentó: `tipo_agenda` (012 y 034) guarda valor, nombre, color
+ * y orden, y NINGUNA de esas columnas dice si un tipo es un compromiso con otro
+ * o un apunte privado. Sacarla de ahí obligaría a inventarse el criterio —"los
+ * dos primeros por `orden`", que se rompe en cuanto alguien reordena el
+ * desplegable— y ese criterio inventado sería más frágil que escribir los dos
+ * valores, que son de sistema y no se pueden borrar (034:38).
+ *
+ * Donde el catálogo SÍ manda es en cómo se llaman: el nombre que la tarjeta
+ * escribe en su línea de abajo sale de `nombreDe`, así que si mañana alguien
+ * renombra "Visita" desde /configuracion/catalogos, la explicación de la
+ * tarjeta cambia con él.
+ */
+const TIPOS_AGENDA_CONTADOS = ["cita", "visita"]
+
+/**
  * Fechas y relativos SE CALCULAN AQUÍ, en el servidor, no en el componente.
  *
  * "hace 3 h" sale de Date.now(). El servidor pinta en UTC y el navegador hidrata
@@ -126,7 +151,21 @@ function inicioDiaMadrid(base: Date, sumaDias = 0): Date {
   // El mismo reloj leído como si fuera UTC. No es una fecha de verdad: sólo
   // sirve para restar y saber cuánto va Madrid por delante de UTC ahora mismo.
   const comoUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hora, +p.minute, +p.second)
-  const desfase = comoUTC - base.getTime()
+  // ARREGLADO EN REVISIÓN: a `base` se le quitan los MILISEGUNDOS antes de
+  // restar, porque el reloj de Madrid llega sin ellos —`formatToParts` no da esa
+  // pieza—. Restándole un `base` con milisegundos, el desfase salía corto por
+  // esa cola y los tres cortes (`inicioHoy`, `inicioManana`, `finSemana`) caían
+  // hasta 999 ms TARDE. Y 999 ms bastan para romper justo el caso que este corte
+  // viene a proteger: una entrada de "todo el día" se guarda clavada en el 00:00
+  // de Madrid (agenda-panel.tsx), o sea un pelo POR DEBAJO del corte, así que la
+  // cita de todo el día de HOY se contaba como VENCIDA y la de MAÑANA como de
+  // hoy. Como `base` es `new Date()`, sus milisegundos son 0 una vez de cada mil:
+  // el fallo saltaba prácticamente en cada carga.
+  //
+  // El mismo arreglo que lleva ya la copia de `src/lib/agenda.ts`, que es la que
+  // usa /calendario: si las dos no cortan igual, la misma entrada sale "vencida"
+  // en la portada y "hoy" en el calendario.
+  const desfase = comoUTC - Math.floor(base.getTime() / 1000) * 1000
   return new Date(Date.UTC(+p.year, +p.month - 1, +p.day + sumaDias) - desfase)
 }
 
@@ -262,19 +301,21 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
   const supabase = await createAdminClient()
 
   /**
-   * UN SOLO RELOJ para la tarjeta del scraper y para su enlace.
+   * UN SOLO RELOJ PARA TODA LA PORTADA: para cada número y para su enlace.
    *
    * Es lo mismo que ya se arregló en la portada del agente: el enlace lleva el
-   * corte del periodo a /captaciones, así que el número y la lista de destino
+   * corte del periodo a la lista de destino, así que el número y esa lista
    * tienen que contarse con EL MISMO instante. Dejando que `porPeriodo` se leyera
    * su propio `new Date()`, el corte del enlace se escribiría antes de esperar a
    * todas las consultas y el de la cuenta medio segundo después: un propietario
    * que se interesara justo en esa rendija de hace siete días saldría en la
    * lista y no en la tarjeta.
    *
-   * Sólo lo toma la tarjeta del scraper, que es la única cuyo enlace lleva el
-   * corte. Las demás siguen llamando a `porPeriodo` sin reloj —cae a
-   * `new Date()`— y cuentan exactamente lo que contaban ayer.
+   * ANTES SÓLO LO TOMABA LA TARJETA DEL SCRAPER, que era la única cuyo enlace
+   * llevaba el corte. Desde este cambio lo llevan también web, redes sociales,
+   * códigos QR y demandas, así que sus cuentas (`familia` y las demandas, aquí
+   * abajo) tienen que tomarlo igual: eran justo las que se quedaban con la
+   * rendija abierta.
    */
   const ahora = new Date()
 
@@ -419,8 +460,13 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
   // el pipeline— y a cambio cambiar de "hoy" a "30 días" es instantáneo, sin
   // consulta ni spinner. `porPeriodo` y `serieDe` están arriba, en el módulo:
   // la portada del agente hace ahora esta misma cuenta y tiene que ser LA MISMA.
+  //
+  // Se trocean con `ahora`, el MISMO instante que viaja en `cortes` y por tanto
+  // en el enlace de estas tres tarjetas. Sin el reloj, `porPeriodo` se leería el
+  // suyo medio segundo más tarde y un lead caído justo en la rendija de hace
+  // siete días contaría en /leads y no en la tarjeta.
   const familia = (fam: string) =>
-    porPeriodo(allLeads.filter((l) => FAMILIAS_FUENTE[fam].includes(l.fuente ?? "")))
+    porPeriodo(allLeads.filter((l) => FAMILIAS_FUENTE[fam].includes(l.fuente ?? "")), ahora)
 
   // Un propietario cuenta UNA vez, el día que se interesó por primera vez.
   //
@@ -466,6 +512,19 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
       qr: familia("qr"),
       otros,
     },
+    // LOS VALORES DE `fuente` QUE CUENTA CADA TARJETA DE LEADS, para que su
+    // enlace pueda pedirle a /leads exactamente esas filas.
+    //
+    // Son las MISMAS listas con las que se acaban de contar los tres números
+    // (`familia`), no una copia escrita en el componente: el día que entre
+    // 'TikTok' en la familia de redes, el número y la lista de destino se mueven
+    // juntos. Es el mismo campo que ya lleva la portada del agente, con la
+    // familia `qr` de más porque esa tarjeta sólo la pinta el administrador.
+    fuentes: {
+      web: FAMILIAS_FUENTE.web,
+      rrss: FAMILIAS_FUENTE.rrss,
+      qr: FAMILIAS_FUENTE.qr,
+    },
     // DÓNDE EMPIEZA CADA PERIODO CORTO, ya calculado aquí y con el mismo reloj
     // con el que se ha contado la tarjeta del scraper.
     //
@@ -483,8 +542,10 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
         mes: new Date(c.mes).toISOString(),
       }
     })(),
+    // Mismo reloj que las de leads y por lo mismo: desde este cambio su enlace
+    // lleva el corte a /demandas.
     demandas: {
-      ...porPeriodo(demandas),
+      ...porPeriodo(demandas, ahora),
       sinVer: demandas.filter((d) => d.visto === false).length,
       cualificadas: demandas.filter((d) => d.estado === "Cualificado" || d.estado === "cualificado").length,
     },
@@ -572,16 +633,20 @@ async function getAdminData(catalogos: Catalogo[]): Promise<AdminData> {
  * 1.008 leads vivos ya estábamos en el borde; el día que un agente pase de mil,
  * sus tarjetas se habrían quedado congeladas sin que nadie se entere.
  */
-async function getAgentData(userId: string): Promise<AgentData> {
+async function getAgentData(userId: string, catalogos: Catalogo[]): Promise<AgentData> {
   const supabase = await createAdminClient()
   const ahora = new Date()
   const ahoraISO = ahora.toISOString()
 
-  // YA NO ENTRA EL CATÁLOGO: lo leían el pipeline de leads (un contador por
-  // estado) y el desglose de WhatsApp, y el dueño ha quitado los dos bloques de
-  // la portada. Lo que queda no nombra ni un solo valor de catálogo, así que
-  // pedirlo aquí era cargar una lista para no mirarla. El componente lo sigue
-  // recibiendo por su lado: lo necesita para las pastillas de cada fila.
+  // EL CATÁLOGO VUELVE A ENTRAR, y para UNA sola cosa: cómo se llaman hoy los
+  // tipos de agenda que cuenta la tarjeta del calendario.
+  //
+  // Se dejó de pedir cuando el dueño quitó el pipeline de leads y el desglose de
+  // WhatsApp, que eran quienes lo miraban. Vuelve porque esa tarjeta tiene que
+  // decir con palabras que sólo cuenta citas y visitas, y el nombre de cada tipo
+  // lo pone el administrador en /configuracion/catalogos. No cuesta una consulta
+  // de más: la página ya lo tenía cargado para las pastillas de cada fila y
+  // ahora se lo pasa en vez de pedirlo otra vez.
 
   /**
    * La fuente del lead ESPEJO de una captación.
@@ -712,6 +777,14 @@ async function getAgentData(userId: string): Promise<AgentData> {
    * suyo) y `completado = false`, que es lo que la columna "Lo que viene" ya
    * descuenta para no enseñar dos veces lo hecho (proximas-entradas.tsx:27).
    *
+   * Y SÓLO CITAS Y VISITAS (`TIPOS_AGENDA_CONTADOS`, arriba, donde está el
+   * motivo): un recordatorio o una nota son del agente para sí mismo y no
+   * hacen esperar a nadie. El filtro va AQUÍ, en la ayudante, y no repetido en
+   * los tres contadores de abajo: escrito tres veces se separa, y ese día la
+   * tarjeta sumaría "vencidas" de una pregunta y "hoy" de otra sin que nada
+   * fallara. El calendario de /calendario NO se toca: allí se siguen viendo los
+   * cuatro tipos, que es de lo que sirve un calendario.
+   *
    * Se cuenta en la base con `head: true`, no trayendo las filas de
    * `getAgendaMes()` y midiéndolas con `.length`: esa consulta trae SEIS
    * SEMANAS —ni lo vencido de hace dos meses ni lo de dentro de tres— así que
@@ -721,6 +794,7 @@ async function getAgentData(userId: string): Promise<AgentData> {
   const misTareas = () =>
     supabase.from("agenda").select("id", { count: "exact", head: true })
       .eq("agente_id", userId).eq("completado", false)
+      .in("tipo", TIPOS_AGENDA_CONTADOS)
 
   // Los tres cortes del día, en hora de Madrid (ver `inicioDiaMadrid`).
   const inicioHoy = inicioDiaMadrid(ahora).toISOString()
@@ -1078,6 +1152,14 @@ async function getAgentData(userId: string): Promise<AgentData> {
       vencidas: cuenta(tareasVencidasRes),
       hoy: cuenta(tareasHoyRes),
       semana: cuenta(tareasSemanaRes),
+      // CÓMO SE LLAMAN HOY los tipos que se han contado, para que la tarjeta lo
+      // pueda decir con palabras. Sin esta línea, una tarjeta a 0 al lado de un
+      // calendario con dos recordatorios vencidos se lee como que está rota.
+      //
+      // Salen del catálogo y no escritos aquí: `nombreDe` devuelve el nombre que
+      // tengan puesto en /configuracion/catalogos y, si alguien archivó el tipo,
+      // cae a su propio valor en vez de dejar el hueco en blanco.
+      tipos: TIPOS_AGENDA_CONTADOS.map((t) => nombreDe(catalogos, "tipo_agenda", t)),
     },
     // LAS CUATRO TARJETAS QUE RESPONDEN AL SELECTOR, cada una con sus cuatro
     // periodos y sus catorce barras, y cada una fallando por su cuenta: que no
@@ -1153,7 +1235,7 @@ export default async function DashboardPage() {
     )
   }
 
-  const data = await getAgentData(user.id)
+  const data = await getAgentData(user.id, catalogos)
   return (
     <AgentDashboard
       nombre={perfil?.nombre ?? "—"}
