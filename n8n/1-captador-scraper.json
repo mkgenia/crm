@@ -7,7 +7,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 */30 9-21 * * *"
+              "expression": "0 */30 9-21 * * 1-6"
             }
           ]
         }
@@ -28,7 +28,7 @@
           "interval": [
             {
               "field": "cronExpression",
-              "expression": "0 0 7 * * *"
+              "expression": "0 0 7 * * 1-6"
             }
           ]
         }
@@ -60,22 +60,22 @@
       ],
       "id": "wf1-uso",
       "name": "Uso Apify",
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "notes": "Gasto real del ciclo de facturacion, directo de Apify.",
       "credentials": {
         "httpHeaderAuth": {
           "id": "APIFY_TOKEN",
           "name": "Apify (Bearer)"
         }
-      },
-      "alwaysOutputData": true,
-      "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000,
-      "onError": "continueRegularOutput",
-      "notes": "Gasto real del ciclo de facturacion, directo de Apify."
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Guardarraíl de gasto. La cuenta es plan STARTER con tope duro de 19 $/mes:\n// si se agota, Apify corta los runs a mitad de mes y el captador se queda mudo.\n// Aquí se reparte el presupuesto a lo largo del ciclo de facturación y se frena\n// solo (saltando pasadas) cuando el gasto va por delante del ritmo.\nconst LIMITE_CUENTA = 19;\nconst RESERVA = 2;            // colchón intocable para el resto del mes\nconst DISPONIBLE = LIMITE_CUENTA - RESERVA;\n\nconst raw = $input.first().json;\nconst uso = raw.data || raw;\n\n// El freno tiene que fallar CERRADO. El nodo de arriba lleva\n// onError:continueRegularOutput, asi que si la API de Apify da un 429, un 5xx o\n// se pasa del timeout, igualmente emite un item, y el item no trae el campo del\n// gasto. Con `Number(undefined || 0)` eso se convertia en 'has gastado 0 euros',\n// que es la lectura MAS PERMISIVA posible justo cuando se ha perdido la unica\n// medida real. Ademas escribia ese 0 en app_settings y el medidor del CRM se\n// ponia a cero mientras se seguia gastando. Ocurrio de verdad: ejecucion 56160\n// del 08/09 a las 16:00.\nconst bruto = uso.totalUsageCreditsUsdBeforeVolumeDiscount;\nconst lecturaOk = !raw.error && bruto != null && isFinite(Number(bruto));\nif (!lecturaOk) {\n  return [{\n    json: {\n      lectura_ok: false,\n      seguir: false,\n      motivo: 'no se pudo leer el gasto de Apify',\n      detalle: String((raw.error && (raw.error.message || raw.error)) || 'la respuesta no traia el consumo').slice(0, 200),\n      actualizado: new Date().toISOString(),\n    },\n  }];\n}\nconst gastado = Number(bruto);\n\nconst ciclo = uso.usageCycle || {};\nconst ini = new Date(ciclo.startAt || Date.now()).getTime();\nconst fin = new Date(ciclo.endAt || Date.now() + 2592000000).getTime();\nconst ahora = Date.now();\nconst progreso = Math.min(Math.max((ahora - ini) / Math.max(fin - ini, 1), 0), 1);\n\n// Presupuesto permitido a día de hoy = 2 días de margen + parte proporcional.\nconst unDia = DISPONIBLE / 30;\nconst permitido = unDia * 2 + DISPONIBLE * progreso;\n\n// Semana de pruebas: hasta esa fecha se deja de racionar por ritmo y solo queda\n// el tope duro. Se pone como FECHA y no como interruptor a proposito: un\n// interruptor se queda encendido y un dia el captador se come los 19 $ el dia 8.\n// El limite absoluto NO se toca ni siquiera durante las pruebas.\nconst SIN_RACIONAR_HASTA = '2026-09-15T23:59:59Z';\nconst enPruebas = Date.now() <= new Date(SIN_RACIONAR_HASTA).getTime();\n\nconst agotado = gastado >= DISPONIBLE;\nconst adelantado = !enPruebas && gastado > permitido;\n\n// Cuanto queda de margen real, para que el panel del CRM pueda avisar antes de\n// que el freno muerda en vez de despues.\nconst restante = Math.max(0, DISPONIBLE - gastado);\nconst diasRestantes = Math.max(1, Math.ceil((fin - ahora) / 86400000));\n\nreturn [{\n  json: {\n    lectura_ok: true,\n    gastado: Math.round(gastado * 1000) / 1000,\n    limite: LIMITE_CUENTA,\n    disponible: DISPONIBLE,\n    permitido_hoy: Math.round(permitido * 1000) / 1000,\n    progreso_ciclo: Math.round(progreso * 100),\n    ciclo_fin: ciclo.endAt || null,\n    restante: Math.round(restante * 100) / 100,\n    dias_restantes: diasRestantes,\n    por_dia_restante: Math.round(restante / diasRestantes * 100) / 100,\n    en_pruebas: enPruebas,\n    sin_racionar_hasta: SIN_RACIONAR_HASTA,\n    seguir: !agotado && !adelantado,\n    motivo: agotado ? 'presupuesto agotado'\n      : (adelantado ? 'por delante del ritmo de gasto'\n        : (enPruebas ? 'semana de pruebas: sin racionar hasta el ' + SIN_RACIONAR_HASTA.slice(0, 10) : 'ok')),\n    actualizado: new Date().toISOString(),\n  },\n}];"
+        "jsCode": "// Guardarraíl de gasto. La cuenta es plan STARTER con tope duro de 19 $/mes:\n// si se agota, Apify corta los runs a mitad de mes y el captador se queda mudo.\n// Aquí se para el captador cuando el gasto toca el disponible (límite - reserva).\nconst LIMITE_CUENTA = 19;\nconst RESERVA = 2;            // colchón intocable para el resto del mes\nconst DISPONIBLE = LIMITE_CUENTA - RESERVA;\n\nconst raw = $input.first().json;\nconst uso = raw.data || raw;\n\n// El freno tiene que fallar CERRADO. El nodo de arriba lleva\n// onError:continueRegularOutput, asi que si la API de Apify da un 429, un 5xx o\n// se pasa del timeout, igualmente emite un item, y el item no trae el campo del\n// gasto. Con `Number(undefined || 0)` eso se convertia en 'has gastado 0 euros',\n// que es la lectura MAS PERMISIVA posible justo cuando se ha perdido la unica\n// medida real. Ademas escribia ese 0 en app_settings y el medidor del CRM se\n// ponia a cero mientras se seguia gastando. Ocurrio de verdad: ejecucion 56160\n// del 08/09 a las 16:00.\nconst bruto = uso.totalUsageCreditsUsdBeforeVolumeDiscount;\nconst lecturaOk = !raw.error && bruto != null && isFinite(Number(bruto));\nif (!lecturaOk) {\n  return [{\n    json: {\n      lectura_ok: false,\n      seguir: false,\n      motivo: 'no se pudo leer el gasto de Apify',\n      detalle: String((raw.error && (raw.error.message || raw.error)) || 'la respuesta no traia el consumo').slice(0, 200),\n      actualizado: new Date().toISOString(),\n    },\n  }];\n}\nconst gastado = Number(bruto);\n\nconst ciclo = uso.usageCycle || {};\nconst ini = new Date(ciclo.startAt || Date.now()).getTime();\nconst fin = new Date(ciclo.endAt || Date.now() + 2592000000).getTime();\nconst ahora = Date.now();\nconst progreso = Math.min(Math.max((ahora - ini) / Math.max(fin - ini, 1), 0), 1);\n\n// Aqui habia un segundo freno \"por ritmo\": repartia el presupuesto a partes\n// iguales por el ciclo y saltaba pasadas si el gasto iba por delante. Se quito el\n// 17/09/2026: el gasto gordo fue la primera semana (barridos completos) y desde\n// que el actor va en monitoringMode cada pasada cuesta ~0,008 $, unos 0,22 $/dia.\n// El freno se quedaba dias parado cobrando una deuda que ya no se va a repetir.\n// Queda SOLO el tope duro, que es el que protege de verdad la cuenta.\nconst agotado = gastado >= DISPONIBLE;\n\n// Cuanto queda de margen real, para que el panel del CRM pueda avisar antes de\n// que el freno muerda en vez de despues.\nconst restante = Math.max(0, DISPONIBLE - gastado);\nconst diasRestantes = Math.max(1, Math.ceil((fin - ahora) / 86400000));\n\nreturn [{\n  json: {\n    lectura_ok: true,\n    gastado: Math.round(gastado * 1000) / 1000,\n    limite: LIMITE_CUENTA,\n    disponible: DISPONIBLE,\n    progreso_ciclo: Math.round(progreso * 100),\n    ciclo_fin: ciclo.endAt || null,\n    restante: Math.round(restante * 100) / 100,\n    dias_restantes: diasRestantes,\n    por_dia_restante: Math.round(restante / diasRestantes * 100) / 100,\n    seguir: !agotado,\n    motivo: agotado ? 'presupuesto agotado' : 'ok',\n    actualizado: new Date().toISOString(),\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -152,17 +152,17 @@
       ],
       "id": "wf1-pub-gasto",
       "name": "Publicar Gasto en CRM",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Alimenta el medidor \"Presupuesto Apify\" del panel de Configuracion del captador.",
       "credentials": {
         "httpCustomAuth": {
           "id": "SUPABASE_MKGENIA",
           "name": "Supabase mkgenia (service_role)"
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2000,
-      "onError": "continueRegularOutput",
-      "notes": "Alimenta el medidor \"Presupuesto Apify\" del panel de Configuracion del captador."
+      }
     },
     {
       "parameters": {
@@ -217,16 +217,16 @@
       ],
       "id": "wf1-zonas",
       "name": "Zonas Activas",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
       "credentials": {
         "httpCustomAuth": {
           "id": "SUPABASE_MKGENIA",
           "name": "Supabase mkgenia (service_role)"
         }
-      },
-      "alwaysOutputData": true,
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2000
+      }
     },
     {
       "parameters": {
@@ -262,21 +262,21 @@
       ],
       "id": "wf1-apify",
       "name": "Apify Scrapear Zonas",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 10000,
+      "notes": "maxTotalChargeUsd corta el run por hardware si se dispara el coste. Token en cabecera Authorization: antes iba en la query string y quedaba escrito en los logs. timeout=260s en el actor y 290s en el nodo, por debajo del limite duro de 300s de run-sync.",
       "credentials": {
         "httpHeaderAuth": {
           "id": "APIFY_TOKEN",
           "name": "Apify (Bearer)"
         }
-      },
-      "alwaysOutputData": true,
-      "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 10000,
-      "notes": "maxTotalChargeUsd corta el run por hardware si se dispara el coste. Token en cabecera Authorization: antes iba en la query string y quedaba escrito en los logs. timeout=260s en el actor y 290s en el nodo, por debajo del limite duro de 300s de run-sync."
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Rutas reales del actor memo23/idealista-scraper (build 0.0.164).\n// Casi todo lo util vive bajo moreCharacteristics, NO en la raiz del item.\nconst ESTADO_LEGIBLE = { good: 'Buen estado', renew: 'A reformar', newdevelopment: 'Obra nueva' };\n\n// Idealista devuelve el telefono en varios formatos segun el anuncio. Se normaliza\n// a 34XXXXXXXXX y se descarta lo que no sea un movil/fijo espanol valido, para que\n// ni Evolution ni el CRM reciban basura.\nfunction telefonoES(contacto) {\n  const p = (contacto && contacto.phone1) || {};\n  const num = String(p.phoneNumber == null ? '' : p.phoneNumber).replace(/\\D/g, '');\n  const pref = String(p.prefix == null ? '' : p.prefix).replace(/\\D/g, '');\n  let d = num ? (pref || '34') + num : '';\n  if (!d) {\n    d = String(p.formattedPhoneWithPrefix || p.formattedPhone || '').replace(/\\D/g, '');\n    if (d.startsWith('00')) d = d.slice(2);\n    if (d.length === 9) d = '34' + d;\n  }\n  return /^34[6-9]\\d{8}$/.test(d) ? d : null;\n}\n\nconst salida = [];\n\nfor (const item of $input.all()) {\n  const e = item.json || {};\n  const ci = e.contactInfo || {};\n\n  // Solo particulares: una agencia no es una captacion.\n  if (ci.userType !== 'private' || ci.professional === true) continue;\n  if (e.state && e.state !== 'active') continue;\n  if (!e.adid) continue;\n\n  const mc = e.moreCharacteristics || {};\n  const bi = e.basicInfo || {};\n  const ub = e.ubication || {};\n\n  const metros = mc.constructedArea != null ? mc.constructedArea\n    : (bi.constructedArea != null ? bi.constructedArea : null);\n  const precio = e.price != null ? e.price\n    : (e.priceInfo && e.priceInfo.amount != null ? e.priceInfo.amount : null);\n  const estadoRaw = mc.status || bi.status || null;\n  const planta = mc.floor != null ? mc.floor : (bi.floor != null ? bi.floor : null);\n  const ascensor = mc.lift != null ? mc.lift\n    : (mc.hasLift != null ? mc.hasLift : (bi.hasLift != null ? bi.hasLift : null));\n\n  // raw_data sin las descripciones multi-idioma: cuadruplican el peso y no se usan.\n  const rawSlim = Object.assign({}, e);\n  delete rawSlim.comments;\n  delete rawSlim.translatedTexts;\n\n  // Solo la PRIMERA. El CRM pinta imagenes[0] en los cuatro sitios donde sale una\n  // foto y no hay galeria en ninguno. Se guardaban 7,1 de media por captacion:\n  // el 86% se descargaba, se convertia a WebP y se subia a Storage para nada.\n  const fotos = ((e.multimedia && e.multimedia.images) || [])\n    .map(function (img) { return img && img.url; })\n    .filter(Boolean)\n    .slice(0, 1);\n\n  const telefono = telefonoES(ci);\n\n  salida.push({\n    json: {\n      // captacion coincide 1:1 con las columnas de public.captaciones\n      captacion: {\n        id: Number(e.adid),\n        nombre: ci.contactName || 'Propietario',\n        telefono: telefono,\n        precio: precio,\n        precio_m2: e.priceByArea != null ? e.priceByArea\n          : (precio && metros ? Math.round(precio / metros) : null),\n        barrio: ub.administrativeAreaLevel4 || ub.administrativeAreaLevel3 || null,\n        calle: ub.title || null,\n        metros: metros,\n        habitaciones: mc.roomNumber != null ? mc.roomNumber\n          : (bi.roomNumber != null ? bi.roomNumber : null),\n        banos: mc.bathNumber != null ? mc.bathNumber\n          : (bi.bathNumber != null ? bi.bathNumber : null),\n        planta: planta == null ? null : String(planta),\n        tiene_ascensor: typeof ascensor === 'boolean' ? ascensor : null,\n        estado: estadoRaw ? (ESTADO_LEGIBLE[estadoRaw] || estadoRaw) : null,\n        descripcion: e.propertyComment || null,\n        url: e.detailWebLink || null,\n        // Sin telefono no hay captacion posible: el propietario ha elegido en\n        // Idealista que solo se le escriba por el chat de la plataforma\n        // (contactMethod 'email'). Se guarda igual, porque se le puede contactar\n        // a mano por ahi, pero marcado para que no ocupe sitio en la cola: esa\n        // consulta pide estado_whatsapp IS NULL. Son el 45% de lo que trae el\n        // barrido, asi que dejarlos entrar tapaba a los que si tienen numero.\n        // Sin numero no hay a quien escribir, asi que se guarda marcada y no\n        // entra en la cola: su consulta pide estado_whatsapp IS NULL. Se guarda\n        // igualmente porque a esos propietarios se les puede escribir a mano por\n        // el chat de Idealista, y porque monitoringMode no vuelve a emitir el\n        // anuncio nunca mas: si se descartara aqui, se perderia para siempre.\n        estado_whatsapp: telefono ? null : 'Sin_Telefono',\n        contacto_lock_en: null,\n        fotos_procesadas: false,\n        raw_data: rawSlim,\n      },\n      fotos: fotos,\n    },\n  });\n}\n\nreturn salida;"
+        "jsCode": "// Rutas reales del actor memo23/idealista-scraper (build 0.0.164).\n// Casi todo lo util vive bajo moreCharacteristics, NO en la raiz del item.\nconst ESTADO_LEGIBLE = { good: 'Buen estado', renew: 'A reformar', newdevelopment: 'Obra nueva' };\n\n// Idealista devuelve el telefono en varios formatos segun el anuncio. Se normaliza\n// a 34XXXXXXXXX y se descarta lo que no sea un movil/fijo espanol valido, para que\n// ni Evolution ni el CRM reciban basura.\nfunction telefonoES(contacto) {\n  const p = (contacto && contacto.phone1) || {};\n  const num = String(p.phoneNumber == null ? '' : p.phoneNumber).replace(/\\D/g, '');\n  const pref = String(p.prefix == null ? '' : p.prefix).replace(/\\D/g, '');\n  let d = num ? (pref || '34') + num : '';\n  if (!d) {\n    d = String(p.formattedPhoneWithPrefix || p.formattedPhone || '').replace(/\\D/g, '');\n    if (d.startsWith('00')) d = d.slice(2);\n    if (d.length === 9) d = '34' + d;\n  }\n  return /^34[6-9]\\d{8}$/.test(d) ? d : null;\n}\n\n// Idealista da el barrio en ingles y con prefijo: \"Subdistrict El Pilar\",\n// \"District Camins al Grau\". Se guarda limpio para que no salga asi en ninguna\n// pantalla ni en ningun mensaje. Mismo patron que \"Analizar Inmueble\" (wf 4):\n// espacio literal y no barra-s, porque las barras se perdian al generar el codigo.\nfunction sinPrefijo(b) {\n  const t = String(b == null ? '' : b).replace(/^(sub)?district +/i, '').trim();\n  return t || null;\n}\n\nconst salida = [];\n\nfor (const item of $input.all()) {\n  const e = item.json || {};\n  const ci = e.contactInfo || {};\n\n  // Solo particulares: una agencia no es una captacion.\n  if (ci.userType !== 'private' || ci.professional === true) continue;\n  if (e.state && e.state !== 'active') continue;\n  if (!e.adid) continue;\n\n  const mc = e.moreCharacteristics || {};\n  const bi = e.basicInfo || {};\n  const ub = e.ubication || {};\n\n  const metros = mc.constructedArea != null ? mc.constructedArea\n    : (bi.constructedArea != null ? bi.constructedArea : null);\n  const precio = e.price != null ? e.price\n    : (e.priceInfo && e.priceInfo.amount != null ? e.priceInfo.amount : null);\n  const estadoRaw = mc.status || bi.status || null;\n  const planta = mc.floor != null ? mc.floor : (bi.floor != null ? bi.floor : null);\n  const ascensor = mc.lift != null ? mc.lift\n    : (mc.hasLift != null ? mc.hasLift : (bi.hasLift != null ? bi.hasLift : null));\n\n  // raw_data sin las descripciones multi-idioma: cuadruplican el peso y no se usan.\n  const rawSlim = Object.assign({}, e);\n  delete rawSlim.comments;\n  delete rawSlim.translatedTexts;\n\n  // Solo la PRIMERA. El CRM pinta imagenes[0] en los cuatro sitios donde sale una\n  // foto y no hay galeria en ninguno. Se guardaban 7,1 de media por captacion:\n  // el 86% se descargaba, se convertia a WebP y se subia a Storage para nada.\n  const fotos = ((e.multimedia && e.multimedia.images) || [])\n    .map(function (img) { return img && img.url; })\n    .filter(Boolean)\n    .slice(0, 1);\n\n  const telefono = telefonoES(ci);\n\n  salida.push({\n    json: {\n      // captacion coincide 1:1 con las columnas de public.captaciones\n      captacion: {\n        id: Number(e.adid),\n        nombre: ci.contactName || 'Propietario',\n        telefono: telefono,\n        precio: precio,\n        precio_m2: e.priceByArea != null ? e.priceByArea\n          : (precio && metros ? Math.round(precio / metros) : null),\n        barrio: sinPrefijo(ub.administrativeAreaLevel4 || ub.administrativeAreaLevel3),\n        calle: ub.title || null,\n        metros: metros,\n        habitaciones: mc.roomNumber != null ? mc.roomNumber\n          : (bi.roomNumber != null ? bi.roomNumber : null),\n        banos: mc.bathNumber != null ? mc.bathNumber\n          : (bi.bathNumber != null ? bi.bathNumber : null),\n        planta: planta == null ? null : String(planta),\n        tiene_ascensor: typeof ascensor === 'boolean' ? ascensor : null,\n        estado: estadoRaw ? (ESTADO_LEGIBLE[estadoRaw] || estadoRaw) : null,\n        descripcion: e.propertyComment || null,\n        url: e.detailWebLink || null,\n        // Sin telefono no hay captacion posible: el propietario ha elegido en\n        // Idealista que solo se le escriba por el chat de la plataforma\n        // (contactMethod 'email'). Se guarda igual, porque se le puede contactar\n        // a mano por ahi, pero marcado para que no ocupe sitio en la cola: esa\n        // consulta pide estado_whatsapp IS NULL. Son el 45% de lo que trae el\n        // barrido, asi que dejarlos entrar tapaba a los que si tienen numero.\n        // Sin numero no hay a quien escribir, asi que se guarda marcada y no\n        // entra en la cola: su consulta pide estado_whatsapp IS NULL. Se guarda\n        // igualmente porque a esos propietarios se les puede escribir a mano por\n        // el chat de Idealista, y porque monitoringMode no vuelve a emitir el\n        // anuncio nunca mas: si se descartara aqui, se perderia para siempre.\n        estado_whatsapp: telefono ? null : 'Sin_Telefono',\n        contacto_lock_en: null,\n        fotos_procesadas: false,\n        raw_data: rawSlim,\n      },\n      fotos: fotos,\n    },\n  });\n}\n\nreturn salida;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -314,17 +314,17 @@
       ],
       "id": "wf1-enviar",
       "name": "Enviar a Ingesta",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Una llamada por inmueble, espaciadas 1,5s. Si una falla no arrastra al resto. La ingesta NO envia WhatsApp: solo guarda. El envio lo gobierna la cola.",
       "credentials": {
         "httpHeaderAuth": {
           "id": "N8N_INTERNO",
           "name": "n8n Interno (x-webhook-secret)"
         }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000,
-      "onError": "continueRegularOutput",
-      "notes": "Una llamada por inmueble, espaciadas 1,5s. Si una falla no arrastra al resto. La ingesta NO envia WhatsApp: solo guarda. El envio lo gobierna la cola."
+      }
     },
     {
       "parameters": {
@@ -338,8 +338,7 @@
       ],
       "id": "wf1-reparto",
       "name": "Reparto por Zona",
-      "notes": "Reparte el resultado de la pasada entre las zonas activas, atribuyendo cada inmueble a la zona cuya operacion y tipo coinciden. Antes se escribia el mismo total en todas.",
-      "executeOnce": true
+      "notes": "Reparte el resultado de la pasada entre las zonas activas, atribuyendo cada inmueble a la zona cuya operacion y tipo coinciden. Antes se escribia el mismo total en todas."
     },
     {
       "parameters": {
@@ -371,17 +370,98 @@
       ],
       "id": "wf1-marcar",
       "name": "Marcar Zonas Ejecutadas",
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "Una llamada POR ZONA, con el recuento que le corresponde. Antes era un solo PATCH a activa=eq.true que escribia el mismo total en todas: con dos zonas, el panel mentia en las dos y una zona muda era indistinguible de una productiva.",
       "credentials": {
         "httpCustomAuth": {
           "id": "SUPABASE_MKGENIA",
           "name": "Supabase mkgenia (service_role)"
         }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3255c02a-5054-4849-9fe3-002616bc5362",
+              "leftValue": "={{ $json.saltar !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
       },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2000,
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        310,
+        -190
+      ],
+      "id": "d4652459-0210-4cbe-9ce8-fe13ea20b09d",
+      "name": "Hay que scrapear?",
+      "notes": "La red de seguridad de las 07:00 devuelve saltar:true cuando todas las zonas son de barrido. Antes seguia hasta Apify sin input y la ejecucion fallaba cada manana (desde el 11/09)."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ============================================================\n// CAP 01 · Recortar para mercado — nodo Code (\"Run Once for All Items\")\n// Justo antes del POST al webhook de VAL 02 (\"Guardar en mercado\").\n//\n// POR QUÉ.\n// Cada anuncio del actor pesa ~23 KB y más de la mitad son fotos: 13 KB en\n// multimedia.images (URLs firmadas que caducan) y otros 3,4 KB repetidos en\n// basicInfo.multimedia. VAL 02 sólo usa la URL de la primera foto (imagen_url) y\n// cuántas hay (num_fotos). Recortado queda en 6,1 KB de media: un envío de 150\n// anuncios pasa de ~3,3 MB a ~0,9 MB (medido sobre el rescate).\n//\n// DÓNDE VA. En una rama APARTE del flujo del captador: si no hay anuncios\n// devuelve [] y, si estuviera en línea, pararía el resto de CAP 01.\n//\n// QUÉ QUITA.\n//  - comments y translatedTexts (textos de más; el rescate ya venía sin ellos).\n//  - multimedia: se queda SÓLO images, y de cada foto sólo multimediaId (la\n//    primera, también url). Así images.length sigue siendo el número real de\n//    fotos y el mapeo no necesita campos inventados. Los multimediaId se guardan\n//    porque el conjunto de fotos es uno de los cambios reales que se quieren\n//    detectar. Fuera videos, virtual3DTours y homestagings.\n//  - basicInfo.multimedia (copia de las fotos), basicInfo.description (otro texto\n//    distinto de propertyComment, traducido) y basicInfo.contactInfo (copia).\n//  - contactInfo.phone1 y phone2: VAL 02 no los usa y así los teléfonos no\n//    quedan también en el registro de ejecuciones de VAL 02.\n//  - En los particulares (userType 'private' y no professional), también\n//    contactInfo.contactName y profilePicture: son el nombre y la foto del\n//    propietario (369 de los 3.925 rescatados). VAL 02 sólo lee contactName para\n//    el nombre de la agencia, así que en un particular no lo usa nunca.\n//  - Los items sin adid, como el {} vacío que sale en una pasada sin anuncios:\n//    VAL 02 los tiraría igual, y así no se llama al webhook para nada.\n//\n// PROBADO el 17/09/2026 sobre los 3.925 anuncios rescatados: el mapeo de VAL 02\n// da exactamente las mismas filas con el anuncio recortado que con el completo\n// (t-mapeo.js). No toca los items de entrada: crea copias.\n//\n// SALIDA. UN item {anuncios:[...]}, que el HTTP Request manda tal cual con\n// JSON.stringify($json). Sin anuncios devuelve [] y no se llama a VAL 02.\n// Acepta también el formato del rescate {vista_en, anuncio}: recorta el anuncio y\n// deja vista_en.\n// ============================================================\n\nfunction recortar(a) {\n  if (!a || typeof a !== 'object') return a;\n  const r = Object.assign({}, a);\n  delete r.comments;\n  delete r.translatedTexts;\n\n  if (r.multimedia && typeof r.multimedia === 'object') {\n    const imgs = Array.isArray(r.multimedia.images) ? r.multimedia.images : null;\n    r.multimedia = imgs\n      ? { images: imgs.map((im, i) => {\n          const o = { multimediaId: im ? im.multimediaId : undefined };\n          if (i === 0) o.url = im ? im.url : undefined;\n          return o;\n        }) }\n      : {};\n  }\n\n  if (r.basicInfo && typeof r.basicInfo === 'object') {\n    const bi = Object.assign({}, r.basicInfo);\n    delete bi.multimedia;\n    delete bi.description;\n    delete bi.contactInfo;\n    r.basicInfo = bi;\n  }\n\n  if (r.contactInfo && typeof r.contactInfo === 'object') {\n    const ci = Object.assign({}, r.contactInfo);\n    delete ci.phone1;\n    delete ci.phone2;\n    if (ci.userType === 'private' && ci.professional !== true) {\n      delete ci.contactName;\n      delete ci.profilePicture;\n    }\n    r.contactInfo = ci;\n  }\n  return r;\n}\n\nconst anuncios = [];\nfor (const it of $input.all()) {\n  const lista = Array.isArray(it.json) ? it.json : [it.json];\n  for (const x of lista) {\n    if (x && typeof x === 'object' && x.anuncio && typeof x.anuncio === 'object') {\n      if (x.anuncio.adid) anuncios.push(Object.assign({}, x, { anuncio: recortar(x.anuncio) }));\n    } else if (x && typeof x === 'object' && x.adid) {\n      anuncios.push(recortar(x));\n    }\n  }\n}\n\nif (!anuncios.length) return [];\nreturn [{ json: { anuncios } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        170
+      ],
+      "id": "b7b7e151-c4e1-43ec-9697-1dbf9a346fec",
+      "name": "Recortar para Mercado"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://test-n8n.pzkz6e.easypanel.host/webhook/mercado-ingesta",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        170
+      ],
+      "id": "e9ce14ca-beae-42db-b55e-60378266af0d",
+      "name": "Enviar a Mercado",
       "onError": "continueRegularOutput",
-      "notes": "Una llamada POR ZONA, con el recuento que le corresponde. Antes era un solo PATCH a activa=eq.true que escribia el mismo total en todas: con dos zonas, el panel mentia en las dos y una zona muda era indistinguible de una productiva."
+      "notes": "Manda todos los anuncios de la pasada (agencias incluidas) a VAL 02, que guarda en mercado_inmuebles la venta de viviendas de Valencia. Si falla no para al captador.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -486,7 +566,7 @@
       "main": [
         [
           {
-            "node": "Apify Scrapear Zonas",
+            "node": "Hay que scrapear?",
             "type": "main",
             "index": 0
           }
@@ -503,6 +583,11 @@
           },
           {
             "node": "Reparto por Zona",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Recortar para Mercado",
             "type": "main",
             "index": 0
           }
@@ -525,6 +610,29 @@
         [
           {
             "node": "Enviar a Ingesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hay que scrapear?": {
+      "main": [
+        [
+          {
+            "node": "Apify Scrapear Zonas",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Recortar para Mercado": {
+      "main": [
+        [
+          {
+            "node": "Enviar a Mercado",
             "type": "main",
             "index": 0
           }

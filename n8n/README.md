@@ -4,10 +4,15 @@ Cinco workflows que alimentan la página **Captaciones** del CRM. Sustituyen a l
 cuatro anteriores (`Idealista Scraper (Venta)`, `Auto-Contacto (Venta)`,
 `Generador Mensaje IA (Venta)` y `Flujo 4 - Clasificar Respuestas WhatsApp`).
 
+El sexto JSON, `6-valorador-guardar-en-mercado.json` (**VAL 02**), no es del captador
+pero come de él: guarda en el mercado del valorador todo lo que descarga el workflow 1,
+agencias incluidas (punto 10).
+
 ```
 ┌─ 1 · Scraper ─────────────────────────────────────────────────────┐
 │ cada 30 min (9-21h) + red de seguridad diaria 07:00               │
 │ presupuesto Apify → zonas activas → 1 run multi-URL → normalizar  │
+│ rama aparte: el lote entero, agencias incluidas → 6 · VAL 02      │
 └────────────────────────────┬──────────────────────────────────────┘
                              │ 1 llamada por inmueble
 ┌─ 2 · Ingesta ───────────────▼─────────────────────────────────────┐
@@ -28,6 +33,11 @@ cuatro anteriores (`Idealista Scraper (Venta)`, `Auto-Contacto (Venta)`,
 ┌─ 5 · Clasificar respuestas ───────────────────────────────────────┐
 │ webhook de Evolution cuando el propietario CONTESTA               │
 │ hilo de conversación → GPT → estado_whatsapp + estado_crm + lead  │
+└───────────────────────────────────────────────────────────────────┘
+
+┌─ 6 · VAL 02 · Guardar en mercado ─────────────────────────────────┐
+│ webhook que llama el 1 · solo venta de viviendas en València      │
+│ barrio + mapeo → upsert mercado_inmuebles (el del valorador)      │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -144,14 +154,15 @@ EVO_API_URL / EVO_API_KEY / EVO_INSTANCE   # ya existen
 
 1. **Desactiva los cuatro workflows antiguos.** Los nuevos 4 y 5 reutilizan las rutas
    `ia-lead-gen` y `evolution-respuesta-wa`, y n8n no admite dos activos con la misma.
-2. Importa los cinco JSON de esta carpeta.
+2. Importa los JSON de esta carpeta (el 6 es VAL 02: antes, la migración 038, ver
+   punto 10).
 3. Abre cada nodo con credencial y confirma que está seleccionada.
 4. **Configura la cabecera en Evolution** antes de activar el workflow 5: en la config
    del webhook de tu instancia, añade `x-evolution-secret` con el valor de la
    credencial. Si tu versión de Evolution no soporta cabeceras propias, quita
    `authentication` del nodo `Webhook Respuesta WA` — es preferible un webhook abierto
    a dejar de clasificar todas las respuestas en silencio.
-5. Actívalos en orden **4 → 2 → 5 → 3 → 1** (los que reciben, antes que los que llaman).
+5. Actívalos en orden **6 → 4 → 2 → 5 → 3 → 1** (los que reciben, antes que los que llaman).
 6. En el CRM: Captaciones → Configuración → activa zonas y sube el auto-contacto.
 
 Los workflows llegan con `active: false` a propósito.
@@ -163,38 +174,64 @@ Los workflows llegan con `active: false` a propósito.
 La cuenta es plan **STARTER** con tope duro de 19 $/mes. Cuando se agota, Apify
 corta los runs: el captador se quedaría mudo el día 20 sin avisar.
 
-**Tarifas** (pago por evento):
+**Tarifas** del actor `memo23/idealista-scraper` (pago por evento, vigentes desde el
+26/08/2026):
 
 | Evento | Precio |
 |---|---|
-| Arranque del actor | $0.007 por run (memoria 512 MB = 1 evento) |
-| Fila de resultado | $0.001 |
-| Sobrecoste de `monitoringMode` | +$0.001 por fila emitida |
+| Arranque del actor | $0.007 por run |
+| Anuncio entregado (fila de resultado) | $0.00085 |
+| Anuncio leído del índice del listado | $0.0001 |
+| Cambio de precio o baja detectados | $0.001 |
+| Recorrer anuncios ya vistos con `monitoringMode` | gratis |
 
-**Estimación con la configuración por defecto** (3 zonas activas, filtro
-*solo particulares* puesto, ~15 anuncios nuevos por zona y día):
-
-| Concepto | Cálculo | Mes |
-|---|---|---|
-| Arranques | 26 runs/día × 30 × $0.007 | $5.46 |
-| Modo rápido (solo nuevos) | 45 filas/día × 30 × $0.002 | $2.70 |
-| Red de seguridad (48 h, sin monitoring) | ~90 filas/día × 30 × $0.001 | $2.70 |
-| **Total** | | **≈ $10.9** |
-
-Quedan ~$8 de margen. **Sin el filtro `de-particulares` esto se va por encima de
-los $19**: pagarías las filas de agencia, que son la gran mayoría de los anuncios,
-para tirarlas después en el nodo de normalizado.
+**Lo que cuesta de verdad** (17/09/2026): una pasada ronda los **$0.008**, unos
+**$0.22 al día**. El gasto gordo del ciclo fue la primera semana, con los barridos
+completos; con `monitoringMode` casi todo lo que se recorre ya está visto y no se
+cobra. Las filas de agencia se pagan igual que las de particular (el filtro
+`de-particulares` no existe, ver punto 9), y desde el 17/09 ya no se tiran: van al
+mercado del valorador (punto 10) sin coste extra.
 
 ### Los tres frenos
 
-1. **Guardarraíl de ritmo** (nodo `Control de Presupuesto`). Antes de cada pasada
-   consulta el gasto real en Apify y lo compara con lo que tocaría a estas alturas
-   del ciclo. Si va por delante, salta la pasada. Reserva $2 intocables.
+1. **Tope duro** (nodo `Control de Presupuesto`). Antes de cada pasada consulta el
+   gasto real en Apify y, si llega a $17 (`LIMITE_CUENTA` 19 menos `RESERVA` 2), no
+   hay pasada. Si no consigue leer el gasto, tampoco: falla cerrado.
 2. **`maxTotalChargeUsd` por run**: $0.35 en modo rápido, $1.00 en la red de
    seguridad. Es un tope que aplica Apify, no n8n.
 3. **`maxItems`**: 150 en modo rápido, 400 en la red de seguridad.
 
+Hasta el 17/09/2026 había un cuarto, el **guardarraíl de ritmo**: repartía el
+presupuesto a partes iguales por el ciclo y saltaba la pasada si el gasto iba "por
+delante del ritmo". Se quitó porque se quedaba días parado cobrándose el gasto de la
+primera semana, que no se va a repetir.
+
 El gasto se publica en `app_settings.apify_uso_mes` y se ve en el panel del CRM.
+
+### La red de seguridad de las 07:00
+
+Corre de lunes a sábado **sin** `monitoringMode`: reemite todo lo de la ventana de cada
+zona y Supabase deduplica, para repescar un anuncio cuya ingesta falló. No toca las
+zonas de **barrido** (`ventana_horas = 0`): sin ventana, "todo" sería el catálogo
+entero de Valencia cada mañana.
+
+Como todas las zonas activas son de barrido, no quedaba nada que mandar a Apify y la
+ejecución de las 07:00 **fallaba cada mañana desde el 11/09**. Arreglado el 17/09:
+`Preparar Input Apify` devuelve `saltar: true` y el IF `Hay que scrapear?` se salta
+Apify. Termina sin error y sin gastar.
+
+### `monitoringMode` recuerda por cuenta, no por workflow
+
+La memoria de "ya visto" es **una por cuenta de Apify**, no por workflow ni por URL:
+cada anuncio se entrega una sola vez, al primer run que lo ve. El captador pasa cada
+30 min, así que se quedaba con las novedades y tiraba las de agencia (~90%) en el
+normalizado, y el valorador, con el mismo actor, ya no las veía: de 3.393 anuncios
+que vio el captador desde el 08/09, solo 2 estaban en `mercado_inmuebles`. Por eso
+el workflow 1 manda ahora el lote entero a VAL 02.
+
+**Cualquier workflow nuevo con este actor en esta cuenta y `monitoringMode` no va a
+ver lo que ya vio otro.** Si necesita esos anuncios, o se los pasa quien los vio
+primero, o corre sin monitoring y los paga.
 
 ### Palancas para ampliar
 
@@ -337,7 +374,10 @@ descripción muy escueta) se añade al gancho como detalle real de apoyo.
 
 - **`Subdistrict`**: Idealista devuelve el barrio como `Subdistrict Els Orriols`. Ese
   prefijo en inglés se colaba literal en el mensaje al propietario y delataba que era
-  automático. Se limpia solo para redactar; el valor guardado no se toca.
+  automático. Desde el 17/09/2026 se guarda ya limpio: lo quita "Normalizar Inmuebles"
+  (workflow 1) y, por si entra por otra puerta, el trigger de la migración 037. La
+  limpieza de aquí se queda como segunda red: no hace nada sobre un valor limpio y
+  `raw_data` sigue trayendo el prefijo.
 - **`No especificada`**: el scraper antiguo guardaba ese literal en vez de dejar el
   campo vacío. Pasárselo al modelo solo servía para que escribiera "su piso, planta no
   especificada".
@@ -430,6 +470,8 @@ minutos*. Ahora la ventana se inyecta siempre, y si la URL ya trae otros filtros
    IS NOT NULL AND telefono !~ '^34[6-9][0-9]{8}$'` debería ser bajo. Lo que quede son
    números extranjeros o texto y hay que revisarlos a mano.
 7. **CRM** → el panel de configuración muestra el gasto de Apify y la cola.
+8. **VAL 02** → tras una pasada del WF1 con anuncios, hay una ejecución de VAL 02 y
+   en `Barrio + Mapeo` se ve el `resumen` (recibidos, fuera de ámbito, filas).
 
 ### Lo que las URLs de Idealista aceptan y lo que no
 
@@ -460,3 +502,40 @@ descubrió al activar la de locales: la de viviendas se apagó sola. Venía del 
 viejo, cuando cada zona era un run de Apify aparte. Ahora todas las zonas activas
 viajan en el **mismo** run, así que el arranque del actor se paga una sola vez tanto
 con una zona como con cuatro. La migración 004 borra ese trigger.
+
+---
+
+## 10. VAL 02 · Guardar en mercado
+
+`6-valorador-guardar-en-mercado.json`. No es del captador: llena `mercado_inmuebles`,
+la tabla del valorador (`docs/valorador.md`). Pero come de él, por lo del punto 4: con
+la memoria de `monitoringMode` compartida, lo que ve el captador no lo ve nadie más.
+
+```
+Webhook Mercado   POST /webhook/mercado-ingesta · credencial n8n Interno
+  → Fetch Barrios   geojson del CRM, 3 reintentos
+  → Barrio + Mapeo
+  → Supabase Upsert on_conflict=idealista_id · merge-duplicates
+```
+
+**Quién lo llama.** Una rama aparte del workflow 1: `Apify Scrapear Zonas` →
+`Recortar para Mercado` → `Enviar a Mercado`, con **todos** los anuncios de la pasada.
+`Recortar para Mercado` quita lo pesado (fotos, textos repetidos), los teléfonos y, en
+los particulares, el nombre y la foto del propietario. `Enviar a Mercado` sigue aunque
+falle: un fallo del mercado nunca para las captaciones. En Apify no cuesta nada más:
+esos anuncios ya estaban pagados.
+
+**Ámbito.** Solo venta de viviendas en la ciudad de València (`operation` sale,
+`propertyType` homes, nivel 2 `València`). Lo demás se descarta sin error y se cuenta
+en `resumen.fuera_de_ambito`. Quedan fuera también las pedanías a las que Idealista da
+nivel 2 propio (El Saler, El Perellonet, Pinedo…) y el área metropolitana.
+
+**Sin claves en el JSON.** Supabase va con `Supabase mkgenia (service_role)` y el
+webhook con `n8n Interno (x-webhook-secret)`, las dos del punto 2.
+
+**Antes de activarlo, la migración 038**: añade `descripcion` y `num_fotos`, que VAL 02
+manda, y sin esas columnas PostgREST rechaza el lote entero. Y VAL 02 activo antes que
+el workflow 1, que es quien lo llama.
+
+Qué campo va a qué columna, los arreglos respecto al VAL 01 antiguo y lo que hace la
+038 con cada cambio: `docs/valorador.md`, puntos 2 y 4.

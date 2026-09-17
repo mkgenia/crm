@@ -1,0 +1,159 @@
+{
+  "name": "VAL 02 · Guardar en mercado (webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mercado-ingesta",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "b41f3093-faad-4de3-9c33-dae96e53ff82",
+      "name": "Webhook Mercado",
+      "webhookId": "d627250d-d2b1-4cdb-a83d-3ccb3cd9a659",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "N8N_INTERNO",
+          "name": "n8n Interno (x-webhook-secret)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://crm.mkgenia.com/valencia-barrios.geojson",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "7acdea4b-80fc-4345-a8ca-32fffc6841f8",
+      "name": "Fetch Barrios",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ============================================================\n// VAL 02 · Guardar en mercado — nodo \"Barrio + Mapeo\"\n// (Code, \"Run Once for All Items\")\n//\n// QUÉ HACE.\n// Recibe por el webhook TODO lo que descarga el captador (CAP 01), también las\n// agencias que el captador tira, y lo convierte en filas de mercado_inmuebles\n// con su barrio. El nodo siguiente las sube de una vez con\n// POST /mercado_inmuebles?on_conflict=idealista_id (upsert, merge-duplicates).\n//\n// DE DÓNDE SALE.\n// Es el \"Barrio + Mapeo\" de VAL 01 con los arreglos del 17/09/2026, comprobados\n// contra los 3.925 anuncios rescatados del captador (del 8 al 17/09; 1.684 de\n// venta de viviendas en València, 1.507 anuncios distintos):\n//  - planta salía SIEMPRE null porque leía l.floor, que no existe. La buena es\n//    moreCharacteristics.floor (1.506 de 1.684); basicInfo.floor añade 1 más.\n//  - obra_nueva salía SIEMPRE null porque leía l.newDevelopment, que no existe.\n//    basicInfo.newDevelopment sólo viene en 793 de 1.684 (el actor da dos formas\n//    de anuncio: con basicInfo completo y con basicInfo de 5 claves). Para el\n//    resto vale moreCharacteristics.status === 'newdevelopment': en los 793 que\n//    traen las dos coinciden 792, y el que no, no trae status pero sí promotion.\n//  - imagen_url caía a l.thumbnail, que no existe: está en basicInfo.thumbnail.\n//  - ascensor, exterior y trastero leían sólo una ruta; se añade la de basicInfo\n//    por si el actor cambia (hoy no añade ninguna fila, pero no contradice nunca).\n//  - tour360 leía has360VHS, que es false en el 100 %; la marca de verdad es\n//    basicInfo.has360 (52 true). Sin basicInfo completo queda null (no se sabe).\n//  - orientacion sigue null: el actor no la da en ninguna ruta (revisadas todas\n//    las claves). Se deja la clave para no cambiar la forma de caracteristicas.\n//  - NUEVAS: descripcion (propertyComment, 1.673 de 1.684; basicInfo.description\n//    NO sirve, es otro texto, traducido) y num_fotos (multimedia.images.length,\n//    igual a basicInfo.numPhotos en los 780 que traen los dos).\n//  - barrio por nombre: el nivel 4 de Idealista no siempre se escribe como el\n//    geojson ('El Cabanyal-El Canyamelar' / 'CABANYAL-CANYAMELAR', 'Playa de la\n//    Malvarrosa' / 'LA MALVA-ROSA'...). Sólo se usa si el punto cae fuera de todos\n//    los polígonos, pero eran justo los 4 de 1.507 que se quedaban sin codbarrio\n//    (pisos de primera línea de playa). Se añade una tabla corta de equivalencias.\n//  - caracteristicas.ocupacion: 'tenanted' / 'illegallyOccupied' /\n//    'bareOwnership' sale de las etiquetas occupation.* (125 de 1.684). Son pisos\n//    alquilados, okupados o en nuda propiedad: se venden con descuento y\n//    ensucian la mediana del barrio. Va en el cajón jsonb, no pide migración.\n//\n// ÁMBITO (por ahora).\n// Sólo venta de viviendas en la ciudad de València: operation 'sale',\n// propertyType 'homes' y ubication.administrativeAreaLevel2 'València'. En los\n// datos sólo aparece esa grafía, pero se compara sin acentos ni mayúsculas y\n// partiendo por '/' (\"Valencia/València\") por si Idealista cambia de idioma.\n// OJO: las pedanías (El Saler, El Perellonet, Pinedo, El Palmar, Massarrojos,\n// Benifaraig...) son municipio de València y están en el geojson, pero Idealista\n// les da nivel 2 propio, así que quedan fuera (65 anuncios del rescate).\n// Además, como en VAL 01, hace falta adid, precio y metros construidos.\n//\n// ENTRADA.\n// $('Webhook Mercado').first().json.body.anuncios: array de anuncios de Idealista\n// tal cual (CAP 01, ya recortados) o envueltos {vista_en, anuncio} (el rescate).\n// Si no hay array, se lanza error: es un envío roto y tiene que verse.\n//\n// SALIDA.\n// UN solo item {count, records, resumen}. El nodo \"Supabase Upsert\" hace\n// JSON.stringify($json.records): un único POST con todas las filas. Todas las\n// filas llevan exactamente las mismas claves (PostgREST lo exige en bloque).\n// Si no queda ninguna fila se devuelve [] y el POST no se ejecuta.\n//\n// FECHAS Y ACTIVO.\n//  - fecha_ultima_vista = vista_en del envoltorio, o ahora si viene crudo.\n//  - fecha_primera_vista NO se envía. El upsert manda el mismo cuerpo para\n//    insertar y para actualizar, así que si se enviara machacaría la fecha real\n//    de los que ya están. Al no ir en el cuerpo, al insertar coge el DEFAULT now()\n//    de la columna y al actualizar no se toca. Lo que se pierde: las filas del\n//    rescate quedan con la fecha del día en que se carga, no la del 8 al 17/09.\n//  - activo = true: si el anuncio llega, está publicado. Si estaba de baja, el\n//    trigger mercado_marcar_baja limpia fecha_baja y precio_baja.\n//  - precio_m2 NO se envía: es columna generada (precio / metros).\n//\n// DUPLICADOS.\n// Si un mismo idealista_id llega varias veces en el envío, se queda el de\n// vista_en más reciente (a igualdad, el último). Hace falta: Postgres rechaza un\n// upsert que toca la misma fila dos veces (\"cannot affect row a second time\").\n// El rescate viene ordenado de más nuevo a más viejo, así que \"el último\" no vale.\n// OJO: esto sólo mira DENTRO de un envío. Si el rescate se manda en lotes, tiene\n// que ir de más viejo a más nuevo (o deduplicado antes): en el orden del fichero,\n// en lotes de 150, 170 filas acabarían con una captura vieja y 3 con precio viejo.\n// Y mandarlos en orden no basta si el webhook contesta al recibir: n8n puede\n// tener dos ejecuciones de VAL 02 a la vez y la de un lote viejo terminar\n// después. O se espera a que acabe cada ejecución antes de mandar el siguiente\n// lote, o se deduplica antes. El upsert NO mira si lo que ya hay es más nuevo:\n// una captura vieja pisa precio, fecha_ultima_vista y todo lo demás.\n//\n// FORMA CORTA DEL ANUNCIO (revisado el 17/09/2026).\n// El actor da anuncios con basicInfo completo y con basicInfo de 5 claves. En\n// los que traen las dos rutas, moreCharacteristics y basicInfo coinciden en\n// TODOS los campos (planta, ascensor, exterior, trastero, piscina, jardín,\n// estado, habitaciones, baños, metros), así que cambiar de forma no inventa\n// cambios. Pero terraza, aire, parking y tour360 sólo vienen en la forma\n// completa: si una captura corta llega después de una completa, el upsert los\n// deja en null. El trigger de la 038 no apunta el paso a null, así que no ensucia\n// el historial, pero el dato se pierde hasta la siguiente captura completa. Hoy\n// VAL 01 guardaba la forma completa (terraza rellena en 1.367 de 2.156 filas) y\n// en el rescate de CAP 01 son cortas 891 de las 1.684 capturas del ámbito.\n//\n// DATOS RAROS. Un solo valor que Postgres no acepte tumba el POST entero, y el\n// reintento vuelve a fallar igual. Por eso: lat/lng vacíos o 0 van a null (antes\n// Number(null) daba 0 y el piso se guardaba en el punto 0,0); precio y metros\n// tienen que ser mayores que 0; habitaciones, baños y fotos, enteros no\n// negativos; planta sólo de texto o número; y al texto libre (descripción,\n// nombre de agencia) se le quita el carácter nulo y los medios emojis sueltos,\n// que Postgres rechaza.\n//\n// ANTES DE ACTIVAR.\n// descripcion y num_fotos no existen aún en mercado_inmuebles (el 17/09/2026 un\n// GET da 42703). Sin la migración, PostgREST rechaza el POST entero.\n//\n// GEOJSON.\n// Si llega sin barrios (0 features) se LANZA error: la ejecución falla, n8n\n// guarda el envío en el registro de ejecuciones fallidas y se puede reintentar.\n// ============================================================\n\nlet geo = $('Fetch Barrios').first().json;\nif (typeof geo === 'string') { try { geo = JSON.parse(geo); } catch (e) {} }\nelse if (geo && typeof geo.data === 'string') { try { geo = JSON.parse(geo.data); } catch (e) {} }\n// Una feature sin properties o sin geometry no rompe el nodo: se salta.\nconst feats = (geo && Array.isArray(geo.features) ? geo.features : []).filter(f => f && f.properties);\nif (!feats.length) { throw new Error('Geojson de barrios no cargado (0 features) — abortado para NO insertar filas sin zona'); }\n\n// El cuerpo del webhook: n8n lo da ya parseado si llega como application/json.\nlet body = $('Webhook Mercado').first().json.body;\nif (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) {} }\nconst entrada = Array.isArray(body) ? body : (body && body.anuncios);\nif (!Array.isArray(entrada)) {\n  throw new Error('Webhook Mercado sin body.anuncios (array) — envío mal formado, revisa CAP 01');\n}\n\n// Idealista da el nivel 4 en inglés: \"Subdistrict Aiora\". Sin quitarlo no casa con\n// ningún nombre del geojson y la fila se queda sin codbarrio (fuera de las stats).\n// Mismo patrón que el captador (wf 1 y 4): espacio literal, sin distinguir mayúsculas.\nfunction sinPrefijo(b){ return String(b == null ? '' : b).replace(/^(sub)?district +/i, '').trim(); }\nfunction norm(s){\n  return (s||'').toString().toUpperCase()\n    .normalize('NFD').replace(/[\\u0300-\\u036f]/g,'')\n    .replace(/^(EL |LA |LES |ELS |LO |LOS |LAS )/,'')\n    .replace(/[^A-Z0-9]/g,'').trim();\n}\nconst byName = {};\nfor (const f of feats) byName[norm(f.properties.nombre)] = f.properties;\n// Nombre de Idealista (ya normalizado) -> nombre del geojson (normalizado).\n// Sacadas del rescate del 17/09/2026; sólo las que no dejan duda. 'Nou Benicalap'\n// y 'Nou Campanar' NO: no son barrios oficiales y caen a caballo de dos.\nconst ALIAS = {\n  CABANYALELCANYAMELAR: 'CABANYALCANYAMELAR',   // El Cabanyal-El Canyamelar\n  PLAYADELAMALVARROSA: 'MALVAROSA',             // Playa de la Malvarrosa\n  BARRIODEFAVARA: 'FAVARA',                     // Barrio de Favara\n  FONTETADESANTLLUIS: 'FONTETASLLUIS',          // Fonteta de Sant Lluís\n  SANTLLORENC: 'SANTLLORENS',                   // Sant Llorenç\n  CAMIREIAL: 'CAMIREAL'                         // Camí Reial\n};\nfunction porNombre(n4){\n  const k = norm(sinPrefijo(n4));\n  return byName[k] || byName[ALIAS[k]] || null;\n}\n\nfunction ringContains(ring, lng, lat){\n  let inside=false;\n  for(let i=0,j=ring.length-1;i<ring.length;j=i++){\n    const xi=ring[i][0],yi=ring[i][1],xj=ring[j][0],yj=ring[j][1];\n    if(((yi>lat)!==(yj>lat)) && (lng < ((xj-xi)*(lat-yi))/(yj-yi)+xi)) inside=!inside;\n  }\n  return inside;\n}\nfunction polyContains(coords,lng,lat){\n  if(!coords.length) return false;\n  if(!ringContains(coords[0],lng,lat)) return false;\n  for(let k=1;k<coords.length;k++) if(ringContains(coords[k],lng,lat)) return false;\n  return true;\n}\nfunction findByPoint(lng,lat){\n  for(const f of feats){\n    const g=f.geometry; if(!g || !Array.isArray(g.coordinates)) continue;\n    if(g.type==='Polygon' && polyContains(g.coordinates,lng,lat)) return f.properties;\n    if(g.type==='MultiPolygon') for(const poly of g.coordinates) if(polyContains(poly,lng,lat)) return f.properties;\n  }\n  return null;\n}\n\n// \"València\" sin acentos ni mayúsculas; vale también \"Valencia/València\".\nfunction esValenciaCiudad(v){\n  return String(v == null ? '' : v).split('/').some(p =>\n    p.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').trim().toUpperCase() === 'VALENCIA');\n}\n\nconst bool = (v) => (v === true || v === false) ? v : null;\nconst primero = (...vs) => { for (const v of vs) if (v !== undefined && v !== null) return v; return null; };\nconst num = (v) => { if (v === undefined || v === null || v === '') return null; const n = Number(v); return isFinite(n) ? n : null; };\n// habitaciones y banos son integer: un valor no entero tumbaría el POST entero.\nconst entero = (v) => { const n = num(v); return (n !== null && Number.isInteger(n) && n >= 0) ? n : null; };\n// planta es text: sólo texto o número ('bj', 'en', 'ss', '-1', 3...). Un true o un\n// objeto acabarían guardados como 'true' o '[object Object]'.\nconst texto = (v) => (typeof v === 'string' || (typeof v === 'number' && isFinite(v))) ? (String(v).trim() || null) : null;\n// Texto libre: fuera el carácter nulo y las mitades de emoji sueltas (Postgres no\n// acepta ni una ni otra y rechazaría el lote entero).\nconst limpio = (s) => (typeof s === 'string')\n  ? s.replace(/\\u0000/g, '').replace(/[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?<![\\ud800-\\udbff])[\\udc00-\\udfff]/g, '')\n  : s;\n\nconst ahoraIso = new Date().toISOString();\nconst resumen = { recibidos: entrada.length, fuera_de_ambito: 0, sin_precio_o_metros: 0, duplicados: 0, sin_codbarrio: 0, filas: 0 };\nconst porId = new Map();   // idealista_id -> { rec, t }\n\nfor (const x of entrada) {\n  const envuelto = !!(x && typeof x === 'object' && x.anuncio && typeof x.anuncio === 'object');\n  const l = envuelto ? x.anuncio : x;\n  const ub = (l && l.ubication) || {};\n  if (!l || l.operation !== 'sale' || l.propertyType !== 'homes' || !esValenciaCiudad(ub.administrativeAreaLevel2)) {\n    resumen.fuera_de_ambito++;\n    continue;\n  }\n\n  const tVista = envuelto && x.vista_en ? Date.parse(x.vista_en) : NaN;\n  const vista = isFinite(tVista) ? new Date(tVista).toISOString() : ahoraIso;\n\n  const mc = l.moreCharacteristics || {};\n  const ci = l.contactInfo || {};\n  const bi = l.basicInfo || {};\n  const ft = bi.features || l.features || {};\n  const pk = bi.parkingSpace || l.parkingSpace || {};\n  const mm = l.multimedia || {};\n  const imgs = Array.isArray(mm.images) ? mm.images : null;\n\n  const precio = num(l.price);\n  const metros = num(primero(mc.constructedArea, l.constructedArea));\n  if (!l.adid || !(precio > 0) || !(metros > 0)) { resumen.sin_precio_o_metros++; continue; }\n\n  const lat = num(primero(ub.latitude, l.latitude));\n  const lng = num(primero(ub.longitude, l.longitude));\n  const hayPunto = lat !== null && lng !== null && !(lat === 0 && lng === 0)\n    && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;\n  let barrio = hayPunto ? findByPoint(lng, lat) : null;\n  if(!barrio && ub.administrativeAreaLevel4) barrio = porNombre(ub.administrativeAreaLevel4);\n\n  const esPro = ci.professional === true || (ci.userType && ci.userType !== 'private');\n  const etiquetas = [].concat(Array.isArray(l.labels) ? l.labels : [], Array.isArray(bi.labels) ? bi.labels : []);\n  const ocupacion = etiquetas.map(e => e && e.name).find(n => typeof n === 'string' && n.indexOf('occupation.') === 0);\n\n  const carac = {\n    usable_area: num(mc.usableArea),\n    exterior: primero(bool(mc.exterior), bool(bi.exterior)),\n    flat_location: mc.flatLocation || null,\n    energia: mc.energyCertificationType || null,\n    energia_kwh: num(mc.energyPerformance),\n    piscina: bool(mc.swimmingPool),\n    jardin: bool(mc.garden),\n    trastero: primero(bool(mc.boxroom), bool(ft.hasBoxRoom)),\n    parking: bool(pk.hasParkingSpace),\n    parking_incluido: bool(pk.isParkingSpaceIncludedInPrice),\n    parking_precio: num(pk.parkingSpacePrice),\n    terraza: bool(ft.hasTerrace != null ? ft.hasTerrace : ft.terrace),\n    balcon: bool(ft.hasBalcony != null ? ft.hasBalcony : ft.balcony),\n    aire: bool(ft.hasAirConditioning != null ? ft.hasAirConditioning : ft.airConditioning),\n    piscina_ft: bool(ft.hasSwimmingPool),\n    jardin_ft: bool(ft.hasGarden),\n    amueblado: mc.housingFurnitures || null,\n    gastos_comunidad: num(mc.communityCosts),\n    orientacion: l.orientation || mc.orientation || null,\n    obra_nueva: primero(\n      bool(bi.newDevelopment),\n      bool(l.newDevelopment),\n      mc.status ? mc.status === 'newdevelopment' : null,\n      l.promotion ? true : null\n    ),\n    tour360: bool(bi.has360),\n    tipo_detallado: l.extendedPropertyType || (l.detailedType && l.detailedType.typology) || null,\n    home_type: l.homeType || null,\n    estado_raw: mc.status || null,\n    ocupacion: ocupacion ? ocupacion.slice('occupation.'.length) : null\n  };\n\n  const rec = {\n    idealista_id: String(l.adid),\n    operacion: (l.operation === 'rent') ? 'alquiler' : 'venta',\n    tipo: l.propertyType || null,\n    codbarrio: barrio ? barrio.codbarrio : null,\n    barrio: barrio ? barrio.nombre : (sinPrefijo(ub.administrativeAreaLevel4) || null),\n    lat: hayPunto ? lat : null,\n    lng: hayPunto ? lng : null,\n    precio: precio,\n    metros: metros,\n    habitaciones: entero(primero(mc.roomNumber, l.roomNumber)),\n    banos: entero(primero(mc.bathNumber, l.bathNumber)),\n    planta: primero(texto(mc.floor), texto(bi.floor), texto(l.floor)),\n    ascensor: primero(bool(mc.lift), bool(bi.hasLift), bool(l.hasLift), bool(l.lift)),\n    estado_conservacion: mc.status || bi.status || l.status || null,\n    anunciante: esPro ? 'agencia' : 'particular',\n    agencia_nombre: esPro ? (limpio(ci.commercialName || ci.contactName) || null) : null,\n    imagen_url: (imgs && imgs[0] && imgs[0].url) || bi.thumbnail || l.thumbnail || null,\n    num_fotos: imgs ? imgs.length : entero(primero(bi.numPhotos, l.numPhotos)),\n    descripcion: (typeof l.propertyComment === 'string' && limpio(l.propertyComment).trim()) ? limpio(l.propertyComment) : null,\n    usable_area: carac.usable_area,\n    exterior: carac.exterior,\n    energia: carac.energia,\n    energia_kwh: carac.energia_kwh,\n    piscina: (carac.piscina === true || carac.piscina_ft === true) ? true : primero(carac.piscina, carac.piscina_ft),\n    jardin: (carac.jardin === true || carac.jardin_ft === true) ? true : primero(carac.jardin, carac.jardin_ft),\n    trastero: carac.trastero,\n    parking: carac.parking,\n    terraza: carac.terraza,\n    aire: carac.aire,\n    gastos_comunidad: carac.gastos_comunidad,\n    obra_nueva: carac.obra_nueva,\n    tipo_detallado: carac.tipo_detallado,\n    caracteristicas: carac,\n    activo: true,\n    fecha_ultima_vista: vista\n  };\n\n  const tRec = Date.parse(vista);\n  const previo = porId.get(rec.idealista_id);\n  if (previo) {\n    resumen.duplicados++;\n    if (tRec < previo.t) continue;   // el que ya había es más nuevo\n  }\n  porId.set(rec.idealista_id, { rec, t: tRec });\n}\n\nconst records = Array.from(porId.values()).map(v => v.rec);\nresumen.filas = records.length;\nresumen.sin_codbarrio = records.filter(r => !r.codbarrio).length;\n\nif (!records.length) return [];\nreturn [{ json: { count: records.length, records, resumen } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "5f0cae3e-e18c-404e-8069-b75325255bd2",
+      "name": "Barrio + Mapeo"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://anrivljsatpzwbwhaxsk.supabase.co/rest/v1/mercado_inmuebles?on_conflict=idealista_id",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.records) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "fe72a92e-cbc1-4188-b182-901182386933",
+      "name": "Supabase Upsert",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "SUPABASE_MKGENIA",
+          "name": "Supabase mkgenia (service_role)"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Mercado": {
+      "main": [
+        [
+          {
+            "node": "Fetch Barrios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Barrios": {
+      "main": [
+        [
+          {
+            "node": "Barrio + Mapeo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Barrio + Mapeo": {
+      "main": [
+        [
+          {
+            "node": "Supabase Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false,
+    "callerPolicy": "workflowsFromSameOwner",
+    "timezone": "Europe/Madrid",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true
+  },
+  "tags": []
+}

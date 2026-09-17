@@ -1,6 +1,7 @@
 "use server"
 
 import { createClient, createAdminClient, createServiceClient } from "@/lib/supabase/server"
+import { traerTodo } from "@/lib/supabase/paginar"
 import { revalidatePath } from "next/cache"
 
 export type Operacion = "venta" | "alquiler"
@@ -21,14 +22,17 @@ function mediana(nums: number[]): number | null {
 // Coeficientes calculados a partir del mercado real (data-backed).
 export async function getFactoresMercado(operacion: Operacion = "venta"): Promise<FactoresMercado> {
   const supabase = await createAdminClient()
-  const { data } = await supabase
-    .from("mercado_inmuebles")
-    .select("ascensor, precio_m2")
-    .eq("operacion", operacion)
-    .eq("activo", true)
-    .not("precio_m2", "is", null)
+  // Paginado: a 17/09/2026 ya había 1.455 activos y PostgREST corta en 1.000
+  // sin avisar, así que la mediana salía de las mil filas que tocaran.
+  const rows = await traerTodo<{ ascensor: boolean | null; precio_m2: number }>(() =>
+    supabase
+      .from("mercado_inmuebles")
+      .select("ascensor, precio_m2")
+      .eq("operacion", operacion)
+      .eq("activo", true)
+      .not("precio_m2", "is", null)
+      .order("id", { ascending: true }))
 
-  const rows = (data ?? []) as { ascensor: boolean | null; precio_m2: number }[]
   const con = rows.filter((r) => r.ascensor === true).map((r) => r.precio_m2)
   const sin = rows.filter((r) => r.ascensor === false).map((r) => r.precio_m2)
   const mCon = mediana(con)
@@ -153,17 +157,44 @@ export async function getZonasStats(operacion: Operacion = "venta"): Promise<Zon
   return (data ?? []) as ZonaStat[]
 }
 
+// Cuántos ids caben en cada `in.(...)`. Con 1.400 comparables la URL pasaba de
+// 15.000 caracteres; así cada petición se queda en unos 2.000.
+const IDS_POR_CONSULTA = 150
+
+type FilaHistorial = {
+  idealista_id: string
+  precio_anterior: number | null
+  precio_nuevo: number | null
+  delta: number | null
+  pct: number | null
+  direccion: string | null
+  fecha: string
+  campo?: string | null
+}
+
 // Engancha a cada comparable su último cambio de precio (si lo hay)
 async function attachCambios(rows: ComparableInmueble[]): Promise<ComparableInmueble[]> {
   if (!rows.length) return rows
   const supabase = await createAdminClient()
-  const { data } = await supabase
-    .from("mercado_precio_historial")
-    .select("idealista_id, precio_anterior, precio_nuevo, delta, pct, direccion, fecha")
-    .in("idealista_id", rows.map((r) => r.idealista_id))
-    .order("fecha", { ascending: false })
+  const ids = [...new Set(rows.map((r) => r.idealista_id))]
+  const tandas: string[][] = []
+  for (let i = 0; i < ids.length; i += IDS_POR_CONSULTA) tandas.push(ids.slice(i, i + IDS_POR_CONSULTA))
+
+  // `*` y no la lista de columnas: si el historial gana una columna `campo` para
+  // apuntar cambios que no son de precio, esto sigue funcionando y los ignora.
+  const lotes = await Promise.all(tandas.map((tanda) =>
+    traerTodo<FilaHistorial>(() =>
+      supabase
+        .from("mercado_precio_historial")
+        .select("*")
+        .in("idealista_id", tanda)
+        .order("fecha", { ascending: false })
+        .order("id", { ascending: false }))))
+  const historial = lotes.flat().sort((a, b) => b.fecha.localeCompare(a.fecha))
+
   const map = new Map<string, ComparableInmueble["cambio"]>()
-  for (const h of data ?? []) {
+  for (const h of historial) {
+    if (h.campo && h.campo !== "precio") continue
     if (!map.has(h.idealista_id)) {
       map.set(h.idealista_id, {
         precio_anterior: h.precio_anterior, precio_nuevo: h.precio_nuevo,
@@ -180,16 +211,21 @@ export async function getComparablesBarrio(
   operacion: Operacion = "venta"
 ): Promise<ComparableInmueble[]> {
   const supabase = await createAdminClient()
-  const { data, error } = await supabase
-    .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, tipo_detallado, estado_conservacion, usable_area, exterior, energia, energia_kwh, piscina, jardin, trastero, parking, terraza, aire, gastos_comunidad, obra_nueva, caracteristicas, activo, precio_baja, fecha_baja")
-    .eq("codbarrio", codbarrio)
-    .eq("operacion", operacion)
-    .not("precio_m2", "is", null)
-    .order("precio_m2", { ascending: true })
-  if (error) return []
-  return attachCambios((data ?? []) as ComparableInmueble[])
+  const data = await traerTodo<ComparableInmueble>(() =>
+    supabase
+      .from("mercado_inmuebles")
+      .select(COLUMNAS_COMPARABLE)
+      .eq("codbarrio", codbarrio)
+      .eq("operacion", operacion)
+      .not("precio_m2", "is", null)
+      // `id` desempata: sin un orden total, dos pisos al mismo €/m² pueden
+      // cambiar de página entre una petición y la siguiente.
+      .order("precio_m2", { ascending: true })
+      .order("id", { ascending: true }))
+  return attachCambios(data)
 }
+
+const COLUMNAS_COMPARABLE = "id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, tipo_detallado, estado_conservacion, usable_area, exterior, energia, energia_kwh, piscina, jardin, trastero, parking, terraza, aire, gastos_comunidad, obra_nueva, caracteristicas, activo, precio_baja, fecha_baja"
 
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000 // metros
@@ -211,16 +247,19 @@ export async function getComparablesRadio(
   // Bounding box para reducir la consulta; luego se afina con haversine.
   const dLat = radioMetros / 111320
   const dLng = radioMetros / (111320 * Math.cos((lat * Math.PI) / 180) || 1)
-  const { data, error } = await supabase
-    .from("mercado_inmuebles")
-    .select("id, idealista_id, operacion, tipo, codbarrio, barrio, lat, lng, precio, metros, precio_m2, habitaciones, banos, planta, ascensor, anunciante, agencia_nombre, fecha_ultima_vista, imagen_url, tipo_detallado, estado_conservacion, usable_area, exterior, energia, energia_kwh, piscina, jardin, trastero, parking, terraza, aire, gastos_comunidad, obra_nueva, caracteristicas, activo, precio_baja, fecha_baja")
-    .eq("operacion", operacion)
-    .not("precio_m2", "is", null)
-    .not("lat", "is", null)
-    .gte("lat", lat - dLat).lte("lat", lat + dLat)
-    .gte("lng", lng - dLng).lte("lng", lng + dLng)
-  if (error) return []
-  const rows = (data ?? []) as ComparableInmueble[]
+  // Paginado. Sin esto PostgREST devolvía 1.000 filas cualesquiera de la caja:
+  // el 17/09/2026, a 2.500 m del Ayuntamiento la caja tenía 1.481 y se perdían
+  // 481 sin aviso, justo las que más pesan en una valoración de radio amplio.
+  const rows = await traerTodo<ComparableInmueble>(() =>
+    supabase
+      .from("mercado_inmuebles")
+      .select(COLUMNAS_COMPARABLE)
+      .eq("operacion", operacion)
+      .not("precio_m2", "is", null)
+      .not("lat", "is", null)
+      .gte("lat", lat - dLat).lte("lat", lat + dLat)
+      .gte("lng", lng - dLng).lte("lng", lng + dLng)
+      .order("id", { ascending: true }))
   const dentro = rows
     .filter((r) => r.lat != null && r.lng != null && haversine(lat, lng, r.lat, r.lng) <= radioMetros)
     .sort((a, b) => a.precio_m2 - b.precio_m2)

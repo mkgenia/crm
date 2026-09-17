@@ -15,7 +15,6 @@ export interface ApifyUso {
   gastado: number
   limite: number
   disponible: number
-  permitido_hoy: number
   progreso_ciclo: number
   ciclo_fin: string | null
   seguir: boolean

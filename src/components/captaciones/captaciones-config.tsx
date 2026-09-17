@@ -456,7 +456,7 @@ export function CaptacionesConfig({
               <div>
                 <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Presupuesto Apify</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  El captador se autorregula: salta pasadas si el gasto se adelanta al ritmo del ciclo.
+                  El captador sólo se para si se agota el presupuesto del mes.
                 </p>
               </div>
 
@@ -471,7 +471,7 @@ export function CaptacionesConfig({
                     <span className="text-xs text-muted-foreground tabular-nums">{uso.progreso_ciclo}% del ciclo</span>
                   </div>
 
-                  {/* Barra: gasto real sobre el límite, con marca del ritmo esperado */}
+                  {/* Barra: gasto real sobre el límite */}
                   <div className="relative h-2 rounded-full bg-border overflow-hidden">
                     <div
                       className={cn(
@@ -484,7 +484,7 @@ export function CaptacionesConfig({
 
                   <p className={cn("text-xs", uso.seguir ? "text-muted-foreground" : "text-orange-500 font-medium")}>
                     {uso.seguir
-                      ? `Dentro de ritmo · actualizado ${fmtHace(uso.actualizado)}`
+                      ? `Activo · actualizado ${fmtHace(uso.actualizado)}`
                       : `Pausado: ${uso.motivo}`}
                   </p>
                 </div>
