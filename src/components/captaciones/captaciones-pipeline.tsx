@@ -414,7 +414,10 @@ export function CaptacionesPipeline({ captaciones, onSelect, catalogos: catalogo
             </div>
 
             {/* Cards */}
-            <div className="flex-1 flex flex-col gap-2 p-2 min-h-[24rem] overflow-y-auto scrollbar-thin">
+            {/* Los hijos no encogen: con la columna llena, flex aplastaría las
+                tarjetas en vez de desplazar. Ver la nota de la ficha del
+                prospecto. */}
+            <div className="flex-1 flex flex-col gap-2 p-2 min-h-[24rem] overflow-y-auto scrollbar-thin [&>*]:shrink-0">
               {visibles.map((cap) => (
                 <PipelineCard
                   key={cap.id}

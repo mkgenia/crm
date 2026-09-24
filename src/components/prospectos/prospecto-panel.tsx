@@ -344,7 +344,21 @@ export function ProspectoPanel({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-5 flex flex-col gap-5">
+      {/* `[&>*]:shrink-0` NO es adorno: sin eso, en una ventana baja los dos
+          precios DESAPARECÍAN.
+
+          Esta columna es flex y con scroll. Cuando el contenido no cabe, flex
+          encoge a los hijos que puede antes de dejar que el contenedor se
+          desplace, y el bloque de los precios —una rejilla con
+          `overflow-hidden`— se aplasta hasta cero de alto: los números seguían
+          en el DOM y no se veían por ninguna parte. La tarjeta del historial se
+          quedaba en dos píxeles por lo mismo. Medido: con la ventana a 620 px,
+          el bloque de precios tenía 0 px de alto y el panel 658 px de contenido
+          en 491 de hueco.
+
+          Con esto ningún hijo encoge, el contenido sobra de verdad y el panel
+          hace lo que tiene que hacer, que es desplazarse. */}
+      <div className="flex-1 overflow-y-auto scrollbar-thin p-5 flex flex-col gap-5 [&>*]:shrink-0">
 
         {fallo && (
           <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 flex items-start gap-2">

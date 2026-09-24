@@ -60,7 +60,11 @@ export function EntradasVencidas({
         </div>
       </div>
 
-      <div className="p-3 flex flex-col gap-1.5 max-h-[22rem] overflow-y-auto scrollbar-thin">
+      {/* Los hijos no encogen: es una columna flex con scroll, y cuando las
+          entradas no caben flex las aplasta en vez de dejar que la caja se
+          desplace. Mismo fallo que se comió los precios en la ficha del
+          prospecto, donde está contado con detalle. */}
+      <div className="p-3 flex flex-col gap-1.5 max-h-[22rem] overflow-y-auto scrollbar-thin [&>*]:shrink-0">
         {entradas.map((e) => {
           const t = tipoDe(e.tipo)
           return (
