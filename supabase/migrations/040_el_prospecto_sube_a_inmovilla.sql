@@ -56,9 +56,9 @@ RETURNS text
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public
-AS $
+AS $$
   SELECT 'MK' || lpad(nextval('public.inmovilla_ref_seq')::text, 5, '0');
-$;
+$$;
 
 REVOKE ALL ON FUNCTION public.siguiente_ref_inmovilla() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.siguiente_ref_inmovilla() TO service_role;
