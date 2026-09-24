@@ -175,3 +175,213 @@ export async function asignarCuentaInmovilla(
   revalidatePath("/equipo")
   return { ok: true }
 }
+
+// ---------------------------------------------------------------------------
+// EL SALTO A INMOVILLA
+// ---------------------------------------------------------------------------
+
+/**
+ * De la operación de Idealista a la de Inmovilla, por NOMBRE y no por número.
+ *
+ * El número se busca después en `inmovilla_enums`: si algún día cambian sus
+ * códigos, basta con volver a bajarlos y esto sigue valiendo. Los nombres, en
+ * cambio, son los que se leen en su panel y no se mueven.
+ */
+const OPERACION: Record<string, string> = { sale: "1. Venta", rent: "2. Alquiler" }
+
+/** Y del tipo de vivienda de Idealista al suyo. */
+const TIPO: Record<string, string> = {
+  flat: "Piso",
+  penthouse: "Ático",
+  studio: "Estudio",
+  duplex: "Dúplex",
+  chalet: "Chalet",
+  premise: "Local comercial",
+  countryHouse: "Casa de campo",
+}
+
+/** Lo que se manda cuando no se sabe el tipo: la inmensa mayoría son pisos. */
+const TIPO_POR_DEFECTO = "Piso"
+
+const normalizar = (s: unknown) =>
+  String(s ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9 ]/g, " ").replace(/ +/g, " ").trim()
+
+/** "4ª" a 4, "bajo" a 0, cualquier otra cosa a null. */
+function plantaComoNumero(p: unknown): number | null {
+  const t = normalizar(p)
+  if (!t) return null
+  if (t.startsWith("bajo") || t === "bj") return 0
+  const n = parseInt(t, 10)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * Crear en Inmovilla la ficha de un prospecto nuestro.
+ *
+ * Se llama DESPUÉS de que la promoción haya terminado bien, nunca dentro de la
+ * transacción: si Inmovilla está caído, el prospecto tiene que quedar creado
+ * igualmente en el CRM. El fallo se guarda en `inmovilla_error` y la ficha
+ * ofrece reintentar.
+ *
+ * Es idempotente por `propiedad_ref`: una ficha ya subida no se vuelve a crear.
+ * Importa más de lo que parece — un alta con una referencia que ya existe no da
+ * error en su API, ACTUALIZA la ficha que la tenga.
+ */
+export async function crearProspectoEnInmovilla(prospectoId: string): Promise<{
+  ok?: true
+  ref?: string
+  yaEstaba?: true
+  error?: string
+}> {
+  const { userId } = await sesionActual()
+  if (!userId) return { error: "Se ha cerrado la sesión: vuelve a entrar" }
+
+  const supabase = createServiceClient()
+
+  const { data: pros, error: errPros } = await supabase
+    .from("prospectos")
+    .select(`
+      id, propiedad_ref, captacion_id, operacion, tipo_inmueble,
+      direccion, barrio, ciudad, precio, precio_salida, metros,
+      habitaciones, banos, planta, tiene_ascensor, imagenes,
+      captado_por, agente_id
+    `)
+    .eq("id", prospectoId)
+    .maybeSingle()
+
+  if (errPros) return { error: errPros.message }
+  if (!pros) return { error: "Ese prospecto ya no existe" }
+  if (pros.propiedad_ref) return { ok: true, yaEstaba: true, ref: pros.propiedad_ref }
+
+  // El tipo de inmueble no lo copia `promocionar_captacion`, así que se lee de
+  // la captación de la que vino: Idealista lo trae en `extendedPropertyType`.
+  let tipoIdealista: string | null = null
+  if (pros.captacion_id != null) {
+    const { data: cap } = await supabase
+      .from("captaciones").select("raw_data").eq("id", pros.captacion_id).maybeSingle()
+    const raw = (cap?.raw_data ?? {}) as Record<string, unknown>
+    tipoIdealista = typeof raw.extendedPropertyType === "string" ? raw.extendedPropertyType : null
+  }
+
+  // A nombre de quien lo captó; si esa persona no tiene cuenta enlazada, de
+  // quien lo lleva. Sin ninguna de las dos, la ficha sube sin agente: es
+  // preferible a no subirla.
+  const personas = [pros.captado_por, pros.agente_id].filter(Boolean) as string[]
+  let keyagente: number | null = null
+  if (personas.length) {
+    const { data: perfiles } = await supabase
+      .from("perfiles").select("id, inmovilla_agente_id").in("id", personas)
+    for (const quien of personas) {
+      const p = (perfiles ?? []).find((x) => (x as { id: string }).id === quien) as
+        { inmovilla_agente_id: number | null } | undefined
+      if (p?.inmovilla_agente_id) { keyagente = p.inmovilla_agente_id; break }
+    }
+  }
+
+  // Los códigos suyos, de nuestra copia.
+  const { data: enums } = await supabase
+    .from("inmovilla_enums").select("tipo, valor, nombre, padre")
+  const lista = (enums ?? []) as Array<{ tipo: string; valor: number; nombre: string; padre: number | null }>
+  const codigo = (tipo: string, nombre: string | null, padre?: number | null) => {
+    if (!nombre) return null
+    const n = normalizar(nombre)
+    const candidatos = lista
+      .filter((e) => e.tipo === tipo && (padre == null || e.padre == null || e.padre === padre))
+      // ORDENADOS, y no es cosmético. En Valencia hay 56 nombres de zona
+      // REPETIDOS con dos códigos distintos —Benimaclet es 1052199 y 4106899, y
+      // así medio barrio—. Sin un orden fijo, el mismo barrio podría irse a un
+      // código un día y a otro al siguiente. Sus propias fichas usan casi
+      // siempre el más bajo, así que se elige ése.
+      //
+      // "Casi siempre": en la muestra, Vara de Quart usa el alto. Lo definitivo
+      // será aprender de su cartera qué código usa cada nombre; mientras tanto,
+      // una zona mal elegida se corrige a mano en Inmovilla y no rompe nada.
+      .sort((a, b) => a.valor - b.valor)
+    // Exacto primero. "Russafa" está también como "Russafa - Ruzafa" y la buena
+    // es la que se llama igual que el barrio.
+    return (candidatos.find((e) => normalizar(e.nombre) === n)
+      ?? candidatos.find((e) => normalizar(e.nombre).startsWith(n)))?.valor ?? null
+  }
+
+  const keyacci = codigo("keyacci", OPERACION[pros.operacion ?? "sale"] ?? OPERACION.sale)
+  const key_tipo = codigo("key_tipo", TIPO[tipoIdealista ?? ""] ?? pros.tipo_inmueble ?? TIPO_POR_DEFECTO)
+    ?? codigo("key_tipo", TIPO_POR_DEFECTO)
+  const key_loca = codigo("key_loca", pros.ciudad ?? "Valencia")
+  const key_zona = codigo("key_zona", pros.barrio, key_loca)
+
+  if (!keyacci || !key_tipo || !key_loca) {
+    const falta = [!keyacci && "la operación", !key_tipo && "el tipo de inmueble", !key_loca && "la localidad"]
+      .filter(Boolean).join(", ")
+    const error = `No se puede subir: Inmovilla no reconoce ${falta}`
+    await supabase.from("prospectos").update({ inmovilla_error: error }).eq("id", prospectoId)
+    return { error }
+  }
+
+  // La referencia la da la base con su secuencia, no Node: dos promociones a la
+  // vez pedirían el mismo número.
+  const { data: refData, error: errRef } = await supabase.rpc("siguiente_ref_inmovilla")
+  const ref = typeof refData === "string" ? refData : null
+  if (errRef || !ref) return { error: "No se ha podido generar la referencia" }
+
+  const ficha: Record<string, unknown> = {
+    ref,
+    keyacci,
+    key_tipo,
+    key_loca,
+    key_zona,
+    // Es una captación, no una propiedad publicada, y no disponible: es como
+    // están sus más de seis mil prospectos.
+    prospecto: true,
+    nodisponible: true,
+    calle: pros.direccion ?? null,
+    planta: plantaComoNumero(pros.planta),
+    // El precio de VENTA va en `precioinmo`. Mandarlo en `precio` devuelve un
+    // 406 "El parametro precio no es valido", que no lo parece pero es eso.
+    precioinmo: pros.precio_salida ?? pros.precio ?? null,
+    m_cons: pros.metros ?? null,
+    habitaciones: pros.habitaciones ?? null,
+    banyos: pros.banos ?? null,
+    ascensor: pros.tiene_ascensor === true ? 1 : 0,
+  }
+  if (keyagente) { ficha.keyagente = keyagente; ficha.captadopor = keyagente }
+  const fotos = (pros.imagenes ?? []) as string[]
+  if (fotos.length) ficha.fotos = fotos.map((url) => ({ url }))
+
+  try {
+    const r = await fetch(`${BASE}/propiedades/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Token: token() },
+      body: JSON.stringify(ficha),
+      cache: "no-store",
+    })
+    const cuerpo = await r.text()
+    if (!r.ok) {
+      // Sus mensajes se leen ("El parametro precio no es valido"), así que se
+      // guardan tal cual: un genérico dejaría sin saber qué corregir.
+      let detalle = cuerpo.slice(0, 200)
+      try { detalle = (JSON.parse(cuerpo).mensaje as string) ?? detalle } catch {}
+      const error = `Inmovilla no la ha aceptado: ${detalle}`
+      await supabase.from("prospectos").update({ inmovilla_error: error }).eq("id", prospectoId)
+      return { error }
+    }
+
+    // El alta SÍ devuelve el cod_ofer, aunque su documentación diga que no.
+    let codOfer: number | null = null
+    try { codOfer = Number(JSON.parse(cuerpo).cod_ofer) || null } catch {}
+
+    await supabase.from("prospectos").update({
+      propiedad_ref: ref,
+      inmovilla_cod_ofer: codOfer,
+      inmovilla_subido_en: new Date().toISOString(),
+      inmovilla_error: null,
+    }).eq("id", prospectoId)
+
+    revalidatePath("/prospectos")
+    return { ok: true, ref }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : "No se ha podido hablar con Inmovilla"
+    await supabase.from("prospectos").update({ inmovilla_error: error }).eq("id", prospectoId)
+    return { error }
+  }
+}

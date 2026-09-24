@@ -786,7 +786,18 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
 
     // `yaExistia` NO es un fallo: alguien la promocionó antes. Se dice como lo
     // que es y se deja el enlace para ir a la ficha que ya hay.
-    toast.success(res.yaExistia ? "Ya era un prospecto" : "Captación pasada a prospecto")
+    //
+    // Y se dice también qué ha pasado con Inmovilla, que es la otra mitad del
+    // salto. Un fallo allí no deshace nada aquí —el prospecto está creado— así
+    // que se cuenta como aviso y no como error: lo que hay que hacer es entrar
+    // en la ficha y reintentar, no volver a promocionar.
+    toast.success(res.yaExistia ? "Ya era un prospecto" : "Captación pasada a prospecto", {
+      description: res.inmovillaRef
+        ? `En Inmovilla como ${res.inmovillaRef}`
+        : res.inmovillaError
+          ? "No ha subido a Inmovilla. Puedes reintentarlo desde la ficha del prospecto."
+          : undefined,
+    })
     if (res.prospectoId && enPantalla) setProspectoNuevo(res.prospectoId)
 
     // La función deja rastro en la línea de tiempo y marca la captación, así que

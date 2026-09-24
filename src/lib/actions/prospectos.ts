@@ -3,6 +3,7 @@
 import { createAdminClient } from "@/lib/supabase/server"
 import { sesionActual } from "@/lib/auth/acceso"
 import { revalidatePath } from "next/cache"
+import { crearProspectoEnInmovilla } from "@/lib/actions/inmovilla"
 
 /**
  * Los prospectos: lo que empieza cuando el propietario dice que sí.
@@ -48,6 +49,10 @@ export interface ResultadoPromocion {
   contactoId?: string
   /** No es un error: la captación ya se había promocionado antes. */
   yaExistia?: boolean
+  /** La referencia con la que ha quedado en Inmovilla, si ha subido. */
+  inmovillaRef?: string
+  /** Por qué no ha subido a Inmovilla. El prospecto existe igual. */
+  inmovillaError?: string
   error?: string
 }
 
@@ -127,6 +132,21 @@ export async function promocionarCaptacion(captacionId: number): Promise<Resulta
 
   if (!r.prospecto_id) return { error: "La promoción no devolvió ningún prospecto" }
 
+  // Y de aquí sube a Inmovilla, FUERA de la transacción y después de que el
+  // prospecto ya exista. Si su API está caída o rechaza la ficha, el prospecto
+  // se queda creado igual: el fallo se guarda en `inmovilla_error` y su ficha
+  // ofrece reintentar. Al revés —subir primero, o dentro— un corte de red
+  // dejaría el CRM sin el prospecto y a Inmovilla con la propiedad.
+  //
+  // Se espera a que termine en vez de dispararlo y olvidarse: en un servidor
+  // que apaga la función al contestar, lo que no se espera no se manda. Es
+  // alrededor de un segundo.
+  let inmovilla: { ref?: string; error?: string } = {}
+  if (r.creado !== false) {
+    inmovilla = await crearProspectoEnInmovilla(r.prospecto_id)
+      .catch((e: unknown) => ({ error: e instanceof Error ? e.message : "No se ha podido hablar con Inmovilla" }))
+  }
+
   revalidatePath("/captaciones")
   revalidatePath("/leads")
   revalidatePath("/contactos")
@@ -137,6 +157,8 @@ export async function promocionarCaptacion(captacionId: number): Promise<Resulta
     prospectoId: r.prospecto_id,
     contactoId: r.contacto_id,
     yaExistia: r.creado === false,
+    inmovillaRef: inmovilla.ref,
+    inmovillaError: inmovilla.error,
   }
 }
 
@@ -159,6 +181,7 @@ const COLUMNAS_LISTA = `
   precio, precio_salida, metros, habitaciones, banos, planta,
   tiene_ascensor, estado_inmueble, imagenes, url_anuncio,
   exclusiva, honorarios_pct, propiedad_ref, captada_en,
+  inmovilla_cod_ofer, inmovilla_subido_en, inmovilla_error,
   captacion_id, contacto_id, agente_id, captado_por,
   atendido_en, proximo_toque, proximo_motivo, created_at, updated_at,
   contacto:leads!prospectos_contacto_id_fkey(id, nombre, apellidos, telefono, email),

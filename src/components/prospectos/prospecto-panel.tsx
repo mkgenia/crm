@@ -10,6 +10,7 @@ import {
   getProspecto,
 } from "@/lib/actions/prospectos"
 import { getInteracciones, type Interaccion } from "@/lib/actions/interacciones"
+import { crearProspectoEnInmovilla } from "@/lib/actions/inmovilla"
 import { Atendido } from "@/components/shared/atendido"
 import { LineaTiempo, type PersonaLinea } from "@/components/shared/linea-tiempo"
 import { claseColor, clasePunto, nombreDe, opcionesDe, type Catalogo } from "@/lib/catalogos"
@@ -105,6 +106,28 @@ export function ProspectoPanel({
   /** Cuando el destino es Perdido se pregunta por qué antes de escribirlo. */
   const [preguntandoMotivo, setPreguntandoMotivo] = useState(false)
   const [motivo, setMotivo] = useState("")
+
+
+  /** Reintentar la subida a Inmovilla de una ficha que no llegó a subir. */
+  const [subiendo, setSubiendo] = useState(false)
+
+  /**
+   * Subir esta ficha a Inmovilla.
+   *
+   * Normalmente sube sola al promocionar la captación; esto es para cuando eso
+   * falló —su API caída, un dato que no reconoce— y hay que volver a intentarlo.
+   * La acción es idempotente: si ya tiene referencia, no crea una segunda.
+   */
+  async function subirAInmovilla() {
+    setSubiendo(true)
+    const res: Awaited<ReturnType<typeof crearProspectoEnInmovilla>> =
+      await crearProspectoEnInmovilla(ficha.id)
+        .catch(() => ({ error: "No se ha podido hablar con Inmovilla" }))
+    setSubiendo(false)
+    if (res.error) { toast.error(res.error); recargarFicha(); return }
+    toast.success(res.yaEstaba ? `Ya estaba como ${res.ref}` : `Subido como ${res.ref}`)
+    recargarFicha()
+  }
 
   // null hasta que el componente está hidratado; ver RELOJ.
   const ahora = useSyncExternalStore<number | null>(
@@ -457,6 +480,33 @@ export function ProspectoPanel({
                   </div>
                 </>
               )}
+            </div>
+          )}
+        </div>
+
+        {/* INMOVILLA. Una línea cuando todo ha ido bien —la referencia con la
+            que quedó allí— y un aviso con botón cuando no subió. El prospecto
+            existe en el CRM en los dos casos: subir a Inmovilla pasa después de
+            la promoción y a propósito, para que su API caída no impida captar. */}
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Inmovilla</p>
+          {ficha.propiedad_ref ? (
+            <p className="text-xs text-muted-foreground">
+              Subido como <span className="text-foreground font-medium">{ficha.propiedad_ref}</span>
+            </p>
+          ) : (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 flex flex-col gap-2">
+              <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-200">
+                {ficha.inmovilla_error ?? "Todavía no está en Inmovilla."}
+              </p>
+              <button
+                onClick={() => void subirAInmovilla()}
+                disabled={subiendo}
+                className="self-start flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-amber-500/20 text-[11px] font-medium text-amber-700 dark:text-amber-200 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+              >
+                {subiendo ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                {subiendo ? "Subiendo…" : "Subir a Inmovilla"}
+              </button>
             </div>
           )}
         </div>

@@ -36,6 +36,10 @@ export interface Prospecto {
   updated_at: string | null
   contacto_nombre: string | null
   contacto_telefono: string | null
+  /** La referencia con la que está en Inmovilla. Null = todavía no ha subido. */
+  propiedad_ref: string | null
+  /** Por qué no subió la última vez. Null = subió bien o no se ha intentado. */
+  inmovilla_error: string | null
 }
 
 /**
@@ -120,6 +124,8 @@ export function aProspecto(cruda: unknown): Prospecto | null {
     updated_at: texto(f.updated_at),
     contacto_nombre: nombre,
     contacto_telefono: texto(f.contacto_telefono) ?? texto(contacto.telefono),
+    propiedad_ref: texto(f.propiedad_ref),
+    inmovilla_error: texto(f.inmovilla_error),
   }
 }
 
