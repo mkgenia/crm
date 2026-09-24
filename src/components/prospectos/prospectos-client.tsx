@@ -5,7 +5,7 @@ import Link from "next/link"
 import { AlertCircle, ArrowRight, Building2, RefreshCw, Search } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
-import { getProspectos, getTotalesProspectos } from "@/lib/actions/prospectos"
+import { getProspecto, getProspectos, getTotalesProspectos } from "@/lib/actions/prospectos"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import type { PersonaLinea } from "@/components/shared/linea-tiempo"
 import {
@@ -21,6 +21,7 @@ import {
   cuando,
   errorDe,
   euros,
+  filaDe,
   filasDe,
   nombreAgente,
   RELOJ,
@@ -184,6 +185,34 @@ export default function ProspectosClient({
   // la página nueva.
   const listaRef = useRef<HTMLDivElement>(null)
   useEffect(() => { listaRef.current?.scrollTo({ top: 0 }) }, [pagina])
+
+  /**
+   * `/prospectos?p=<id>` abre esa ficha.
+   *
+   * Es a donde llevan "Ver prospecto" del panel de captaciones y los pisos de
+   * la ficha de un contacto, y hasta hoy aterrizaban en la lista sin abrir
+   * nada: el enlace prometía una ficha concreta y dejaba al agente buscándola a
+   * mano. Se pide la fila suelta en vez de buscarla entre las cargadas porque
+   * el prospecto puede estar en otra página o fuera del filtro puesto.
+   *
+   * La URL se lee de `window.location` y no con `useSearchParams` a propósito:
+   * ese hook obliga a envolver el componente en un <Suspense> para poder
+   * prerenderizar, y aquí sólo hace falta una vez, ya en el navegador.
+   */
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("p")
+    if (!id) return
+    let vivo = true
+    getProspecto(id)
+      .then((fila) => {
+        const p = filaDe(fila)
+        if (vivo && p) setSeleccionado(p)
+      })
+      // Si no se puede traer, la lista se queda como está: no se enseña un
+      // panel vacío ni se grita por un enlace viejo.
+      .catch(() => {})
+    return () => { vivo = false }
+  }, [])
 
   /** Cualquier filtro nuevo vuelve a la página 1: en la 9 no habría nada. */
   function filtrarPor(estado: string) {

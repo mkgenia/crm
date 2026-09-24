@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sandbox: exportes de estructura de produccion y ids de pruebas (no son codigo)
+supabase/sandbox/*.csv
+supabase/sandbox/*.json
+supabase/sandbox/estructura/
+
+# Sesiones de un solo uso del sandbox de pruebas (se borran al terminar)
+public/pruebas-sesion/
+
+# compilacion del CRM de pruebas (sandbox)
+.next-sandbox/

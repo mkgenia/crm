@@ -135,6 +135,10 @@ export async function getCaptaciones({
   // Admins usan service role para bypassar RLS y ver todas las captaciones
   const supabase = isAdmin ? await createAdminClient() : await createClient()
 
+  // `prospecto_id` va en el select porque la tarjeta lleva escrita desde hace
+  // tiempo la chapa de "esto ya es un prospecto" y sin esta columna no se
+  // pintaba nunca: el comercial abría la ficha creyendo que le tocaba llamar y
+  // resultaba que iba por el otro embudo desde hacía días.
   let query = supabase
     .from("captaciones")
     .select(`
@@ -142,6 +146,7 @@ export async function getCaptaciones({
       barrio, calle, metros, habitaciones, banos, planta,
       tiene_ascensor, estado, estado_crm, estado_whatsapp, senal, activo, imagen_url, imagenes,
       agente_id, fecha_agenda, recordatorio_fecha, notas_agenda, estado_agenda,
+      prospecto_id,
       operacion:raw_data->>operation,
       agente:perfiles!captaciones_agente_id_fkey(id, nombre, apellidos, avatar_url)
     `, { count: "exact" })

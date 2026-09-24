@@ -2,7 +2,6 @@ import { CalendarDays } from "lucide-react"
 import { sesionActual } from "@/lib/auth/acceso"
 import { getAgendaMes } from "@/lib/actions/agenda"
 import { getCatalogosActivos } from "@/lib/actions/catalogos"
-import { opcionesDe } from "@/lib/catalogos"
 import { AgendaPanel } from "@/components/agenda/agenda-panel"
 import { EntradasVencidas, ProximasEntradas } from "@/components/agenda/proximas-entradas"
 
@@ -23,15 +22,11 @@ export default async function CalendarioPage() {
   // hace que "Visita" (migración 034) se pueda elegir aquí sin tocar nada más.
   const [agenda, catalogos] = await Promise.all([getAgendaMes(), getCatalogosActivos()])
 
-  // Los tipos, nombrados uno a uno tal y como estén hoy en el catálogo. Antes
-  // ponía "Citas, notas y recordatorios", que era la lista de 2025 escrita a
-  // mano: el día que entró la visita, el subtítulo seguía sin nombrarla.
-  const nombresTipos = opcionesDe(catalogos, "tipo_agenda").map((t) => t.nombre.toLowerCase())
-  const listaTipos = nombresTipos.length
-    ? nombresTipos.length === 1
-      ? nombresTipos[0]
-      : `${nombresTipos.slice(0, -1).join(", ")} y ${nombresTipos[nombresTipos.length - 1]}`
-    : "lo apuntado"
+  // Aquí se armaba la lista de tipos del catálogo ("cita, visita, recordatorio
+  // y nota") para meterla en el subtítulo. El subtítulo ya no la dice: los
+  // tipos se ven en el propio calendario y en el desplegable de Añadir, así que
+  // enumerarlos arriba era repetir lo que hay debajo. El catálogo sigue bajando
+  // al panel, que es quien lo necesita de verdad.
 
   return (
     <div className="p-8 space-y-6">
@@ -41,10 +36,13 @@ export default async function CalendarioPage() {
             <CalendarDays className="h-6 w-6 text-violet-500" />
             Calendario
           </h1>
+          {/* Sin la coletilla de antes. El administrador leía "Lo que tiene
+              apuntado el equipo: cita, visita, recordatorio y nota. Puedes
+              apuntarle cosas a cualquiera": la lista de tipos la tiene delante
+              en el propio calendario, y que se pueda apuntar a un compañero se
+              descubre solo al pulsar Añadir, donde está el desplegable. */}
           <p className="text-sm text-muted-foreground mt-1">
-            {sesion.isAdmin
-              ? `Lo que tiene apuntado el equipo: ${listaTipos}. Puedes apuntarle cosas a cualquiera.`
-              : `Lo tuyo: ${listaTipos}.`}
+            {sesion.isAdmin ? "Agenda del equipo" : "Tu agenda"}
           </p>
         </div>
       </div>

@@ -217,7 +217,10 @@ export default async function CaptacionesPage({
                 y espera una llamada. Es el mismo criterio con el que reparte el
                 trigger y con el que cuenta la tarjeta del scraper en la
                 portada, para que los tres sitios digan siempre lo mismo. */}
-            {total.toLocaleString("es")} {isAdmin ? "propiedades" : "captaciones asignadas"}
+            {total.toLocaleString("es")}{" "}
+            {isAdmin
+              ? (total === 1 ? "propiedad" : "propiedades")
+              : (total === 1 ? "captación asignada" : "captaciones asignadas")}
             {interesados !== null && ` · ${interesados.toLocaleString("es")} interesados`}
           </p>
         </div>

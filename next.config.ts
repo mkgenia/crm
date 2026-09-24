@@ -19,7 +19,14 @@ const nextConfig: NextConfig = {
    *
    * Esto NO afecta a producción: `allowedDevOrigins` sólo lo lee `next dev`.
    */
-  allowedDevOrigins: ["127.0.0.1"],
+  allowedDevOrigins: ["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+
+  /**
+   * Carpeta de compilación. Normalmente `.next`; la copia de pruebas contra el
+   * sandbox arranca con `NEXT_DIST_DIR=.next-sandbox` (scripts/sandbox-dev.cjs)
+   * para poder correr a la vez que el CRM de siempre sin pisarse la caché.
+   */
+  distDir: process.env.NEXT_DIST_DIR || ".next",
 };
 
 export default nextConfig;

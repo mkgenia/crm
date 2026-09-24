@@ -232,10 +232,13 @@ export function CatalogosClient({
     <div className="flex flex-col gap-6 p-6 lg:p-8 max-w-7xl">
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold">Catálogos</h1>
+        {/* Una línea. Aquí había tres, y las dos últimas explicaban que la
+            clave técnica no se toca: eso ya lo dice la propia pantalla —la
+            clave sale en gris bajo cada nombre y no es editable— y lo impide la
+            base de datos. La explicación de cada lista sí se queda: son diez
+            listas que se parecen entre sí y el título solo no las distingue. */}
         <p className="text-sm text-muted-foreground max-w-3xl">
-          Las listas que alimentan los desplegables del CRM. El nombre y el color se cambian cuando
-          haga falta; la clave técnica que guardan las filas y leen los workflows de n8n no se toca
-          nunca.
+          Las listas que alimentan los desplegables del CRM.
         </p>
       </div>
 

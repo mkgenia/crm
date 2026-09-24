@@ -124,7 +124,12 @@ export function AgendaPanel({
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <div className="flex items-center gap-2.5">
           <CalendarDays className="h-4 w-4 text-violet-500" />
-          <h2 className="text-sm font-semibold text-foreground">Agenda del equipo</h2>
+          {/* El agente sólo ve lo suyo —la consulta filtra por `agente_id` en
+              `getAgendaMes`, incluido lo que le haya apuntado el administrador—,
+              así que llamarlo "del equipo" era mentira en su pantalla. */}
+          <h2 className="text-sm font-semibold text-foreground">
+            {isAdmin ? "Agenda del equipo" : "Mi agenda"}
+          </h2>
           {cargando && <span className="text-[11px] text-muted-foreground">actualizando…</span>}
         </div>
 
@@ -149,7 +154,7 @@ export function AgendaPanel({
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <span className="text-xs font-medium capitalize min-w-[7.5rem] text-center">
+            <span className="text-xs font-medium first-letter:uppercase min-w-[7.5rem] text-center">
               {nombreMes(ancla)}
             </span>
             <button
@@ -227,7 +232,7 @@ export function AgendaPanel({
         <div className={cn("p-4 flex flex-col", grande ? "max-h-[32rem]" : "max-h-[19rem]")}>
           <div className="flex items-start justify-between gap-3 mb-3">
             <div>
-              <p className="text-sm font-medium capitalize">{fechaLarga}</p>
+              <p className="text-sm font-medium first-letter:uppercase">{fechaLarga}</p>
               <p className="text-[11px] text-muted-foreground">
                 {delDia.length === 0
                   ? "Nada apuntado"

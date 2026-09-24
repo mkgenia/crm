@@ -52,7 +52,12 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
     if (res.error) { setPermisos(previo); toast.error("Error al actualizar permisos") }
   }
 
-  const concedidos = MODULOS.filter((m) => permisos[m.key]).length
+  // SÓLO LO QUE EXISTE. El recuento decía "9 de 13 secciones" contando cinco
+  // pantallas que todavía no se han escrito, así que ningún agente podía llegar
+  // nunca al total y el número no significaba nada. Los permisos de lo que está
+  // por venir se siguen pudiendo dar —se ven abajo, marcados—, pero no cuentan.
+  const MODULOS_VIVOS = MODULOS.filter((m) => !m.enDesarrollo)
+  const concedidos = MODULOS_VIVOS.filter((m) => permisos[m.key]).length
   const grupos = Array.from(new Set(MODULOS.map((m) => m.grupo)))
 
   async function handleToggleRol() {
@@ -153,7 +158,7 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
               {/* Doce etiquetas no caben en la cabecera de la tarjeta: el
                   recuento dice lo mismo y se lee de un vistazo. */}
               <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
-                {concedidos} de {MODULOS.length} secciones
+                {concedidos} de {MODULOS_VIVOS.length} secciones
               </span>
             </button>
             {expanded && (
@@ -181,7 +186,14 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
                         {mods.map((m) => (
                           <div key={m.key} className="flex items-center justify-between gap-3 bg-card rounded-md px-3 py-2.5 border border-border">
                             <div className="min-w-0">
-                              <p className="text-sm font-medium">{m.label}</p>
+                              <p className={cn("text-sm font-medium", m.enDesarrollo && "text-muted-foreground")}>
+                                {m.label}
+                                {/* Se sigue pudiendo conceder, pero se dice que
+                                    todavía no lleva a ninguna parte. */}
+                                {m.enDesarrollo && (
+                                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/70">· aún no existe</span>
+                                )}
+                              </p>
                               <p className="text-xs text-muted-foreground leading-tight">{m.descripcion}</p>
                             </div>
                             <Switch

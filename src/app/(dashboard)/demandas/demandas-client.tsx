@@ -175,6 +175,8 @@ export default function DemandasPage({
 
   // Edit demand notes
   const [editingDemandId, setEditingDemandId] = useState<string | null>(null)
+  /** La demanda cuyo selector de estado está abierto. Una a la vez. */
+  const [estadoAbierto, setEstadoAbierto] = useState<string | null>(null)
   const [editNotas, setEditNotas] = useState("")
   const [savingNota, setSavingNota] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -994,19 +996,28 @@ export default function DemandasPage({
                   )}
                 </div>
               )}
+              {/* DOS ACCIONES DISCRETAS, no dos botones a media pantalla.
+
+                  Estaban como dos botones del ancho del panel, uno de ellos en
+                  rojo, justo encima de las demandas. Lo primero que se veía al
+                  abrir una propiedad era "Eliminar propiedad"; lo que se venía
+                  a leer —quién ha preguntado por ella— quedaba debajo. Borrar
+                  no es lo que se hace aquí cada día, así que no se pinta como
+                  si lo fuera. El rojo aparece al pasar por encima, que es
+                  cuando hace falta la advertencia. */}
               {!editando && (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-end gap-4 text-xs">
                   <button
                     onClick={() => setConfirmDesactivar(true)}
-                    className="flex-1 h-7 rounded border border-border text-xs text-muted-foreground hover:border-amber-400/50 hover:text-amber-400 transition-colors"
+                    className="text-muted-foreground hover:text-amber-400 transition-colors"
                   >
                     Desactivar
                   </button>
                   <button
                     onClick={() => setConfirmEliminar(true)}
-                    className="flex-1 h-7 rounded border border-red-500/30 text-xs text-red-400 hover:bg-red-500/10 hover:border-red-500/60 transition-colors"
+                    className="text-muted-foreground hover:text-red-400 transition-colors"
                   >
-                    Eliminar propiedad
+                    Eliminar
                   </button>
                 </div>
               )}
@@ -1160,22 +1171,41 @@ export default function DemandasPage({
                       </button>
                     )}
 
-                    {/* Estado */}
+                    {/* EL ESTADO: uno, y los demás sólo cuando se van a usar.
+
+                        Aquí se pintaban los cuatro en cada demanda. Con cuatro
+                        demandas ya son dieciséis pastillas y sólo cuatro dicen
+                        algo; en una propiedad con veinte peticiones, ochenta.
+                        Ahora se ve en qué estado está, y al pulsarlo aparecen
+                        los otros para moverlo. */}
                     <div className="flex flex-wrap gap-1 pt-1.5 border-t border-border">
-                      {ESTADOS_UI.map((c) => (
+                      {estadoAbierto === d.id ? (
+                        ESTADOS_UI.map((c) => (
+                          <button
+                            key={c.id}
+                            onClick={() => { cambiarEstado(d.id, c.valor); setEstadoAbierto(null) }}
+                            className={cn(
+                              "text-[10px] px-1.5 py-0.5 rounded border font-medium transition-all",
+                              d.estado === c.valor
+                                ? claseColor(c.color)
+                                : "border-border text-muted-foreground hover:border-muted-foreground/40"
+                            )}
+                          >
+                            {c.nombre}
+                          </button>
+                        ))
+                      ) : (
                         <button
-                          key={c.id}
-                          onClick={() => cambiarEstado(d.id, c.valor)}
+                          onClick={() => setEstadoAbierto(d.id)}
+                          title="Cambiar el estado"
                           className={cn(
                             "text-[10px] px-1.5 py-0.5 rounded border font-medium transition-all",
-                            d.estado === c.valor
-                              ? claseColor(c.color)
-                              : "border-border text-muted-foreground hover:border-muted-foreground/40"
+                            claseColor(colorEstado(d.estado)),
                           )}
                         >
-                          {c.nombre}
+                          {nombreEstado(d.estado)}
                         </button>
-                      ))}
+                      )}
                     </div>
                   </div>
                       ))}

@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
-import { Globe, Radar, Share2, QrCode, Inbox, Heart, PhoneMissed } from "lucide-react"
+import { Globe, Radar, Share2, QrCode, Inbox, PhoneMissed } from "lucide-react"
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
@@ -327,11 +327,10 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
             datos={data.origenes.qr} periodo={periodo}
             tono="ambar"
           />
-          <OrigenCard
-            href="/matches" icon={Heart} label="Matches"
-            datos={null} periodo={periodo}
-            tono="granate"
-          />
+          {/* Aquí había una tarjeta de Matches con el texto "En desarrollo".
+              Ocupaba el mismo hueco que un dato real y no daba ninguno: una
+              sección que aún no existe no compite por el sitio con las que sí.
+              Vuelve el día que Matches cuente algo. */}
         </div>
         {data.origenes.otros > 0 && (
           <p className="text-[11px] text-muted-foreground/70">
@@ -363,7 +362,7 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
 
       <SeccionOrdenable id="pipeline" titulo="Pipeline de leads">
       <div className="flex flex-col gap-4">
-        <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+        <h2 className="text-sm font-semibold text-foreground tracking-tight">
           Pipeline de leads · todos los agentes
         </h2>
         <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-4">
@@ -403,7 +402,7 @@ export default function AdminDashboard({ nombre, saludo, data, agendaEquipo, yoI
       <SeccionOrdenable id="ultimos" titulo="Últimos leads">
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">Últimos leads</h2>
+          <h2 className="text-sm font-semibold text-foreground tracking-tight">Últimos leads</h2>
           <Link href="/leads" className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             Ver todos
@@ -463,8 +462,11 @@ function SenalPanel({ senal }: { senal: AdminData["senal"] }) {
     // El hueco entre el título y la tarjeta lo pone el padre con gap, no el
     // hijo con un margen suelto.
     <div className="flex flex-col gap-4">
-      <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-        Han dicho que sí
+      {/* "Han dicho que sí" era un acertijo: había que leer el pie para
+          entender que son propietarios del captador y que el número es a
+          cuántos no ha llamado nadie. El título dice ya lo que se ve. */}
+      <h2 className="text-sm font-semibold text-foreground tracking-tight">
+        Propietarios por llamar
       </h2>
 
       <Link
@@ -491,15 +493,17 @@ function SenalPanel({ senal }: { senal: AdminData["senal"] }) {
               </span>
             ) : (
               <>
-                <span className={cn(
-                  "text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight",
-                  urge ? "text-rose-500" : "text-muted-foreground/35",
-                )}>
-                  {sinLlamar.toLocaleString("es")}
-                </span>
+                {/* EL CERO NO SE PINTA EN GRANDE. Un 0 de 42 px ocupa lo mismo
+                    que un 38 y dice lo contrario: que no hay nada que hacer.
+                    Con la cola vacía basta una línea. */}
+                {urge && (
+                  <span className="text-[2.6rem] font-bold tabular-nums leading-[0.85] tracking-tight text-rose-500">
+                    {sinLlamar.toLocaleString("es")}
+                  </span>
+                )}
                 <span className="text-sm text-muted-foreground">
-                  {urge ? "esperando a que alguien les llame" : "nadie esperando una llamada"}
-                  {senal.total !== null && ` · ${senal.total.toLocaleString("es")} con señal en total`}
+                  {urge ? "esperando a que alguien les llame" : "Nadie esperando una llamada"}
+                  {senal.total !== null && senal.total > 0 && ` · ${senal.total.toLocaleString("es")} con señal en total`}
                 </span>
               </>
             )}
@@ -545,7 +549,7 @@ function AgentesYHistorial({ porAgente, historialCaptaciones, historialLeads }: 
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+          <h2 className="text-sm font-semibold text-foreground tracking-tight">
             Rendimiento por agente
           </h2>
           {totalPages > 1 && (
@@ -661,7 +665,7 @@ function HistorialChart({
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+      <h2 className="text-sm font-semibold text-foreground tracking-tight">
         Actividad (30 días)
       </h2>
 

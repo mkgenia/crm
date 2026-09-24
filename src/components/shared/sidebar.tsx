@@ -36,9 +36,13 @@ import type { Permisos } from "@/types/database"
 /**
  * El menú va agrupado por lo que el negocio hace, no por lo que el CRM tiene
  * montado: primero de dónde salen los leads, luego el trabajo inmobiliario, y por
- * último las tuercas. Varias entradas apuntan todavía a páginas en desarrollo; se
- * dejan a la vista a propósito, para que el mapa completo se entienda desde el
- * primer día en vez de ir apareciendo a trozos.
+ * último las tuercas.
+ *
+ * Las entradas marcadas `enDesarrollo` NO se pintan. Antes sí, para que se
+ * entendiera el mapa completo desde el primer día, y el resultado fue un menú de
+ * quince enlaces donde ocho no llevaban a ninguna parte: al usarlo de verdad se
+ * pierde más de lo que se gana. Siguen estando a un clic, en "Lo que viene", al
+ * final del menú.
  */
 type Item = {
   href: string
@@ -73,12 +77,13 @@ const GRUPOS: Array<{ titulo: string | null; items: Item[] }> = [
     titulo: "Inmobiliaria",
     items: [
       { href: "/leads", icon: UserCircle, label: "Leads", permiso: "leads" },
-      // Contactos es a donde va a ir Leads cuando exista: la ficha única de cada
-      // persona. Conviven a propósito — la atenuada es la que viene, la otra es
-      // donde se trabaja hoy.
-      { href: "/contactos", icon: Contact, label: "Contactos", permiso: "leads", enDesarrollo: true },
+      // Leads y Contactos conviven a propósito: son la MISMA tabla en dos
+      // momentos. En Leads está todo el que ha preguntado algo; en Contactos,
+      // sólo quien ya ha dado el paso (`leads.contacto_desde`, que marca sola
+      // la promoción a prospecto).
+      { href: "/contactos", icon: Contact, label: "Contactos", permiso: "leads" },
       { href: "/propiedades", icon: Building2, label: "Propiedades", permiso: "propiedades", enDesarrollo: true },
-      { href: "/prospectos", icon: Target, label: "Prospectos", permiso: "prospectos", enDesarrollo: true },
+      { href: "/prospectos", icon: Target, label: "Prospectos", permiso: "prospectos" },
       { href: "/demandas", icon: Inbox, label: "Demandas", permiso: "demandas" },
       { href: "/matches", icon: Heart, label: "Matches", permiso: "matches", enDesarrollo: true },
       { href: "/mensajes", icon: MessageSquare, label: "Mensajes", permiso: "mensajes" },
@@ -113,6 +118,8 @@ interface SidebarProps {
 }
 
 const CLAVE_PLEGADOS = "mkgenia:menu-plegado"
+/** Si el usuario ha pedido ver además las secciones que aún no existen. */
+const CLAVE_LO_QUE_VIENE = "mkgenia:menu-lo-que-viene"
 
 export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   const pathname = usePathname()
@@ -124,6 +131,7 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   const [nuevasCaptaciones, setNuevasCaptaciones] = useState(0)
   const [nuevasDemandas, setNuevasDemandas] = useState<number | null>(null)
   const [plegados, setPlegados] = useState<Record<string, boolean>>({})
+  const [loQueViene, setLoQueViene] = useState(false)
   const [sombra, setSombra] = useState({ arriba: false, abajo: false })
   const navRef = useRef<HTMLElement>(null)
 
@@ -133,6 +141,7 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
     try {
       const guardado = localStorage.getItem(CLAVE_PLEGADOS)
       if (guardado) setPlegados(JSON.parse(guardado) as Record<string, boolean>)
+      setLoQueViene(localStorage.getItem(CLAVE_LO_QUE_VIENE) === "1")
     } catch {
       /* modo incógnito o storage lleno: el menú se abre entero y ya está */
     }
@@ -262,6 +271,11 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
   }, [])
 
   const puedeVer = (item: Item) => {
+    // Lo que todavía no existe no se pinta, salvo que se haya pedido verlo o que
+    // sea justo la pantalla abierta: si no, al entrar en una de ellas el menú se
+    // quedaría sin ninguna entrada marcada y no se sabría dónde se está.
+    const aqui = pathname === item.href || pathname.startsWith(item.href + "/")
+    if (item.enDesarrollo && !loQueViene && !aqui) return false
     if (item.permiso === "all") return true
     if (item.permiso === "admin") return isAdmin
     if (isAdmin) return true
@@ -412,6 +426,33 @@ export function Sidebar({ rol, permisos, nombre }: SidebarProps) {
             </div>
           )
         })}
+
+        {/* Lo que todavía no existe, a un clic y fuera de la lectura normal. El
+            contador va sobre lo que este usuario podría ver por permisos, no
+            sobre el total: a un agente no se le anuncian pantallas de admin. */}
+        {(() => {
+          const cuantas = GRUPOS.flatMap((g) => g.items).filter(
+            (i) => i.enDesarrollo && (i.permiso === "all" || (i.permiso === "admin" ? isAdmin : isAdmin || permisos[i.permiso as keyof Permisos])),
+          ).length
+          if (!cuantas) return null
+          return (
+            <button
+              onClick={() => {
+                const siguiente = !loQueViene
+                setLoQueViene(siguiente)
+                try { localStorage.setItem(CLAVE_LO_QUE_VIENE, siguiente ? "1" : "0") } catch { /* idem */ }
+              }}
+              aria-expanded={loQueViene}
+              className="mt-4 w-full flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/40 hover:text-sidebar-foreground/70 hover:bg-sidebar-accent/40 transition-colors"
+            >
+              <ChevronRight className={cn("h-3 w-3 shrink-0 transition-transform duration-200", loQueViene && "rotate-90")} />
+              {/* Las secciones que vienen aparecen en su grupo, en su sitio, no
+                  amontonadas aquí debajo: así se ve dónde encajará cada una. */}
+              <span className="truncate">{loQueViene ? "Ocultar lo que viene" : "Ver lo que viene"}</span>
+              <span className="ml-auto tabular-nums">{cuantas}</span>
+            </button>
+          )
+        })()}
         </div>
         </nav>
 

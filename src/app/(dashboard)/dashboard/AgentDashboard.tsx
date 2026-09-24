@@ -440,12 +440,13 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
   // vale igual. Y va al final porque lo primero que se quiere leer es el
   // desglose del número.
   //
-  // Se arma como lista y se une con " · ", igual que la cabecera de "Lo que toca
-  // hoy": el trozo de los tipos es opcional y concatenándolo con el separador
-  // pegado delante quedaban dos puntos seguidos el día que no hay nada que
-  // escribir ahí.
-  const subTareas = detalleTareas &&
-    [detalleTareas, soloTipos, "al margen del periodo"].filter(Boolean).join(" · ")
+  // SE QUEDA SÓLO EL DESGLOSE. Antes esta línea decía "nada para hoy ni esta
+  // semana · sólo de tipo Cita y Visita · al margen del periodo": tres cosas,
+  // y dos eran una explicación de cómo está hecha la cuenta, no algo con lo que
+  // el agente pueda trabajar. El dueño las señaló como ejemplo de lo que sobra
+  // en pantalla. La aclaración de los tipos sigue en `soloTipos`, a mano para
+  // cuando haga falta en un tooltip.
+  const subTareas = detalleTareas || undefined
 
   return (
     <div className="p-8 flex flex-col gap-8">
@@ -456,7 +457,8 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
           {saludo},{" "}
           <span className="holo-text">{nombre}</span>
         </h1>
-        <p className="text-sm text-muted-foreground">Tu actividad personal</p>
+        {/* Aquí ponía "Tu actividad personal". Bajo un "Buenos días, Diego" no
+            añade nada: ya se sabe de quién es la pantalla. */}
       </div>
 
       {/*
@@ -467,7 +469,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
       <section className="flex flex-col gap-4">
         <div className="flex items-end justify-between gap-4 flex-wrap">
           <div className="flex flex-col gap-1">
-            <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+            <h2 className="text-sm font-semibold text-foreground tracking-tight">
               Lo que toca hoy
             </h2>
             {/* Cada contador que falló se calla, no se inventa un cero. */}
@@ -558,8 +560,12 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
       <section className="flex flex-col gap-4">
         <div className="flex items-end justify-between gap-4 flex-wrap">
           <div className="flex flex-col gap-0.5">
-            <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
-              De un vistazo
+            {/* "De un vistazo" no decía qué se mira. Estas tarjetas cuentan por
+                dónde le entran los leads a este agente, igual que las del
+                administrador, y se llaman igual para que sea la misma pantalla
+                vista desde dos sitios. */}
+            <h2 className="text-sm font-semibold text-foreground tracking-tight">
+              De dónde te entran los leads
             </h2>
             <p className="text-xs text-muted-foreground">
               {PERIODOS.find((p) => p.valor === periodo)!.frase}
@@ -676,15 +682,9 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
             tono="ambar"
             extra={subTareas}
           />
-          {/* La tabla `matches` NO EXISTE todavía. `datos` a null es "en
-              desarrollo", que es una tercera cosa distinta de un cero y de un
-              fallo. Exactamente lo mismo que hace la portada del
-              administrador: aquí no se inventa un número. */}
-          <OrigenCard
-            href="/matches" icon={Heart} label="Matches"
-            datos={null}
-            tono="granate"
-          />
+          {/* Aquí había una tarjeta de Matches que sólo decía "En desarrollo".
+              La tabla `matches` no existe todavía, así que ocupaba el hueco de
+              un dato sin dar ninguno. Vuelve cuando haya algo que contar. */}
         </div>
       </section>
 
@@ -727,7 +727,7 @@ export default function AgentDashboard({ nombre, saludo, data, catalogos, agenda
       {/* Visitas ya agendadas sobre captaciones, que es otra cosa que el calendario */}
       {data.agenda.length > 0 ? (
         <div className="flex flex-col gap-4">
-          <h2 className="text-sm font-semibold text-foreground uppercase tracking-widest">
+          <h2 className="text-sm font-semibold text-foreground tracking-tight">
             Agenda próxima
           </h2>
           <div className="rounded-lg border border-border bg-card divide-y divide-border overflow-hidden">

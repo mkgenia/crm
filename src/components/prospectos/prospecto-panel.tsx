@@ -585,16 +585,20 @@ export function ProspectoPanel({
             </div>
           )}
 
-          {/* El aviso no es letra pequeña: alguien puede pasarse una tarde
-              corrigiendo precios creyendo que está arreglando el anuncio. La
-              cartera la publica Inmovilla desde su XML y el CRM no la escribe. */}
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 flex items-start gap-2">
-            <Info className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-            <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-200">
-              Estas correcciones se quedan en el CRM. El anuncio publicado lo lleva Inmovilla desde su XML:
-              lo que cambies aquí no viaja al portal.
-            </p>
-          </div>
+          {/* El aviso sigue siendo importante —alguien puede pasarse una tarde
+              corrigiendo precios creyendo que arregla el anuncio; la cartera la
+              publica Inmovilla desde su XML y el CRM no la escribe—, pero sólo
+              sale MIENTRAS SE CORRIGE, que es el único momento en que el
+              malentendido puede ocurrir. Estaba fijo, y una advertencia que se
+              ve cada vez que se abre una ficha deja de leerse a la tercera. */}
+          {editando && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 flex items-start gap-2">
+              <Info className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-200">
+                Esto se queda en el CRM: el anuncio publicado lo lleva Inmovilla y no viaja al portal.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* El día del comercial: se atiende arriba y lo apuntado queda debajo. */}

@@ -848,8 +848,15 @@ export default function LeadsPage({
           </div>
         </div>
 
-        {/* Pills filtro estado */}
-        <div className="flex items-center gap-2 overflow-x-auto shrink-0">
+        {/* Pills filtro estado.
+
+            SE PARTEN EN VARIAS LÍNEAS, no se desplazan. Con `overflow-x-auto`,
+            al abrir la ficha de un lead la lista se estrecha y esta fila pasaba
+            a tener barra horizontal: los estados de la derecha —Ganado,
+            Perdido— quedaban fuera y había que arrastrar para filtrar, o cerrar
+            la ficha. Ocho pastillas de una línea caben en dos, y las dos se ven
+            enteras. */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           {/* LAS TRES CHAPAS DE LO QUE LLEGA POR LA URL: de dónde vienen, desde
               cuándo, y si se está mirando una ficha suelta.
 
@@ -1158,10 +1165,21 @@ export default function LeadsPage({
                       <a href={`tel:${selected.telefono}`} className="text-foreground hover:underline">{selected.telefono}</a>
                     </div>
                   ) : null}
+                  {/* EL CORREO ENTERO, aunque ocupe dos renglones. Estaba con
+                      `truncate` y a este ancho se quedaba en
+                      "marta.piqueras@pruebas.grupohogares.loc…": no se podía
+                      leer ni copiar, que es justo para lo que se mira. Se parte
+                      por donde haga falta (`break-all`) y `select-all` lo
+                      selecciona entero de un clic. */}
                   {selected.email ? (
                     <div className="flex justify-between gap-2">
                       <span className="text-muted-foreground shrink-0">Email</span>
-                      <a href={`mailto:${selected.email}`} className="text-foreground hover:underline truncate">{selected.email}</a>
+                      <a
+                        href={`mailto:${selected.email}`}
+                        className="text-foreground hover:underline text-right break-all select-all"
+                      >
+                        {selected.email}
+                      </a>
                     </div>
                   ) : null}
                   {!selected.telefono && !selected.email && (
