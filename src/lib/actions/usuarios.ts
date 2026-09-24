@@ -101,6 +101,11 @@ export async function invitarUsuario(formData: FormData) {
   const nombre = formData.get("nombre") as string
   const apellidos = formData.get("apellidos") as string
   const rol = formData.get("rol") as string
+  // Con qué cuenta de Inmovilla se corresponde, elegida en el propio formulario
+  // de invitar. Vacío es "todavía no se sabe": se puede poner después desde su
+  // ficha, en Equipo.
+  const inmovilla = Number(formData.get("inmovilla_agente_id"))
+  const inmovillaId = Number.isInteger(inmovilla) && inmovilla > 0 ? inmovilla : null
 
   const supabase = await createAdminClient()
 
@@ -117,6 +122,7 @@ export async function invitarUsuario(formData: FormData) {
     apellidos,
     rol,
     permisos: PERMISOS_DEFAULT,
+    inmovilla_agente_id: inmovillaId,
   })
 
   revalidatePath("/equipo")

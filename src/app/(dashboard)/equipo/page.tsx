@@ -4,6 +4,8 @@ import { redirect } from "next/navigation"
 import { resolverPermisos } from "@/types/database"
 import { InvitarUsuarioDialog } from "./invitar-usuario-dialog"
 import { MemberCard } from "./member-card"
+import { getUsuariosInmovilla } from "@/lib/actions/inmovilla"
+import { SincronizarInmovilla } from "./sincronizar-inmovilla"
 
 export const metadata = { title: "Equipo — mkgenia" }
 
@@ -11,7 +13,7 @@ async function getEquipo() {
   const supabase = await createAdminClient()
 
   const [{ data: perfiles }, captaciones, leads] = await Promise.all([
-    supabase.from("perfiles").select("id, nombre, apellidos, rol, avatar_url, telefono, usuario, permisos, created_at").order("rol", { ascending: false }).order("nombre"),
+    supabase.from("perfiles").select("id, nombre, apellidos, rol, avatar_url, telefono, usuario, permisos, created_at, inmovilla_agente_id").order("rol", { ascending: false }).order("nombre"),
     // Paginadas: con 1.031 captaciones y 1.042 leads, una consulta suelta se
     // queda en 1.000 y las estadisticas por agente salen cortas sin avisar.
     traerTodo<{ agente_id: string | null; estado_agenda: string | null }>(() =>
@@ -43,6 +45,10 @@ export default async function EquipoPage() {
   if (perfil?.rol !== "Admin") redirect("/dashboard")
 
   const equipo = await getEquipo()
+  // La lista de cuentas de Inmovilla baja desde el servidor, una vez, y la
+  // comparten el formulario de invitar y las fichas: su API va de uno en uno y
+  // no tiene sentido llamarla cada vez que se abre un desplegable.
+  const usuariosInmovilla = await getUsuariosInmovilla()
   const admins  = equipo.filter((m) => m.rol === "Admin")
   const agentes = equipo.filter((m) => m.rol !== "Admin")
 
@@ -55,14 +61,17 @@ export default async function EquipoPage() {
             {admins.length} administrador{admins.length !== 1 ? "es" : ""} · {agentes.length} agente{agentes.length !== 1 ? "s" : ""}
           </p>
         </div>
-        <InvitarUsuarioDialog />
+        <div className="flex items-center gap-2">
+          <SincronizarInmovilla />
+          <InvitarUsuarioDialog usuariosInmovilla={usuariosInmovilla} />
+        </div>
       </div>
 
       {admins.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Administradores</h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {admins.map((m) => <MemberCard key={m.id} member={m as any} isSelf={m.id === user.id} />)}
+            {admins.map((m) => <MemberCard key={m.id} member={m as any} isSelf={m.id === user.id} usuariosInmovilla={usuariosInmovilla} />)}
           </div>
         </section>
       )}
@@ -71,7 +80,7 @@ export default async function EquipoPage() {
         <section className="space-y-3">
           <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Agentes</h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {agentes.map((m) => <MemberCard key={m.id} member={m as any} isSelf={m.id === user.id} />)}
+            {agentes.map((m) => <MemberCard key={m.id} member={m as any} isSelf={m.id === user.id} usuariosInmovilla={usuariosInmovilla} />)}
           </div>
         </section>
       )}

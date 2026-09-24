@@ -4,6 +4,8 @@ import { useState } from "react"
 import { Switch } from "@/components/ui/switch"
 import { CheckCircle, Clock, Building2, UserCircle, MoreHorizontal, Shield, Trash2, ChevronDown } from "lucide-react"
 import { actualizarPermisos, actualizarRol, eliminarUsuario } from "@/lib/actions/usuarios"
+import { asignarCuentaInmovilla, type UsuarioInmovilla } from "@/lib/actions/inmovilla"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { toast } from "sonner"
 import { MODULOS, type Permisos } from "@/types/database"
 import { cn } from "@/lib/utils"
@@ -21,7 +23,12 @@ interface Member {
   captaciones_pendientes: number
   captaciones_completadas: number
   leads_total: number
+  /** Con qué cuenta de Inmovilla se corresponde. Null = todavía sin enlazar. */
+  inmovilla_agente_id: number | null
 }
+
+/** Lo mismo que en el formulario de invitar: un Select no lleva "" de valor. */
+const SIN_CUENTA = "ninguna"
 
 function Stat({ icon: Icon, label, value, color }: {
   icon: React.ElementType; label: string; value: number; color: string
@@ -35,12 +42,47 @@ function Stat({ icon: Icon, label, value, color }: {
   )
 }
 
-export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean }) {
+export function MemberCard({ member, isSelf, usuariosInmovilla = [] }: {
+  member: Member
+  isSelf: boolean
+  usuariosInmovilla?: UsuarioInmovilla[]
+}) {
   const isAdmin = member.rol === "Admin"
   const [permisos, setPermisos] = useState<Permisos>(member.permisos)
   const [expanded, setExpanded] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [cuenta, setCuenta] = useState(
+    member.inmovilla_agente_id ? String(member.inmovilla_agente_id) : SIN_CUENTA,
+  )
+  const [guardandoCuenta, setGuardandoCuenta] = useState(false)
+
+  /** El nombre que se enseña en el desplegable cerrado. Base UI pinta el VALOR
+   *  si no se le dice otra cosa, y el valor aquí es un número. */
+  const etiquetaCuenta = (v: string) => {
+    if (v === SIN_CUENTA) return "Sin cuenta"
+    const u = usuariosInmovilla.find((x) => String(x.id) === v)
+    return u ? ([u.nombre, u.apellidos].filter(Boolean).join(" ") || u.usuario || `Código ${u.id}`) : v
+  }
+
+
+  /**
+   * Enlazar a esta persona con su cuenta de Inmovilla.
+   *
+   * Se pinta el cambio en el acto y se deshace si el servidor dice que no: el
+   * caso que dice que no es que esa cuenta ya sea de otro compañero, y ahí hay
+   * que volver a lo que había o la pantalla afirmaría algo que no es cierto.
+   */
+  async function cambiarCuenta(valor: string) {
+    const antes = cuenta
+    setCuenta(valor)
+    setGuardandoCuenta(true)
+    const res = await asignarCuentaInmovilla(member.id, valor === SIN_CUENTA ? null : Number(valor))
+      .catch(() => ({ error: "No se ha podido guardar" }))
+    setGuardandoCuenta(false)
+    if (res?.error) { setCuenta(antes); toast.error(res.error); return }
+    toast.success(valor === SIN_CUENTA ? "Sin cuenta de Inmovilla" : "Cuenta de Inmovilla enlazada")
+  }
 
   const initials = `${member.nombre.charAt(0)}${member.apellidos?.charAt(0) ?? ""}`.toUpperCase()
   const joined = new Date(member.created_at).toLocaleDateString("es-ES", { month: "short", year: "numeric" })
@@ -143,6 +185,35 @@ export function MemberCard({ member, isSelf }: { member: Member; isSelf: boolean
             <Stat icon={Clock}       label="Pendientes"             value={member.captaciones_pendientes} color="text-yellow-500" />
             <Stat icon={CheckCircle} label="Completadas"            value={member.captaciones_completadas} color="text-emerald-500" />
             <Stat icon={UserCircle}  label="Leads captados"         value={member.leads_total}            color="text-cyan-500" />
+          </div>
+        )}
+
+        {/* LA CUENTA DE INMOVILLA. Va para administradores también: el número
+            de agente lo tiene todo el que trabaja allí, y quien administra
+            aquí también capta. Sólo se pinta si hay cuentas que ofrecer. */}
+        {usuariosInmovilla.length > 0 && (
+          <div className="mx-5 mb-4 space-y-1.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Cuenta de Inmovilla
+            </p>
+            <Select value={cuenta} onValueChange={(v) => { if (v && v !== cuenta) void cambiarCuenta(v) }} disabled={guardandoCuenta}>
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue>{(v: string) => etiquetaCuenta(v)}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SIN_CUENTA}>Sin cuenta</SelectItem>
+                {usuariosInmovilla
+                  // Una cuenta desactivada en Inmovilla no se ofrece, pero si
+                  // es la que ya tiene puesta sí: quitarla de la lista dejaría
+                  // el desplegable enseñando un hueco.
+                  .filter((u) => !u.desactivado || u.id === member.inmovilla_agente_id)
+                  .map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>
+                      {[u.nombre, u.apellidos].filter(Boolean).join(" ") || u.usuario || `Código ${u.id}`}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
           </div>
         )}
 
