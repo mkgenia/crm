@@ -51,7 +51,7 @@ export default async function MensajesPage() {
         </p>
       </div>
 
-      <MensajesShell chatsPorInstancia={chatsPorInstancia} instancias={[...INSTANCIAS]} />
+      <MensajesShell chatsPorInstancia={chatsPorInstancia} instancias={[...INSTANCIAS]} isAdmin={isAdmin} />
     </div>
   )
 }

@@ -63,9 +63,16 @@ function ChatItem({ chat, active, onClick }: { chat: Chat; active: boolean; onCl
 interface Props {
   chatsPorInstancia: Record<string, Chat[]>
   instancias: typeof INSTANCIAS[number][]
+  /**
+   * Si quien mira es administrador. Lo resuelve el servidor y baja como prop:
+   * antes esta pantalla abría la ficha de la captación con `isAdmin={true}`
+   * fijo, así que un agente veía desde aquí los botones de repartir, borrar y
+   * promocionar que su propia pantalla de captaciones no le da.
+   */
+  isAdmin: boolean
 }
 
-export function MensajesShell({ chatsPorInstancia, instancias }: Props) {
+export function MensajesShell({ chatsPorInstancia, instancias, isAdmin }: Props) {
   const [activeInstance, setActiveInstance] = useState(instancias[0]?.id ?? "demo")
   const [localChats, setLocalChats] = useState(chatsPorInstancia)
   const [selected, setSelected] = useState<Chat | null>(null)
@@ -173,7 +180,7 @@ export function MensajesShell({ chatsPorInstancia, instancias }: Props) {
     <DetailPanel
       captacionId={openCaptacionId}
       onClose={() => setOpenCaptacionId(null)}
-      isAdmin={true}
+      isAdmin={isAdmin}
       hideWhatsApp
     />
   </>

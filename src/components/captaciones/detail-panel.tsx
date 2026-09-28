@@ -162,7 +162,16 @@ function fmtDia(ts: number) {
   return d.toLocaleDateString("es-ES", { day: "2-digit", month: "short" })
 }
 
-function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; catalogos: Catalogo[]; onUpdate: () => void }) {
+/**
+ * La conversación de WhatsApp de una captación.
+ *
+ * `soloLectura` es para los agentes: ven el hilo entero de SU captación —que es
+ * lo que necesitan antes de llamar— pero no escriben desde aquí. Enviar no es
+ * una acción inocente: sale por el número de la empresa, consume el cupo diario
+ * y un exceso de envíos ya costó un bloqueo de 24 h en septiembre. Quién puede
+ * escribir se decide arriba, no en este componente.
+ */
+function WhatsAppPanel({ captacion, catalogos, onUpdate, soloLectura = false }: { captacion: any; catalogos: Catalogo[]; onUpdate: () => void; soloLectura?: boolean }) {
   const [mensajes, setMensajes] = useState<Mensaje[]>([])
   const [cargando, setCargando] = useState(false)
   const [mensaje, setMensaje] = useState("")
@@ -170,6 +179,14 @@ function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; cat
   const [enviando, setEnviando] = useState(false)
   const [expandido, setExpandido] = useState(false)
   const [reintentando, setReintentando] = useState(false)
+  /**
+   * La última carga de la conversación falló.
+   *
+   * Hace falta para no mentir: sin esto, una lectura que no responde se pinta
+   * igual que un propietario con el que no se ha hablado nunca. Son dos cosas
+   * distintas y la segunda se cree.
+   */
+  const [fallo, setFallo] = useState(false)
   const chatRef = useRef<HTMLDivElement>(null)
 
   const tienePhone = hasPhone(captacion.telefono)
@@ -189,9 +206,11 @@ function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; cat
     const data = await getMensajesCaptacion(captacion.telefono).catch(() => null)
     setCargando(false)
     if (!data) {
+      setFallo(true)
       toast.error("No se pudo cargar la conversación")
       return
     }
+    setFallo(false)
     setMensajes(data)
     setTimeout(() => {
       if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight
@@ -300,7 +319,7 @@ function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; cat
             {nombreDe(catalogos, WA_CAT, estadoWA)}
           </span>
         )}
-        {puedeReintentar && (
+        {puedeReintentar && !soloLectura && (
           <button
             onClick={handleReintentar}
             disabled={reintentando}
@@ -329,7 +348,11 @@ function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; cat
         )}
       </div>
 
-      {!tienePhone && (
+      {!tienePhone && soloLectura && (
+        <p className="px-4 py-3 text-xs text-muted-foreground">Esta captación no tiene teléfono, así que no hay conversación.</p>
+      )}
+
+      {!tienePhone && !soloLectura && (
         <div className="p-4 space-y-3">
           {faseNoTel === "input" && (
             <>
@@ -429,8 +452,16 @@ function WhatsAppPanel({ captacion, catalogos, onUpdate }: { captacion: any; cat
             </div>
           )}
 
+          {!cargando && mensajes.length === 0 && soloLectura && (
+            <p className="px-4 py-3 text-xs text-muted-foreground">
+              {fallo
+                ? "No se ha podido cargar la conversación. Vuelve a intentarlo con el botón de actualizar."
+                : "Todavía no hay conversación con este propietario."}
+            </p>
+          )}
+
           {/* Sin mensajes: generar y enviar primer mensaje */}
-          {!cargando && mensajes.length === 0 && (
+          {!cargando && mensajes.length === 0 && !soloLectura && (
             <div className="p-4 space-y-3">
               {!expandido ? (
                 <button
@@ -1048,7 +1079,14 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                     onHecho={() => { void load(); onCambio?.() }}
                   />
 
-                  {isAdmin && !hideWhatsApp && (
+                  {/* LA CONVERSACIÓN LA VE TAMBIÉN EL AGENTE. Antes este bloque
+                      entero iba detrás de `isAdmin`, así que quien tenía la
+                      captación asignada abría su ficha y no veía nada de lo
+                      hablado con el propietario —que es justo lo que necesita
+                      antes de llamar—. Lo que sigue siendo sólo del
+                      administrador es ESCRIBIR: eso va dentro, con
+                      `soloLectura`. */}
+                  {!hideWhatsApp && (
                     // El `key` no es decorativo: el panel de detalle no se
                     // desmonta al pasar de una captación a otra, así que sin él
                     // este trozo se quedaba con el borrador, la conversación y
@@ -1059,7 +1097,7 @@ export function DetailPanel({ captacionId, onClose, isAdmin = true, hideWhatsApp
                     // Contactar cambia `estado_whatsapp`, que es una de las
                     // pastillas de la tarjeta de la lista: el padre también se
                     // tiene que enterar.
-                    <WhatsAppPanel key={data.id} captacion={data} catalogos={catalogos} onUpdate={() => { void load(); onCambio?.() }} />
+                    <WhatsAppPanel key={data.id} captacion={data} catalogos={catalogos} soloLectura={!isAdmin} onUpdate={() => { void load(); onCambio?.() }} />
                   )}
 
                   <LineaTiempo
