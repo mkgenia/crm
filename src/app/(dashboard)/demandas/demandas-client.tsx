@@ -5,7 +5,7 @@ import { Confirmar } from "@/components/shared/confirmar"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { createClient } from "@/lib/supabase/client"
 import { actualizarPropiedad, confirmarVisita, desactivarPropiedad, eliminarDemanda, eliminarPropiedad, getAgentesParaVisita } from "@/lib/actions/demandas"
-import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail } from "lucide-react"
+import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail, ExternalLink } from "lucide-react"
 import { toast } from "sonner"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
 import { traerTodo } from "@/lib/supabase/paginar"
@@ -1271,10 +1271,30 @@ export default function DemandasPage({
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
+                        {/* La etiqueta del portal abre el anuncio cuando se
+                            sabe cuál es. Va aquí y no en una línea aparte
+                            porque no añade texto a una tarjeta que ya va justa:
+                            el nombre del portal ya estaba, sólo se vuelve
+                            pulsable. Idealista es el único que manda el código
+                            del anuncio, así que en las demás se queda como
+                            estaba. */}
                         {d.fuente && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}>
-                            {d.fuente}
-                          </span>
+                          d.anuncio_url ? (
+                            <a
+                              href={d.anuncio_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={`Ver el anuncio en ${d.fuente}`}
+                              className={`text-[10px] px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 hover:brightness-125 transition-all ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}
+                            >
+                              {d.fuente}
+                              <ExternalLink className="h-2.5 w-2.5" />
+                            </a>
+                          ) : (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}>
+                              {d.fuente}
+                            </span>
+                          )
                         )}
                         <button
                           onClick={() => handleEliminarDemanda(d.id)}
