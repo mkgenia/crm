@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useCallback, useRef } from "react"
 import { Confirmar } from "@/components/shared/confirmar"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { createClient } from "@/lib/supabase/client"
-import { actualizarPropiedad, desactivarPropiedad, eliminarDemanda, eliminarPropiedad } from "@/lib/actions/demandas"
+import { actualizarPropiedad, confirmarVisita, desactivarPropiedad, eliminarDemanda, eliminarPropiedad, getAgentesParaVisita } from "@/lib/actions/demandas"
 import { Search, X, Building2, Pencil, Check, Loader2, Trash2, Phone, Mail } from "lucide-react"
 import { toast } from "sonner"
 import { Paginador, POR_PAGINA } from "@/components/shared/paginador"
@@ -87,6 +88,190 @@ function fmtPrecio(alq: number, venta: number) {
   if (alq > 0) return `${alq.toLocaleString("es-ES")} €/mes`
   if (venta > 0) return `${venta.toLocaleString("es-ES")} €`
   return null
+}
+
+/**
+ * Lo que el bot ha sacado en claro, para que lo lea una persona.
+ *
+ * Antes esto era un `Object.entries(datos_cualificacion)` que volcaba el JSON
+ * entero en pantalla: el agente se encontraba líneas como
+ * "Pregunta_pendiente_texto: ¿Te viene bien jueves 1 de octubre a las 17:00?" o
+ * "Veces_preguntado: [object Object]". Eso es la fontanería del bot —qué está
+ * esperando, cuántas veces lo ha preguntado—, y a quien tiene que llamar al
+ * cliente no le dice nada.
+ *
+ * Aquí sólo sale lo que cambia lo que el agente va a hacer:
+ *
+ *   · LA VISITA primero, porque es lo único con fecha y hora. Si alguien ha
+ *     aceptado un hueco, eso manda sobre todo lo demás.
+ *   · El veredicto en una línea. `bot_motivo` ya viene escrito para leerse
+ *     ("Cumple: declara llegar a 4.755 € al mes"), así que se enseña tal cual
+ *     en vez de recomponerlo aquí y arriesgarse a que las dos versiones digan
+ *     cosas distintas.
+ *   · Los dos datos sueltos que el agente usa al llamar: si es autónomo (habrá
+ *     que pedirle más papeles) y si acepta el personal shopper.
+ *   · Y lo último que le dijo el bot, en gris, para saber por dónde va la
+ *     conversación sin abrir WhatsApp.
+ */
+/**
+ * Lo que el bot ha sacado en claro, para que lo lea una persona.
+ *
+ * Antes esto era un `Object.entries(datos_cualificacion)` que volcaba el JSON
+ * entero: el agente se encontraba líneas como "Pregunta_pendiente_texto" o
+ * "Veces_preguntado: [object Object]". Eso es la fontanería del bot —qué está
+ * esperando y cuántas veces lo ha preguntado—, y a quien tiene que llamar al
+ * cliente no le dice nada.
+ *
+ * Ahora manda LA VISITA, porque es lo único con fecha y hora. El día va en un
+ * bloque de calendario a la izquierda: en una lista de veinte demandas, las que
+ * tienen visita se reconocen sin leer.
+ *
+ * Y lleva el paso que faltaba. El bot deja la visita en "aceptada" y ahí se
+ * para a propósito —ocupar el calendario de alguien que no lo ha visto es la
+ * forma más rápida de que nadie se fíe del calendario—, así que la confirmación
+ * y el agente los pone una persona. Desde aquí.
+ */
+function ResumenDelBot({ demanda, onConfirmada }: { demanda: Demanda; onConfirmada: () => void }) {
+  const [agentes, setAgentes] = useState<{ id: string; nombre: string }[]>([])
+  const [agenteId, setAgenteId] = useState("")
+  const [guardando, setGuardando] = useState(false)
+
+  const c = (demanda.datos_cualificacion ?? {}) as Record<string, unknown>
+  const semaforo = typeof c.semaforo === "string" ? c.semaforo : null
+  const fallos = Array.isArray(c.requisitos_fallidos) ? (c.requisitos_fallidos as string[]) : []
+  const laboral = typeof c.situacion_laboral === "string" ? c.situacion_laboral : null
+  const shopper = typeof c.acepta_personal_shopper === "boolean" ? c.acepta_personal_shopper : null
+  const ultima = typeof c.ultima_respuesta === "string" ? c.ultima_respuesta : null
+  const urgente = c.visita_urgente === true
+  const pidioPersona = c.pidio_persona === true
+
+  const visita = demanda.visita_estado
+  const porConfirmar = visita === "aceptada"
+  const cita = demanda.visita_propuesta_en ? new Date(demanda.visita_propuesta_en) : null
+
+  // La lista de agentes sólo se pide cuando hay una visita que confirmar: en una
+  // pantalla con veinte tarjetas, pedirla en todas son veinte consultas para
+  // nada.
+  useEffect(() => {
+    if (!porConfirmar || agentes.length) return
+    getAgentesParaVisita().then(setAgentes).catch(() => setAgentes([]))
+  }, [porConfirmar, agentes.length])
+
+  async function confirmar() {
+    setGuardando(true)
+    const r = await confirmarVisita(demanda.id, agenteId)
+    setGuardando(false)
+    if (r?.error) { toast.error(r.error); return }
+    toast.success("Visita confirmada y puesta en la agenda")
+    onConfirmada()
+  }
+
+  const hayAlgo = visita || demanda.bot_motivo || laboral || shopper !== null || ultima
+  if (!hayAlgo) return null
+
+  const alerta = semaforo === "ambar" || urgente || pidioPersona || fallos.length > 0
+  const bien = semaforo === "verde" || visita === "aceptada" || visita === "confirmada"
+
+  const V: Record<string, { texto: string; tono: string }> = {
+    aceptada:   { texto: "Visita aceptada",   tono: "text-emerald-500" },
+    confirmada: { texto: "Visita confirmada", tono: "text-emerald-500" },
+    propuesta:  { texto: "Visita propuesta",  tono: "text-cyan-500" },
+    otra_fecha: { texto: "Quiere otra fecha", tono: "text-amber-500" },
+    rechazada:  { texto: "No quiere visita",  tono: "text-muted-foreground" },
+  }
+  const v = visita ? V[visita] : null
+
+  return (
+    <div className={cn(
+      "text-[10px] rounded border p-2 flex flex-col gap-2",
+      alerta ? "border-amber-500/25 bg-amber-500/5"
+        : bien ? "border-emerald-500/25 bg-emerald-500/5"
+          : "border-border bg-muted/40",
+    )}>
+      {v && (
+        <div className="flex items-stretch gap-2">
+          {cita && visita !== "otra_fecha" && (
+            <div className={cn(
+              "rounded px-2 py-1 text-center leading-tight shrink-0 min-w-[40px] flex flex-col justify-center",
+              visita === "rechazada" ? "bg-muted" : "bg-emerald-500/10",
+            )}>
+              <div className={cn("text-[9px]", visita === "rechazada" ? "text-muted-foreground" : "text-emerald-600")}>
+                {cita.toLocaleDateString("es-ES", { weekday: "short", timeZone: "Europe/Madrid" })}
+              </div>
+              <div className={cn("text-base font-medium", visita === "rechazada" ? "text-muted-foreground" : "text-emerald-500")}>
+                {cita.toLocaleDateString("es-ES", { day: "numeric", timeZone: "Europe/Madrid" })}
+              </div>
+              <div className={cn("text-[9px]", visita === "rechazada" ? "text-muted-foreground" : "text-emerald-600")}>
+                {cita.toLocaleDateString("es-ES", { month: "short", timeZone: "Europe/Madrid" }).replace(".", "")}
+              </div>
+            </div>
+          )}
+          <div className="flex flex-col justify-center gap-0.5 min-w-0 flex-1">
+            <p className={cn("font-medium text-[11px]", v.tono)}>
+              {v.texto}
+              {cita && visita !== "otra_fecha" && (
+                <span className="text-foreground"> · {cita.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" })}</span>
+              )}
+            </p>
+            {porConfirmar && <p className="text-muted-foreground">Falta confirmarla y asignar agente</p>}
+            {visita === "confirmada" && <p className="text-muted-foreground">En la agenda del equipo</p>}
+            {demanda.visita_nota && <p className="text-muted-foreground">&ldquo;{demanda.visita_nota}&rdquo;</p>}
+          </div>
+        </div>
+      )}
+
+      {porConfirmar && (
+        <div className="flex items-center gap-1.5">
+          {/* El mismo Select que el resto del CRM, no el del navegador: aquél
+              se pinta con el estilo del sistema operativo y en oscuro canta.
+              `SelectValue` con función es obligatorio — sin ella imprime el
+              identificador del agente en vez de su nombre. */}
+          <Select value={agenteId} onValueChange={(v) => { if (v) setAgenteId(v) }}>
+            <SelectTrigger size="sm" className="flex-1 min-w-0 h-7 text-[10px] px-2">
+              <SelectValue placeholder="Elegir agente…">
+                {(v: string) => agentes.find((a) => a.id === v)?.nombre ?? "Elegir agente…"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {agentes.map((a) => (
+                <SelectItem key={a.id} value={a.id} className="text-xs">{a.nombre}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <button
+            onClick={confirmar}
+            disabled={!agenteId || guardando}
+            className="flex items-center gap-1 h-7 px-2.5 rounded-md text-[10px] font-medium text-emerald-500 border border-emerald-500/30 hover:bg-emerald-500/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors shrink-0"
+          >
+            {guardando ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Check className="h-2.5 w-2.5" />}
+            Confirmar
+          </button>
+        </div>
+      )}
+
+      {urgente && <p className="font-medium text-amber-500">Lo quiere ver cuanto antes</p>}
+      {pidioPersona && <p className="font-medium text-amber-500">Ha pedido hablar con una persona</p>}
+
+      {demanda.bot_motivo && !v && (
+        <p className={cn("font-medium", semaforo === "ambar" ? "text-amber-500" : "text-emerald-500")}>
+          {demanda.bot_motivo}
+        </p>
+      )}
+
+      {(laboral || shopper !== null) && (
+        <div className="flex items-center gap-2 flex-wrap text-muted-foreground">
+          {laboral && <span>{laboral === "autonomo" ? "Autónomo" : laboral === "empleado" ? "Por cuenta ajena" : laboral}</span>}
+          {shopper !== null && <span>Personal shopper: {shopper ? "sí" : "no"}</span>}
+        </div>
+      )}
+
+      {ultima && (
+        <p className="text-muted-foreground/70 italic line-clamp-2">
+          El bot: &ldquo;{ultima.replace(/\s*\n+\s*/g, " ")}&rdquo;
+        </p>
+      )}
+    </div>
+  )
 }
 
 export default function DemandasPage({
@@ -555,6 +740,11 @@ export default function DemandasPage({
     setSelected(p)
     setEditando(false)
     fetchDemandas(p.id, desde).catch(() => {})
+  }
+
+  /** Vuelve a pedir las demandas de la ficha abierta. */
+  function recargarFicha() {
+    if (selected) fetchDemandas(selected.id, desde).catch(() => {})
   }
 
   /** "Y enséñamelas todas, no sólo las de ese periodo." */
@@ -1124,16 +1314,7 @@ export default function DemandasPage({
                     )}
 
                     {/* Datos cualificación del bot */}
-                    {d.datos_cualificacion && Object.keys(d.datos_cualificacion).length > 0 && (
-                      <div className="text-[10px] bg-emerald-500/5 border border-emerald-500/20 rounded p-2 flex flex-col gap-0.5">
-                        {Object.entries(d.datos_cualificacion).map(([k, v]) => (
-                          <div key={k} className="flex gap-1">
-                            <span className="text-emerald-600 capitalize font-medium">{k}:</span>
-                            <span className="text-foreground">{String(v)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <ResumenDelBot demanda={d} onConfirmada={recargarFicha} />
 
                     {/* Notas */}
                     {editingDemandId === d.id ? (

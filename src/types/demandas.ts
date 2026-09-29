@@ -87,4 +87,21 @@ export interface Demanda {
   datos_cualificacion: Record<string, unknown> | null
   visto: boolean
   fecha_creacion: string
+
+  /**
+   * El rastro del bot de demandas.
+   *
+   * `bot_motivo` está escrito para que lo lea una persona —"Cumple: declara
+   * llegar a 4.755 € al mes", "Acepta la visita propuesta"—, así que la ficha
+   * lo enseña tal cual en vez de recomponer la frase por su cuenta.
+   *
+   * El resto de `datos_cualificacion` es fontanería del bot (qué pregunta está
+   * pendiente, cuántas veces la ha hecho) y NO se pinta: llenaba la tarjeta de
+   * líneas como "Pregunta_pendiente_texto" que a un agente no le dicen nada.
+   */
+  bot_estado?: string | null
+  bot_motivo?: string | null
+  visita_estado?: string | null
+  visita_propuesta_en?: string | null
+  visita_nota?: string | null
 }
