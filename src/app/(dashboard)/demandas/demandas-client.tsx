@@ -1103,7 +1103,22 @@ export default function DemandasPage({
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
             <div className="min-w-0">
-              <p className="text-xs font-mono text-muted-foreground">Ref. {selected.ref}</p>
+              {/* La referencia abre la ficha de la propiedad en la web, que es
+                  la misma página que el bot manda al cliente cuando pide fotos
+                  o la dirección. Así el agente ve exactamente lo que ha visto
+                  quien le escribe. No hace falta guardar ninguna dirección: se
+                  arma con la referencia, que la tenemos siempre y no depende de
+                  qué portal mandó la demanda. */}
+              <a
+                href={`https://grupohogares.es/detalle-propiedad/?ref=${encodeURIComponent(selected.ref)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Ver la ficha de la propiedad en la web"
+                className="text-xs font-mono text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
+              >
+                Ref. {selected.ref}
+                <ExternalLink className="h-2.5 w-2.5" />
+              </a>
               <p className="text-sm font-semibold text-foreground truncate">
                 {[selected.tipo, selected.accion].filter(Boolean).join(" · ") || "Propiedad"}
               </p>
@@ -1271,30 +1286,16 @@ export default function DemandasPage({
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {/* La etiqueta del portal abre el anuncio cuando se
-                            sabe cuál es. Va aquí y no en una línea aparte
-                            porque no añade texto a una tarjeta que ya va justa:
-                            el nombre del portal ya estaba, sólo se vuelve
-                            pulsable. Idealista es el único que manda el código
-                            del anuncio, así que en las demás se queda como
-                            estaba. */}
+                        {/* La etiqueta del portal dice de dónde vino la demanda y
+                            nada más. Llevó un rato al anuncio del portal, pero
+                            el enlace útil es el de nuestra propia ficha, y ése
+                            es el mismo para todas las demandas de la propiedad:
+                            está una vez arriba, en la referencia, en vez de
+                            repetido en cada tarjeta. */}
                         {d.fuente && (
-                          d.anuncio_url ? (
-                            <a
-                              href={d.anuncio_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              title={`Ver el anuncio en ${d.fuente}`}
-                              className={`text-[10px] px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 hover:brightness-125 transition-all ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}
-                            >
-                              {d.fuente}
-                              <ExternalLink className="h-2.5 w-2.5" />
-                            </a>
-                          ) : (
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}>
-                              {d.fuente}
-                            </span>
-                          )
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${FUENTE_CFG[d.fuente] ?? "bg-muted text-muted-foreground border-border"}`}>
+                            {d.fuente}
+                          </span>
                         )}
                         <button
                           onClick={() => handleEliminarDemanda(d.id)}

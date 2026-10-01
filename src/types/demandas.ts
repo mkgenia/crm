@@ -101,14 +101,6 @@ export interface Demanda {
    */
   bot_estado?: string | null
   bot_motivo?: string | null
-  /**
-   * El anuncio del portal del que sale la demanda.
-   *
-   * Sólo Idealista manda el código del anuncio en el correo, así que en las de
-   * Fotocasa y Pisos.com viene vacío. La ficha lo trata como lo que es: un
-   * extra que puede no estar, no un dato que falta.
-   */
-  anuncio_url?: string | null
   visita_estado?: string | null
   visita_propuesta_en?: string | null
   visita_nota?: string | null
