@@ -178,13 +178,42 @@ export async function getMensajesCaptacion(telefono: string): Promise<Mensaje[]>
   return getMensajes(jid, "demo")
 }
 
+/**
+ * Los teléfonos con los que este agente tiene algo abierto: sus captaciones y
+ * sus demandas.
+ *
+ * Esta pantalla carga las DOS instancias de WhatsApp —la de captaciones y la de
+ * demandas— pero aquí sólo se miraban las captaciones, así que a un agente la
+ * pestaña de Demandas le salía vacía aunque tuviera cuarenta conversaciones
+ * suyas. Cristina tenía 43 demandas y 33 con conversación, y no veía ninguna.
+ *
+ * Se devuelven los teléfonos de las dos tablas juntos: el filtro de
+ * `getConversaciones` compara por los últimos nueve dígitos, así que da igual
+ * que vengan con prefijo o sin él, y una conversación que no exista en esa
+ * instancia simplemente no aparece.
+ */
 export async function getTelefonosAgente(agenteId: string): Promise<string[]> {
   const supabase = await createAdminClient()
-  const { data } = await supabase
-    .from("captaciones")
-    .select("telefono")
-    .eq("agente_id", agenteId)
-    .eq("activo", true)
-    .not("telefono", "is", null)
-  return (data ?? []).map((r) => r.telefono as string)
+
+  const [captaciones, demandas] = await Promise.all([
+    supabase
+      .from("captaciones")
+      .select("telefono")
+      .eq("agente_id", agenteId)
+      .eq("activo", true)
+      .not("telefono", "is", null),
+    supabase
+      .from("demandas")
+      .select("telefono")
+      .eq("agente_id", agenteId)
+      .not("telefono", "is", null),
+  ])
+
+  const telefonos = [
+    ...(captaciones.data ?? []).map((r) => r.telefono as string),
+    ...(demandas.data ?? []).map((r) => r.telefono as string),
+  ]
+
+  // Sin repetidos: la misma persona puede ser captación y demanda.
+  return [...new Set(telefonos.filter(Boolean))]
 }
