@@ -16,6 +16,44 @@ export async function actualizarDemanda(id: string, data: {
   return { success: true }
 }
 
+/**
+ * La demanda abierta de este teléfono, para la pantalla de Mensajes.
+ *
+ * Una misma persona puede haber preguntado por varios pisos, así que se coge la
+ * más reciente: es la que corresponde a la conversación que el agente tiene
+ * delante. El teléfono llega de WhatsApp sin el `+` y a veces sin prefijo, y en
+ * la tabla está en formato internacional, así que se busca por los últimos nueve
+ * dígitos, que es lo único estable entre los dos.
+ */
+export async function getDemandaPorTelefono(telefono: string) {
+  const digitos = (telefono ?? "").replace(/\D/g, "")
+  if (digitos.length < 9) return null
+
+  const supabase = await createAdminClient()
+  const { data } = await supabase
+    .from("demandas")
+    .select("id, nombre, telefono, estado, bot_estado, bot_motivo, visita_nota, propiedades_demanda(ref, tipo, accion)")
+    .like("telefono", `%${digitos.slice(-9)}`)
+    .order("fecha_creacion", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!data) return null
+  const p = (Array.isArray(data.propiedades_demanda) ? data.propiedades_demanda[0] : data.propiedades_demanda) as
+    | { ref?: string; tipo?: string; accion?: string } | null
+
+  return {
+    id: data.id as string,
+    nombre: (data.nombre as string | null) ?? null,
+    estado: (data.estado as string | null) ?? null,
+    botMotivo: (data.bot_motivo as string | null) ?? null,
+    visitaNota: (data.visita_nota as string | null) ?? null,
+    ref: p?.ref ?? null,
+    tipo: p?.tipo ?? null,
+    accion: p?.accion ?? null,
+  }
+}
+
 export async function eliminarDemanda(id: string) {
   const supabase = await createAdminClient()
   const { error } = await supabase.from("demandas").delete().eq("id", id)

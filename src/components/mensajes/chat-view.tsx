@@ -3,6 +3,10 @@
 import { useState, useEffect, useRef, useTransition } from "react"
 import { getMensajes, enviarMensaje, type Chat, type Mensaje } from "@/lib/actions/mensajes"
 import { getLeadByPhone } from "@/lib/actions/leads"
+import { getDemandaPorTelefono, actualizarDemanda } from "@/lib/actions/demandas"
+import { getCatalogosActivos } from "@/lib/actions/catalogos"
+import { claseColor, opcionesDe, type Catalogo } from "@/lib/catalogos"
+import { ESTADOS_DEMANDA_FALLBACK } from "@/types/demandas"
 import { Send, Loader2, Phone, RefreshCw, ExternalLink, Copy } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -101,7 +105,29 @@ export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }:
   const [texto, setTexto] = useState("")
   const [sending, startSending] = useTransition()
   const [lead, setLead] = useState<Awaited<ReturnType<typeof getLeadByPhone>>>(null)
+  const [demanda, setDemanda] = useState<Awaited<ReturnType<typeof getDemandaPorTelefono>>>(null)
+  const [catalogos, setCatalogos] = useState<Catalogo[]>([])
+  const [cambiandoEstado, setCambiandoEstado] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  /** Los estados vienen del catálogo; si todavía no ha llegado, los de siempre. */
+  const ESTADOS = opcionesDe(catalogos, "estado_demanda").length
+    ? opcionesDe(catalogos, "estado_demanda")
+    : ESTADOS_DEMANDA_FALLBACK
+
+  async function handleEstadoDemanda(valor: string) {
+    if (!demanda || cambiandoEstado || demanda.estado === valor) return
+    setCambiandoEstado(true)
+    const res = await actualizarDemanda(demanda.id, { estado: valor })
+      .catch(() => ({ error: "No se pudo cambiar el estado" }))
+    setCambiandoEstado(false)
+    if ("error" in res && res.error) {
+      toast.error(res.error)
+      return
+    }
+    setDemanda((d) => (d ? { ...d, estado: valor } : d))
+    toast.success(`Marcada como ${valor}`)
+  }
 
   async function cargarMensajes() {
     setLoadingMsgs(true)
@@ -119,7 +145,12 @@ export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }:
     cargarMensajes()
     const phone = chat.remoteJid.split("@")[0]
     getLeadByPhone(phone).then(setLead).catch(() => setLead(null))
+    getDemandaPorTelefono(phone).then(setDemanda).catch(() => setDemanda(null))
   }, [chat.remoteJid])
+
+  useEffect(() => {
+    getCatalogosActivos().then(setCatalogos).catch(() => setCatalogos([]))
+  }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -172,6 +203,64 @@ export function ChatView({ chat, captacion, onVerCaptacion, instance = "demo" }:
       </div>
 
       {/* Banner captación */}
+      {/* LA DEMANDA, cuando esta conversación es de una.
+          Misma forma que la banda de captación de debajo, para que la pantalla
+          no tenga dos lenguajes. Lo único que se puede tocar aquí es el estado:
+          el agente habla y lo marca sin salir del chat. */}
+      {demanda && (
+        <div className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 bg-violet-500/8 border-b border-violet-500/20">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-foreground truncate">
+              {demanda.nombre ?? "Demanda"}
+              {demanda.ref ? ` · ref. ${demanda.ref}` : ""}
+            </p>
+            <p className="text-[11px] text-muted-foreground truncate">
+              {[
+                demanda.tipo && demanda.accion
+                  ? `${demanda.tipo} · ${/vender|venta/i.test(demanda.accion) ? "en venta" : "en alquiler"}`
+                  : null,
+                demanda.visitaNota ?? demanda.botMotivo,
+              ].filter(Boolean).join(" · ")}
+            </p>
+          </div>
+
+          {demanda.ref && (
+            <a
+              href={`https://grupohogares.es/ficha-propiedad/${encodeURIComponent(demanda.ref)}/?visita=no`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Ver la ficha de la propiedad"
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1 shrink-0"
+            >
+              Ficha
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+
+          <div className="flex items-center gap-1.5 shrink-0" role="group" aria-label="Estado de la demanda">
+            {ESTADOS.map((e) => {
+              const puesto = demanda.estado === e.valor
+              return (
+                <button
+                  key={e.valor}
+                  onClick={() => handleEstadoDemanda(e.valor)}
+                  disabled={cambiandoEstado}
+                  aria-pressed={puesto}
+                  className={cn(
+                    "text-[10px] px-2 py-0.5 rounded border font-medium transition-all disabled:opacity-50",
+                    puesto
+                      ? claseColor(e.color)
+                      : "border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground"
+                  )}
+                >
+                  {e.nombre}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {captacion && (
         <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-amber-500/8 border-b border-amber-500/20">
           {captacion.imagen_url && (
